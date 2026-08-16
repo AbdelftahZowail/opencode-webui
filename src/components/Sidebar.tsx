@@ -11,7 +11,7 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { loadMoreSessions, newSession, refreshSessions, selectSession, sessionHref, useStore } from "../store";
+import { NEW_SESSION_HREF, loadMoreSessions, newSession, refreshSessions, selectSession, sessionHref, useStore } from "../store";
 import { api } from "../api/client";
 import type { SessionInfo } from "../api/types";
 import { SlotOutlet } from "../extensions/registry";
@@ -162,9 +162,7 @@ export function Sidebar() {
         </div>
         {sidebarCollapsed ? (
           <>
-            <Button variant="default" size="icon" disabled={busy} onClick={() => void createSession()} title="New session">
-              <Plus />
-            </Button>
+            <NewSessionLink collapsed busy={busy} onCreate={createSession} />
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Expand sidebar">
               <PanelLeftOpen />
             </Button>
@@ -174,10 +172,7 @@ export function Sidebar() {
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
             </Button>
-            <Button variant="default" size="sm" disabled={busy} onClick={() => void createSession()}>
-              <Plus />
-              <span className="truncate">New session</span>
-            </Button>
+            <NewSessionLink busy={busy} onCreate={createSession} />
           </div>
         )}
       </div>
@@ -329,6 +324,34 @@ export function Sidebar() {
 }
 
 type SessionGroup = { name: string; list: SessionInfo[] };
+
+function NewSessionLink({
+  collapsed = false,
+  busy,
+  onCreate,
+}: {
+  collapsed?: boolean;
+  busy: boolean;
+  onCreate: () => void | Promise<void>;
+}) {
+  return (
+    <Button asChild variant="default" size={collapsed ? "icon" : "sm"} disabled={busy}>
+      <a
+        href={NEW_SESSION_HREF}
+        aria-label="New session"
+        title={collapsed ? "New session" : undefined}
+        onClick={(event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          if (!busy) void onCreate();
+        }}
+      >
+        <Plus />
+        {!collapsed && <span className="truncate">New session</span>}
+      </a>
+    </Button>
+  );
+}
 
 function CollapsedSidebar({
   groups,

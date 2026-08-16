@@ -212,6 +212,9 @@ Feedback placeholder — paste below in the new session:
       and resets the expanded list when reopened. Added a 56px useful icon rail
       collapse mode plus a pointer-drag resizer bounded to 240px-480px with
       double-click reset; spacing and group separators were also clarified.
+- [x] The new-session controls are native `/new-session` links: normal clicks
+      still create in-place, while middle/Cmd/Ctrl-click opens a new tab that
+      creates the session and redirects to its canonical `/session/{id}` URL.
 - [x] "New session" creates AND focuses the new session (was already wired;
       also pins default model now).
 - [x] Model selector reflects the real default agent/model (see DONE notes).

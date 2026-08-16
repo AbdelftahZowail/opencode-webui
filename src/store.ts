@@ -133,6 +133,8 @@ export function getState(): State {
   return state;
 }
 
+export const NEW_SESSION_HREF = "/new-session";
+
 export function sessionHref(sessionID: string): string {
   return `/session/${encodeURIComponent(sessionID)}`;
 }
@@ -150,11 +152,15 @@ function sessionIDFromLocation(): string | null {
   }
 }
 
-function updateSessionHistory(sessionID: string | null) {
+function isNewSessionRoute(): boolean {
+  return typeof window !== "undefined" && window.location.pathname === NEW_SESSION_HREF;
+}
+
+function updateSessionHistory(sessionID: string | null, mode: "push" | "replace") {
   if (typeof window === "undefined") return;
   const next = sessionID ? sessionHref(sessionID) : "/";
   if (window.location.pathname === next && !window.location.search && !window.location.hash) return;
-  window.history.pushState({}, "", next);
+  window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", next);
 }
 
 // ---- refresh helpers ----------------------------------------------------
@@ -670,11 +676,18 @@ export function startStore() {
   started = true;
   log("boot", "start");
   if (typeof window !== "undefined") {
-    window.addEventListener("popstate", () => {
-      void selectSession(sessionIDFromLocation(), { history: "none" });
-    });
-    const initialSessionID = sessionIDFromLocation();
-    if (initialSessionID) void selectSession(initialSessionID, { history: "none" });
+    const syncLocation = () => {
+      const sessionID = sessionIDFromLocation();
+      if (sessionID) {
+        void selectSession(sessionID, { history: "none" });
+      } else if (isNewSessionRoute()) {
+        void newSession({ history: "replace" });
+      } else {
+        void selectSession(null, { history: "none" });
+      }
+    };
+    window.addEventListener("popstate", syncLocation);
+    syncLocation();
   }
   void refreshSessions();
   void refreshQueues();
@@ -763,10 +776,10 @@ async function pollOnce() {
 
 export async function selectSession(
   sessionID: string | null,
-  options: { history?: "push" | "none" } = {},
+  options: { history?: "push" | "replace" | "none" } = {},
 ) {
   log("session", "select", sessionID ?? "null");
-  if (options.history !== "none") updateSessionHistory(sessionID);
+  if (options.history !== "none") updateSessionHistory(sessionID, options.history ?? "push");
   setState({
     currentSessionID: sessionID,
     live: [],
@@ -901,7 +914,7 @@ export async function rejectQuestion(requestID: string) {
   }
 }
 
-export async function newSession() {
+export async function newSession(options: { history?: "push" | "replace" } = {}) {
   log("session", "newSession create");
   const res = await api.createSession({ title: null, agent: null, model: null, location: null });
   const sid = res.data.id;
@@ -916,7 +929,7 @@ export async function newSession() {
   }
   await refreshSessions();
   await loadSessionDetail(sid);
-  await selectSession(sid);
+  await selectSession(sid, { history: options.history ?? "push" });
   return sid;
 }
 
