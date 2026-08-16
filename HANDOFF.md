@@ -249,11 +249,11 @@ likely skip or fold into settings).
       through proxy `:4098`; stopped only the temporary preview process tree.
 
 ### 8. HOUSEKEEPING
-- [ ] Delete leftover test session prefix `ses_ff9ee78e` (full id
-      `ses_ff9ee78e5ffeu8kkUgrMyIaG1m`) from the session list. The record is
-      still present under the documented playground, but the service DELETE
-      endpoint currently returns an empty `500`; retry after the service-side
-      failure is resolved.
+- [x] Deleted leftover test session prefix `ses_ff9ee78e` (full id
+      `ses_ff9ee78e5ffeu8kkUgrMyIaG1m`) from the session list after the service
+      restart. The API returned `204`; the record is absent from the live API
+      and the fresh browser session list. Removed the temporary empty
+      `playground/` directory used to satisfy the stale location.
 - [ ] Reference material lives in /tmp (see below) — copy what's worth keeping
       into the repo or leave as-is; nothing is critical to ship.
 - [ ] AGENTS.md roadmap table is current (✅ all done except nothing pending).
