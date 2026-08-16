@@ -222,9 +222,9 @@ Feedback placeholder — paste below in the new session:
       multi-step rendering above.
 
 ### 3. GIT — first commit (repo has ZERO commits, everything untracked)
-- [ ] `git init` if needed, sensible `.gitignore` (node_modules, dist, .DS_Store…),
-      commit the whole working tree. The user has wanted this since the start.
-- [ ] Decide: `bun.lock` in, `.vite` cache out. Check for stray junk first.
+- [x] Repository initialized with a sensible `.gitignore` and the whole working
+      tree committed in `4482fad` (`Initial OpenCode web UI`).
+- [x] `bun.lock` is included; generated `dist/` and `.vite` cache remain ignored.
 
 ### 4. PRODUCTION SMOKE TEST
 - [x] `bun run build` + production server smoke-tested on isolated proxy `:4099`:
