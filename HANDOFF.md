@@ -195,12 +195,9 @@ matches the shell running the command and kills it too (gotcha #4 below).
       Verified in browser: prompt renders, `echo` round-trips, Ctrl+C works.
 
 ### 2. USER FEEDBACK — POLISHING PASS
-**The user will supply a list of polish items. Turn each into a task; keep
-tokens/slots/dependency rules; verify with typecheck + build + browser.**
-Feedback placeholder — paste below in the new session:
-```
-- (user feedback items go here)
-```
+**User feedback is captured below. Each item is implemented against the existing
+token/slot/dependency rules and verified with typecheck, build, and browser
+checks where applicable.**
 **Last round (2026-08-16) — status:**
 - [x] Sidebar: workspace grouping with the three latest sessions per group +
       "Show N more…" + "Load more sessions" pagination. Session rows are
@@ -215,6 +212,9 @@ Feedback placeholder — paste below in the new session:
 - [x] The new-session controls are native `/new-session` links: normal clicks
       still create in-place, while middle/Cmd/Ctrl-click opens a new tab that
       creates the session and redirects to its canonical `/session/{id}` URL.
+- [x] Removed the session-count labels from the bottom of the sidebar and the
+      window-level runtime-status footer; the footer retains connection and
+      active-run status without the redundant total.
 - [x] "New session" creates AND focuses the new session (was already wired;
       also pins default model now).
 - [x] Model selector reflects the real default agent/model (see DONE notes).
@@ -230,7 +230,7 @@ Feedback placeholder — paste below in the new session:
       second-message streaming, scroll behavior, and the multi-step rendering
       above.
 
-### 3. GIT — first commit (repo has ZERO commits, everything untracked)
+### 3. GIT — repository history and verification
 - [x] Repository initialized with a sensible `.gitignore` and the whole working
       tree committed in `4482fad` (`Initial OpenCode web UI`).
 - [x] `bun.lock` is included; generated `dist/` and `.vite` cache remain ignored.
@@ -265,7 +265,8 @@ likely skip or fold into settings).
       `playground/` directory used to satisfy the stale location.
 - [ ] Reference material lives in /tmp (see below) — copy what's worth keeping
       into the repo or leave as-is; nothing is critical to ship.
-- [ ] AGENTS.md roadmap table is current (✅ all done except nothing pending).
+- [x] AGENTS.md roadmap table and current frontend behavior notes are up to
+      date; the roadmap has no pending API surface entries.
 
 ## Known issues & gotchas (read before touching things)
 
@@ -315,7 +316,7 @@ src/components/ui/                 shadcn primitives + command + message-scrolle
 src/components/Conversation.tsx    header + MessageScroller transcript
 src/components/Composer.tsx        slash menu + @ refs + ! bash
 src/components/ToolCard.tsx        tool cards (extension hook: getToolRenderer)
-src/components/Sidebar.tsx         session rail grouped by workspace + Files/Shell/Settings/Inbox
+src/components/Sidebar.tsx         grouped session rail + workspace collapse + resize/icon rail + Files/Shell/Settings/Inbox
 src/components/Pickers.tsx         agent/model pickers (authoritative session detail)
 src/components/ShellPanel.tsx      shell mgmt + terminals (TerminalView)
 src/components/TerminalView.tsx    xterm terminal emulator

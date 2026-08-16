@@ -65,6 +65,18 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   `POST .../model` so what the picker shows is what executes. The pickers
   read the authoritative `GET /api/session/{id}` from the `sessionDetails`
   store slice.
+- **Session navigation**: session rows are native `/session/{id}` anchors.
+  Unmodified left-clicks switch sessions in place through `pushState`; browser
+  back/forward uses `popstate`, and direct session URLs load the conversation.
+  Modified clicks and middle-clicks remain native browser actions. The New
+  session control is a native `/new-session` anchor; its route creates a session
+  and replaces itself with the new session's canonical URL, so opening it in a
+  new tab creates the session in that tab.
+- **Sidebar behavior**: workspaces are grouped by directory and show the three
+  newest sessions by default. Each workspace header independently collapses all
+  rows; reopening resets the separate `Show N more…` expansion state. The
+  sidebar itself can collapse to a 56px icon rail and resize from 240px to
+  480px, with double-click on the divider restoring 288px.
 
 ## Rules for editing
 

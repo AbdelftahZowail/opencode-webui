@@ -259,11 +259,7 @@ export function Sidebar() {
             </div>
           </ScrollArea>
 
-          <SidebarFooter
-            sessionCount={sessions.length}
-            onFiles={() => setFilesOpen(true)}
-            onInbox={() => setInboxOpen(true)}
-          />
+          <SidebarFooter onFiles={() => setFilesOpen(true)} onInbox={() => setInboxOpen(true)} />
         </>
       )}
 
@@ -289,7 +285,6 @@ export function Sidebar() {
           <button type="button" onClick={() => setInboxOpen(true)} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Inbox">
             <Inbox className="size-4" />
           </button>
-          <span className="font-mono text-[10px] text-[var(--text-weaker)]" title={`${sessions.length} sessions`}>{sessions.length}</span>
         </div>
       )}
       <SlotOutlet slot="sidebar" />
@@ -405,11 +400,9 @@ function CollapsedSidebar({
 }
 
 function SidebarFooter({
-  sessionCount,
   onFiles,
   onInbox,
 }: {
-  sessionCount: number;
   onFiles: () => void;
   onInbox: () => void;
 }) {
@@ -437,7 +430,6 @@ function SidebarFooter({
           Inbox
         </button>
       </div>
-      <span className="shrink-0">{sessionCount} sessions</span>
     </div>
   );
 }

@@ -4,7 +4,6 @@ import { useStore } from "../../src/store";
 function RuntimeStatus() {
   const connected = useStore((s) => s.connected);
   const serviceOK = useStore((s) => s.serviceOK);
-  const sessionCount = useStore((s) => s.sessions.length);
   const activeCount = useStore((s) => s.activeIDs.length);
   const online = connected && serviceOK;
 
@@ -22,7 +21,6 @@ function RuntimeStatus() {
         />
         {online ? "connected" : "offline"}
       </span>
-      <span>{sessionCount} sessions</span>
       {activeCount > 0 && <span>{activeCount} active</span>}
     </footer>
   );

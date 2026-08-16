@@ -21,7 +21,9 @@ bun start          # serves dist/ + API on http://127.0.0.1:4097
 
 ## What works today
 
-- Session list, create, delete (rename is next)
+- Workspace-grouped session list with collapse, three-item preview, pagination,
+  native session links, and delete controls
+- New-session links that work in the current tab or create a session in a new tab
 - Chat with **streaming** output (text, reasoning, tool calls with live JSON input)
 - Slash commands and skill activation from the composer (`/`)
 - Model & agent switching per session, Stop button
