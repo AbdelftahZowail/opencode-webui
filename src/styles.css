@@ -217,6 +217,14 @@ pre {
   background: transparent;
 }
 
+/* Radix uses a table wrapper for scroll-area content; keep it inside flex parents. */
+[data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;

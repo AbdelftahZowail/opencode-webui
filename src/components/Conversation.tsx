@@ -21,7 +21,7 @@ import { ThemePicker } from "./ThemePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 
 export function Conversation({ sessionID }: { sessionID: string }) {
-  const session = useStore((s) => s.sessions.find((x) => x.id === sessionID));
+  const session = useStore((s) => s.sessions.find((x) => x.id === sessionID) ?? s.sessionDetails[sessionID]);
   const messages = useStore((s) => s.messages[sessionID] ?? []);
   const live = useStore((s) => s.live);
   const running = useStore((s) => s.running[sessionID] ?? false);

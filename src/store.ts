@@ -133,6 +133,30 @@ export function getState(): State {
   return state;
 }
 
+export function sessionHref(sessionID: string): string {
+  return `/session/${encodeURIComponent(sessionID)}`;
+}
+
+function sessionIDFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  const match = window.location.pathname.match(/^\/session\/([^/]+)\/?$/);
+  if (!match) return null;
+  const encoded = match[1];
+  if (!encoded) return null;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+function updateSessionHistory(sessionID: string | null) {
+  if (typeof window === "undefined") return;
+  const next = sessionID ? sessionHref(sessionID) : "/";
+  if (window.location.pathname === next && !window.location.search && !window.location.hash) return;
+  window.history.pushState({}, "", next);
+}
+
 // ---- refresh helpers ----------------------------------------------------
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -645,6 +669,13 @@ export function startStore() {
   if (started) return;
   started = true;
   log("boot", "start");
+  if (typeof window !== "undefined") {
+    window.addEventListener("popstate", () => {
+      void selectSession(sessionIDFromLocation(), { history: "none" });
+    });
+    const initialSessionID = sessionIDFromLocation();
+    if (initialSessionID) void selectSession(initialSessionID, { history: "none" });
+  }
   void refreshSessions();
   void refreshQueues();
   void api
@@ -730,14 +761,23 @@ async function pollOnce() {
 
 // ---- actions ------------------------------------------------------------
 
-export async function selectSession(sessionID: string | null) {
+export async function selectSession(
+  sessionID: string | null,
+  options: { history?: "push" | "none" } = {},
+) {
   log("session", "select", sessionID ?? "null");
+  if (options.history !== "none") updateSessionHistory(sessionID);
   setState({
     currentSessionID: sessionID,
     live: [],
     queued: sessionID ? { ...state.queued, [sessionID]: false } : state.queued,
   });
-  if (sessionID) await loadMessages(sessionID);
+  if (sessionID) {
+    if (!state.sessions.some((s) => s.id === sessionID) && !state.sessionDetails[sessionID]) {
+      void loadSessionDetail(sessionID);
+    }
+    await loadMessages(sessionID);
+  }
 }
 
 export async function sendPrompt(text: string) {

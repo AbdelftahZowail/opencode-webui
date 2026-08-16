@@ -202,10 +202,12 @@ Feedback placeholder — paste below in the new session:
 - (user feedback items go here)
 ```
 **Last round (2026-08-16) — status:**
-- [x] Sidebar: workspace grouping with ~7 per group + "Show N more…" + "Load
-      more sessions" pagination (was already implemented; kept). Added hover
-      titles + hardened truncation so long session names never overflow the
-      right edge.
+- [x] Sidebar: workspace grouping with the three latest sessions per group +
+      "Show N more…" + "Load more sessions" pagination. Session rows are
+      native `/session/{id}` links with SPA history updates, direct-load and
+      back/forward support, and modified/middle-click behavior left to the
+      browser. Verified long titles ellipsize without widening the sidebar or
+      hiding the delete control.
 - [x] "New session" creates AND focuses the new session (was already wired;
       also pins default model now).
 - [x] Model selector reflects the real default agent/model (see DONE notes).
@@ -217,9 +219,9 @@ Feedback placeholder — paste below in the new session:
       headers + empty-part skipping (see DONE notes). Verified in browser.
 - [x] Full frontend+proxy debug logging (`/tmp/webui-debug.log`), clean
       start script (`scripts/start-dev.sh`), kill-by-PID guidance.
-- [ ] Pending visual confirmations from the user: sidebar overflow, model
-      selector default, second-message streaming, scroll behavior, and the
-      multi-step rendering above.
+- [ ] Pending visual confirmations from the user: model selector default,
+      second-message streaming, scroll behavior, and the multi-step rendering
+      above.
 
 ### 3. GIT — first commit (repo has ZERO commits, everything untracked)
 - [x] Repository initialized with a sensible `.gitignore` and the whole working

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, FolderTree, Inbox, Plus, Search, Settings as SettingsIcon, Terminal, X } from "lucide-react";
-import { loadMoreSessions, newSession, refreshSessions, selectSession, useStore } from "../store";
+import { loadMoreSessions, newSession, refreshSessions, selectSession, sessionHref, useStore } from "../store";
 import { api } from "../api/client";
 import { SlotOutlet } from "../extensions/registry";
 import { timeAgo } from "./ui";
@@ -13,7 +13,7 @@ import { ShellPanel } from "./ShellPanel";
 import { InboxPanel } from "./InboxPanel";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
-const SECTION_LIMIT = 7;
+const SECTION_LIMIT = 3;
 
 function isHomeDir(dir: string): boolean {
   return /^\/home\/[^/]+$/.test(dir) || /^\/Users\/[^/]+$/.test(dir);
@@ -84,7 +84,7 @@ export function Sidebar() {
     setExpanded((prev) => ({ ...prev, [name]: !prev[name] }));
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-background">
+    <aside className="flex min-w-0 w-72 shrink-0 flex-col overflow-hidden border-r border-border bg-background">
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
           <span
@@ -125,8 +125,8 @@ export function Sidebar() {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="max-w-full p-1.5">
+      <ScrollArea className="min-h-0 min-w-0 flex-1">
+        <div className="w-full min-w-0 max-w-full p-1.5">
           {groups.length === 0 && (
             <p className="px-2.5 py-4 text-xs text-[var(--text-weak)]">
               {sessions.length === 0 ? "No sessions yet." : "No matches."}
@@ -137,7 +137,7 @@ export function Sidebar() {
             const visible = isExpanded ? group.list : group.list.slice(0, SECTION_LIMIT);
             const moreCount = group.list.length - visible.length;
             return (
-              <section key={group.name} className="mb-2 min-w-0 max-w-full">
+              <section key={group.name} className="mb-2 w-full min-w-0 max-w-full">
                 <div className="flex items-center justify-between px-2.5 py-1">
                   <button
                     type="button"
@@ -254,65 +254,65 @@ function SessionRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
-    <div
-      onClick={onSelect}
-      title={title}
-      className={`group mb-0.5 min-w-0 cursor-pointer rounded-md px-2.5 py-2 transition-colors ${
-        selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
-      }`}
-    >
-      <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{title}</span>
-        {active && (
-          <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">
-            run
-          </Badge>
+    <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
+      <a
+        href={sessionHref(id)}
+        title={title}
+        aria-current={selected ? "page" : undefined}
+        onClick={(event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          void onSelect();
+        }}
+        className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 pr-12 transition-colors ${
+          selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
+        }`}
+      >
+        <div className="flex min-w-0 max-w-full items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
+          {active && (
+            <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">
+              run
+            </Badge>
+          )}
+        </div>
+        <div className="mt-0.5 flex min-w-0 max-w-full items-center gap-2 text-xs text-[var(--text-weak)]">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-weaker)]">{id.slice(0, 12)}</span>
+          <span className="shrink-0">{timeAgo(updated)}</span>
+        </div>
+      </a>
+      <div className="invisible absolute right-2 bottom-1.5 flex items-center gap-1 group-hover:visible group-focus-within:visible">
+        {confirmDelete ? (
+          <>
+            <button
+              type="button"
+              className="cursor-pointer text-[var(--text-on-critical-strong)] hover:text-[var(--text-on-critical-base)]"
+              onClick={() => {
+                void api.deleteSession(id).then(refreshSessions);
+                if (selected) void selectSession(null);
+              }}
+            >
+              yes
+            </button>
+            <button
+              type="button"
+              className="cursor-pointer text-[var(--text-weak)] hover:text-foreground"
+              onClick={() => setConfirmDelete(false)}
+            >
+              no
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            title="Delete session"
+            aria-label={`Delete ${title}`}
+            className="cursor-pointer text-[var(--text-weaker)] hover:text-[var(--text-on-critical-base)]"
+            onClick={() => setConfirmDelete(true)}
+          >
+            <X className="size-3.5" />
+          </button>
         )}
-      </div>
-      <div className="mt-0.5 flex min-w-0 items-center justify-between gap-2 text-xs text-[var(--text-weak)]">
-        <span className="truncate font-mono text-[11px] text-[var(--text-weaker)]">{id.slice(0, 12)}</span>
-        <span className="flex shrink-0 items-center gap-2">
-          {timeAgo(updated)}
-          <span className="hidden items-center gap-1 group-hover:flex">
-            {confirmDelete ? (
-              <>
-                <button
-                  type="button"
-                  className="cursor-pointer text-[var(--text-on-critical-strong)] hover:text-[var(--text-on-critical-base)]"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void api.deleteSession(id).then(refreshSessions);
-                    if (selected) void selectSession(null);
-                  }}
-                >
-                  yes
-                </button>
-                <button
-                  type="button"
-                  className="cursor-pointer text-[var(--text-weak)] hover:text-foreground"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmDelete(false);
-                  }}
-                >
-                  no
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                title="Delete session"
-                className="cursor-pointer text-[var(--text-weaker)] hover:text-[var(--text-on-critical-base)]"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfirmDelete(true);
-                }}
-              >
-                <X className="size-3.5" />
-              </button>
-            )}
-          </span>
-        </span>
       </div>
     </div>
   );
