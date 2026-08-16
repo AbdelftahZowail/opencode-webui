@@ -208,6 +208,10 @@ Feedback placeholder — paste below in the new session:
       back/forward support, and modified/middle-click behavior left to the
       browser. Verified long titles ellipsize without widening the sidebar or
       hiding the delete control.
+- [x] Sidebar follow-up: workspace collapse is now separate from "Show more"
+      and resets the expanded list when reopened. Added a 56px useful icon rail
+      collapse mode plus a pointer-drag resizer bounded to 240px-480px with
+      double-click reset; spacing and group separators were also clarified.
 - [x] "New session" creates AND focuses the new session (was already wired;
       also pins default model now).
 - [x] Model selector reflects the real default agent/model (see DONE notes).
