@@ -249,8 +249,11 @@ likely skip or fold into settings).
       through proxy `:4098`; stopped only the temporary preview process tree.
 
 ### 8. HOUSEKEEPING
-- [x] Confirmed leftover test session `ses_ff9ee78e` is already absent from the
-      service session list; DELETE returned the expected `SessionNotFoundError`.
+- [ ] Delete leftover test session prefix `ses_ff9ee78e` (full id
+      `ses_ff9ee78e5ffeu8kkUgrMyIaG1m`) from the session list. The record is
+      still present under the documented playground, but the service DELETE
+      endpoint currently returns an empty `500`; retry after the service-side
+      failure is resolved.
 - [ ] Reference material lives in /tmp (see below) — copy what's worth keeping
       into the repo or leave as-is; nothing is critical to ship.
 - [ ] AGENTS.md roadmap table is current (✅ all done except nothing pending).
