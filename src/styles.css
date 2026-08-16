@@ -1,0 +1,274 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font Mono";
+  src: url("/assets/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/assets/Inter.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+}
+
+/* ============================================================
+   OC-2 design tokens (from opencode packages/ui, MIT).
+   This block IS the contract extensions build against — consume
+   via var(--background-base) etc., never hardcode colors.
+   ============================================================ */
+:root {
+  color-scheme: dark;
+  --font-family-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-family-mono: "JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --font-size-small: 13px;
+  --font-size-base: 14px;
+  --font-size-large: 16px;
+  --font-size-x-large: 20px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --line-height-normal: 130%;
+  --line-height-large: 150%;
+  --line-height-x-large: 180%;
+
+  --spacing: 0.25rem;
+
+  --radius-xs: 0.125rem;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.625rem;
+
+  --text-mix-blend-mode: plus-lighter;
+
+  /* surfaces */
+  --background-base: #101010;
+  --background-weak: #1e1e1e;
+  --background-strong: #121212;
+  --background-stronger: #151515;
+  --surface-base: rgba(255, 255, 255, 0.031);
+  --surface-base-hover: rgba(255, 255, 255, 0.039);
+  --surface-base-active: rgba(255, 255, 255, 0.059);
+  --surface-inset-base: rgba(0, 0, 0, 0.5);
+  --surface-inset-strong: rgba(0, 0, 0, 0.8);
+  --surface-raised-base: rgba(255, 255, 255, 0.059);
+  --surface-float-base: #161616;
+  --surface-float-base-hover: #1c1c1c;
+  --surface-raised-base-hover: rgba(255, 255, 255, 0.078);
+  --surface-raised-base-active: rgba(255, 255, 255, 0.102);
+  --surface-raised-strong: rgba(255, 255, 255, 0.078);
+  --surface-raised-strong-hover: rgba(255, 255, 255, 0.129);
+  --surface-raised-stronger: rgba(255, 255, 255, 0.129);
+  --surface-raised-stronger-hover: rgba(255, 255, 255, 0.169);
+  --surface-raised-stronger-non-alpha: #1c1c1c;
+  --surface-weak: rgba(255, 255, 255, 0.078);
+  --surface-weaker: rgba(255, 255, 255, 0.102);
+  --surface-strong: rgba(255, 255, 255, 0.169);
+
+  /* status surfaces */
+  --surface-brand-base: #fab283;
+  --surface-brand-hover: #eda779;
+  --surface-interactive-base: #091f52;
+  --surface-interactive-weak: #0b1730;
+  --surface-success-base: #062d04;
+  --surface-success-weak: #0a1e08;
+  --surface-success-strong: #12c905;
+  --surface-warning-base: #fdf3cf;
+  --surface-warning-weak: #fdfaed;
+  --surface-warning-strong: #fcd53a;
+  --surface-critical-base: #1f0603;
+  --surface-critical-weak: #28110c;
+  --surface-critical-strong: #fc533a;
+  --surface-info-base: #feecfe;
+  --surface-info-weak: #fdf7fe;
+  --surface-info-strong: #edb2f1;
+
+  /* diff surfaces */
+  --surface-diff-unchanged-base: #161616;
+  --surface-diff-skip-base: #00000000;
+  --surface-diff-hidden-base: #0c1928;
+  --surface-diff-hidden-weak: #09131d;
+  --surface-diff-hidden-weaker: #082542;
+  --surface-diff-hidden-strong: #073966;
+  --surface-diff-hidden-stronger: #8ec2fc;
+  --surface-diff-add-base: #1a2919;
+  --surface-diff-add-weak: #1f351e;
+  --surface-diff-add-weaker: #1a2919;
+  --surface-diff-add-strong: #264024;
+  --surface-diff-add-stronger: #9bcd97;
+  --surface-diff-delete-base: #42120b;
+  --surface-diff-delete-weak: #580f06;
+  --surface-diff-delete-weaker: #42120b;
+  --surface-diff-delete-strong: #6a1206;
+  --surface-diff-delete-stronger: #faa494;
+
+  /* inputs */
+  --input-base: #1c1c1c;
+  --input-hover: #1c1c1c;
+  --input-active: #091123;
+  --input-selected: #0b1730;
+  --input-focus: #091123;
+  --input-disabled: #282828;
+
+  /* text */
+  --text-base: rgba(255, 255, 255, 0.618);
+  --text-weak: rgba(255, 255, 255, 0.422);
+  --text-weaker: rgba(255, 255, 255, 0.284);
+  --text-strong: rgba(255, 255, 255, 0.936);
+  --text-interactive-base: #9dbefe;
+  --text-on-brand-base: rgba(255, 255, 255, 0.603);
+  --text-on-interactive-base: #ededed;
+  --text-on-success-base: #12c905;
+  --text-on-critical-base: #fc533a;
+  --text-on-critical-weak: #b72d1a;
+  --text-on-critical-strong: #ffe0da;
+  --text-diff-add-base: #9bcd97;
+  --text-diff-add-strong: #4a7348;
+  --text-diff-delete-base: #fc533a;
+  --text-diff-delete-strong: #ffe0da;
+
+  /* buttons */
+  --button-primary-base: #ededed;
+  --button-secondary-base: #1c1c1c;
+  --button-secondary-hover: rgba(255, 255, 255, 0.039);
+  --button-ghost-hover: rgba(255, 255, 255, 0.031);
+  --button-ghost-hover2: rgba(255, 255, 255, 0.059);
+
+  /* borders */
+  --border-base: rgba(255, 255, 255, 0.195);
+  --border-hover: rgba(255, 255, 255, 0.284);
+  --border-active: rgba(255, 255, 255, 0.418);
+  --border-selected: #9dbefe;
+  --border-disabled: rgba(255, 255, 255, 0.284);
+  --border-focus: rgba(255, 255, 255, 0.418);
+  --border-weak-base: #282828;
+  --border-strong-base: rgba(255, 255, 255, 0.266);
+  --border-strong-hover: rgba(255, 255, 255, 0.266);
+  --border-strong-active: rgba(255, 255, 255, 0.266);
+  --border-strong-selected: rgba(3, 76, 255, 0.62);
+  --border-strong-disabled: rgba(255, 255, 255, 0.138);
+  --border-strong-focus: rgba(255, 255, 255, 0.266);
+}
+
+/* shadcn component vars mapped onto OC-2 tokens */
+:root,
+.dark {
+  --background: var(--background-base);
+  --foreground: var(--text-strong);
+  --card: var(--background-stronger);
+  --card-foreground: var(--text-strong);
+  --popover: var(--surface-float-base);
+  --popover-foreground: var(--text-strong);
+  --primary: var(--button-primary-base);
+  --primary-foreground: var(--background-base);
+  --secondary: var(--button-secondary-base);
+  --secondary-foreground: var(--text-strong);
+  --muted: var(--background-weak);
+  --muted-foreground: var(--text-weak);
+  --accent: var(--button-secondary-base);
+  --accent-foreground: var(--text-strong);
+  --destructive: var(--surface-critical-strong);
+  --destructive-foreground: var(--background-base);
+  --border: var(--border-base);
+  --input: var(--input-base);
+  --ring: var(--border-selected);
+  --chart-1: var(--surface-brand-base);
+  --chart-2: var(--surface-success-strong);
+  --chart-3: var(--surface-warning-strong);
+  --chart-4: var(--surface-critical-strong);
+  --chart-5: var(--surface-info-strong);
+  --radius: 0.5rem;
+  --sidebar: var(--background-base);
+  --sidebar-foreground: var(--text-strong);
+  --sidebar-primary: var(--button-primary-base);
+  --sidebar-primary-foreground: var(--background-base);
+  --sidebar-accent: var(--button-secondary-base);
+  --sidebar-accent-foreground: var(--text-strong);
+  --sidebar-border: var(--border-base);
+  --sidebar-ring: var(--border-selected);
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-family: var(--font-family-sans);
+}
+
+code,
+pre {
+  font-family: var(--font-family-mono);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded-full;
+  background: var(--border-weak-base);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
