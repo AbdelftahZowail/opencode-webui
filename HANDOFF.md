@@ -265,15 +265,25 @@ checks where applicable.**
 
 ### 4. PRODUCTION SMOKE TEST
 - [x] `bun run build` + production server smoke-tested on isolated proxy `:4099`:
-      `/` and an unknown SPA route served `dist/`, and `/api/webui/status`
-      reached the service successfully. The live dev instance on `:4097` was
-      left untouched. Full sessions/chat/settings plus a production PTY flow
-      remain a manual browser check if needed.
+      `/` and an unknown SPA route served `dist/`, `/api/webui/status` reached
+      the service, and a **PTY round-trip through the production websocket
+      proxy passed** (`scripts/uitest/prod-pty-check.mjs`: create →
+      connect-token → ws → echo → assert output). Prod instance killed by PID
+      afterwards; dev on `:4097` untouched.
+- [x] **Found + fixed a real websocket bug during that check** (2026-08-21):
+      the proxy silently DROPPED client WS messages that arrived while its
+      upstream service socket was still CONNECTING (`if OPEN` guard on send).
+      Terminal input typed immediately after connect vanished — invisible in
+      interactive use, exposed by the script's immediate send. Fix: buffer
+      client messages in `pending` until upstream opens, then flush
+      (`server/index.ts`). Round-trip verified through BOTH :4099 and :4097.
 
-### 5. LONG-TAIL ROUTES (client fns EXIST in `src/api/client.ts`, no UI):
-`generate`, `reference`, `serverInfo/serviceStop` (stop is in settings already),
-`experimental/*`, `debug`. Decide with the user if any deserve UI (low value;
-likely skip or fold into settings).
+### 5. LONG-TAIL ROUTES — RESOLVED (2026-08-21), remainder intentionally skipped
+- `serverInfo` already renders in Settings → Server; `serviceStop` too.
+- `generate` (stateless one-shot completion — no session, streaming, or tools)
+  and `referenceList` (engine reference bookkeeping) get NO UI by decision:
+  the chat supersedes generate; references are opaque internals. The client
+  fns stay in place (additive-only rule); revisit only if a real need appears.
 
 ### 6. EXTENSION AUTHORING TEST on the new UI
 - [x] Added `ui-extensions/runtime-status/` through the documented flow:
@@ -291,10 +301,20 @@ likely skip or fold into settings).
       restart. The API returned `204`; the record is absent from the live API
       and the fresh browser session list. Removed the temporary empty
       `playground/` directory used to satisfy the stale location.
-- [ ] Reference material lives in /tmp (see below) — copy what's worth keeping
-      into the repo or leave as-is; nothing is critical to ship.
+- [x] Reference material salvaged (2026-08-21): /tmp had already been WIPED
+      (`opencode-src` clone + extracted theme CSS gone), so the OpenAPI spec
+      was regenerated LIVE into `docs/reference/openapi.json` via the new
+      `scripts/fetch-openapi.ts` (Service discovery + auth, same as the proxy).
+      Theme tokens live on in `src/styles.css`; re-clone upstream if the rest
+      is ever needed.
 - [x] AGENTS.md roadmap table and current frontend behavior notes are up to
       date; the roadmap has no pending API surface entries.
+
+### 9. DEFERRED — bundle code-splitting
+Initial JS chunk is ~1MB minified / ~286KB gzip. Acceptable on localhost; only
+worth doing (`React.lazy` + Suspense around Settings hub / FileExplorer /
+ShellPanel — xterm is the heavy part) if the webui is ever served over a
+network. Revisit at deploy time.
 
 ## Known issues & gotchas (read before touching things)
 
@@ -376,6 +396,7 @@ hand-writing one-off curl/js each time:
 | `check-default-pin.mjs` | run `newSession()` headlessly → asserts the session model is pinned to the UI default |
 | `smoke.sh [prompt] [model]` | create → capture → prompt → wait → print history + store replay |
 | `two-prompt.sh [model]` | regression for the "second message disappears" bug |
+| `prod-pty-check.mjs` | PTY websocket round-trip against `$BASE` (create → token → ws → echo assert); works on prod and dev proxies |
 | `start-dev.sh` (repo root, `scripts/`) | clean start with debug logging (see "How to run") |
 
 `env.sh` defines `$BASE` (proxy, default 4097) and `$EVT_OUT`. Example:
@@ -406,15 +427,13 @@ session the UI doesn't have selected. `[sse] STALLED` / `reconnect` = the
 stream hiccupped and auto-recovered. Console mirror of the same lines:
 `localStorage.setItem("webui.debug","1")` in the app then reload.
 
-## Reference material (in /tmp, from the build)
+## Reference material
 
-- `/tmp/opencode-src` — clone of anomalyco/opencode: **v2 TUI source**
-  (`packages/tui`, React) = the behavioral spec; `v1.18.9` tag has the web UI
-  (`packages/app`) + design system (`packages/ui/src/styles/*.css`).
-- `/tmp/oc-theme.css`, `/tmp/oc-colors.css` — extracted token files.
-- `/tmp/oa.json` — the live v2 OpenAPI spec (authoritative for field names).
-- `/tmp/opencode-wave{1,2,3}/` — per-package specs used for the parallel build
-  (useful patterns for any future parallel work).
+- `docs/reference/openapi.json` — the live v2 OpenAPI spec snapshot
+  (authoritative for field names). Refresh with `bun run scripts/fetch-openapi.ts`.
+- `/tmp/opencode-src` etc. are GONE (wiped); re-clone anomalyco/opencode if
+  needed: `packages/tui` (v2 behavioral spec) and `packages/ui/src/styles`
+  (token source). The tokens themselves live in `src/styles.css`.
 
 ## Rules that must survive (the extension philosophy)
 

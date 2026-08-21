@@ -82,8 +82,9 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 
 1. **Never change the contract layer without the OpenAPI doc.** Before
    touching `src/api/types.ts` or `client.ts`, diff against the running
-   service: `opencode2 api get /openapi.json` (this needs the `opencode2`
-   CLI; the proxy also forwards `/openapi.json`).
+   service: `bun run scripts/fetch-openapi.ts` writes the live spec to
+   `docs/reference/openapi.json` (the proxy forwards only `/api/*`, not
+   `/openapi.json`).
 2. **Keep the store as the only place state lives.** Components read via
    `useStore((s) => ...)` and call actions; they never fetch directly except
    for one-shot catalog data (`models`, `agents`, `commands`, `skills`).

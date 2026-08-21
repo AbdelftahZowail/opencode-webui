@@ -145,10 +145,16 @@ const server: Server<Record<string, unknown>> = Bun.serve({
   },
   websocket: {
     open(ws) {
-      const data = ws.data as unknown as { url: string; headers: Record<string, string>; upstream?: WebSocket };
+      const data = ws.data as unknown as { url: string; headers: Record<string, string>; upstream?: WebSocket; pending?: unknown[] };
       try {
         const upstream = new WebSocket(data.url, { headers: data.headers } as unknown as string[]);
         data.upstream = upstream;
+        data.pending = [];
+        upstream.onopen = () => {
+          const pending = data.pending ?? [];
+          data.pending = [];
+          for (const msg of pending) upstream.send(msg as Parameters<WebSocket["send"]>[0]);
+        };
         upstream.onmessage = (e) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(e.data as string | ArrayBuffer);
         };
@@ -164,8 +170,10 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       }
     },
     message(ws, msg) {
-      const data = ws.data as unknown as { upstream?: WebSocket };
-      if (data.upstream?.readyState === WebSocket.OPEN) data.upstream.send(msg);
+      const data = ws.data as unknown as { upstream?: WebSocket; pending?: unknown[] };
+      const upstream = data.upstream;
+      if (upstream?.readyState === WebSocket.OPEN) upstream.send(msg);
+      else if (upstream && upstream.readyState === WebSocket.CONNECTING) data.pending!.push(msg);
     },
     close(ws) {
       const data = ws.data as unknown as { upstream?: WebSocket };
