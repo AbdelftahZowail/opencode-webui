@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api, type PtyInfo, type ShellInfo } from "../api/client";
 import { cn } from "../lib/utils";
+import { useStore } from "../store";
 import { Badge, Spinner, formatTime } from "./ui";
 import { Button } from "./ui/button";
 import {
@@ -50,6 +51,13 @@ function shellElapsed(s: ShellInfo): string {
 export function ShellPanel({ trigger }: { trigger?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("shell");
+  // Distant surfaces (composer run chips) can ask the panel to open via
+  // store.requestShellPanel(); the tick is an additive open signal.
+  const shellPanelTick = useStore((s) => s.shellPanelTick);
+
+  useEffect(() => {
+    if (shellPanelTick > 0) setOpen(true);
+  }, [shellPanelTick]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

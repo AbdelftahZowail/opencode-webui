@@ -75,6 +75,12 @@ export interface State {
   forms: FormInfo[];
   questions: QuestionRequest[];
   currentSessionID: string | null;
+  /**
+   * Incremented whenever any surface asks to open/focus the shell panel;
+   * lets distant components (e.g. composer chips) trigger it without
+   * prop plumbing. Additive signal only — never read for logic.
+   */
+  shellPanelTick: number;
 }
 
 const initialState: State = {
@@ -92,6 +98,7 @@ const initialState: State = {
   forms: [],
   questions: [],
   currentSessionID: null,
+  shellPanelTick: 0,
 };
 
 let state: State = initialState;
@@ -1206,6 +1213,18 @@ async function pollOnce() {
 }
 
 // ---- actions ------------------------------------------------------------
+
+/** Ask any mounted ShellPanel to open/focus (see State.shellPanelTick). */
+export function requestShellPanel() {
+  setState({ shellPanelTick: state.shellPanelTick + 1 });
+}
+
+/** Child/subagent sessions of the given parent, newest first. */
+export function childSessionsOf(sessions: SessionInfo[], parentID: string): SessionInfo[] {
+  return sessions
+    .filter((s) => s.parentID === parentID)
+    .sort((a, b) => b.time.updated - a.time.updated);
+}
 
 export async function selectSession(
   sessionID: string | null,

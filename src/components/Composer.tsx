@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Send, Terminal } from "lucide-react";
+import { ChevronRight, Send, Terminal } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, PromptFile } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
 import {
   activateSkill,
+  childSessionsOf,
   compactSession,
   forkSession,
   interrupt,
   loadSessionDetail,
   newSession,
   renameSession,
+  requestShellPanel,
   selectSession,
   sendCommand,
   sendPrompt,
@@ -130,6 +132,39 @@ function usePrefs(): Prefs {
   return prefs;
 }
 
+/**
+ * Count running shells + PTYs for the session's workspace. Light 5s poll,
+ * paused while the tab is hidden — the same cadence ShellPanel uses when
+ * its dialog is open.
+ */
+function useRunningShellCounts(location?: string) {
+  const [counts, setCounts] = useState({ shells: 0, ptys: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (typeof document !== "undefined" && document.hidden) return;
+      try {
+        const loc = location ? { directory: location } : undefined;
+        const [shells, ptys] = await Promise.all([api.shellList(loc), api.ptyList(loc)]);
+        if (cancelled) return;
+        setCounts({
+          shells: shells.data.filter((s) => s.status === "running").length,
+          ptys: ptys.data.filter((p) => p.status === "running").length,
+        });
+      } catch {
+        /* transient; keep last counts */
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [location]);
+  return counts;
+}
+
 export function Composer({ sessionID }: { sessionID: string }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -151,6 +186,18 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+
+  // Meta-row run indicators: child/subagent sessions of this session and
+  // running shells/PTYs in the workspace (see useRunningShellCounts).
+  const children = useStore((s) => childSessionsOf(s.sessions, sessionID));
+  const runningMap = useStore((s) => s.running);
+  const activeIDs = useStore((s) => s.activeIDs);
+  const shellCounts = useRunningShellCounts(sessionLocation);
+  const runningChildren = children.filter((c) => runningMap[c.id] || activeIDs.includes(c.id));
+  const openNewestChild = () => {
+    const target = runningChildren[0] ?? children[0];
+    if (target) void selectSession(target.id);
+  };
 
   useEffect(() => {
     void api.commands().then(setCommands);
@@ -519,6 +566,38 @@ export function Composer({ sessionID }: { sessionID: string }) {
                 </div>
               </FilePicker>
               <div className="mt-1 flex items-center gap-1 border-t border-[color:var(--border-weak-base)] px-1 pt-1">
+                {children.length > 0 && (
+                  <button
+                    type="button"
+                    title={
+                      runningChildren.length > 0
+                        ? `Subagents: ${runningChildren.length} running — click to open the active one`
+                        : `Subagents: ${children.length} — click to open the newest`
+                    }
+                    onClick={openNewestChild}
+                    className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                      runningChildren.length > 0
+                        ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
+                        : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                    }`}
+                  >
+                    <ChevronRight className="size-3" />
+                    {runningChildren.length > 0
+                      ? `${runningChildren.length}/${children.length} agents`
+                      : `${children.length} agents`}
+                  </button>
+                )}
+                {shellCounts.shells + shellCounts.ptys > 0 && (
+                  <button
+                    type="button"
+                    title="Running shells & terminals — click to open the shell panel"
+                    onClick={requestShellPanel}
+                    className="flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] text-[color:var(--text-weaker)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                  >
+                    <Terminal className="size-3" />
+                    {shellCounts.shells + shellCounts.ptys} shells
+                  </button>
+                )}
                 <button
                   type="button"
                   title="Shell mode (! command)"
