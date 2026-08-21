@@ -422,6 +422,9 @@ export const api = {
     }),
   interrupt: (sessionID: string) =>
     request<unknown>(`/api/session/${sessionID}/interrupt`, { method: "POST" }),
+  /** Background the session's synchronous (task-tool) subagents. */
+  sessionBackground: (sessionID: string) =>
+    request<unknown>(`/api/session/${sessionID}/background`, { method: "POST" }),
   sessionShell: (sessionID: string, command: string) =>
     request<unknown>(`/api/session/${sessionID}/shell`, {
       method: "POST",

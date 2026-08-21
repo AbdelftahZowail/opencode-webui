@@ -1324,6 +1324,20 @@ export async function interrupt() {
   });
 }
 
+/**
+ * TUI parity for the `ctrl+b` / `session.background` keybind: move this
+ * session's synchronous (task-tool) subagents to background runs so they
+ * keep working when the parent step ends.
+ */
+export async function backgroundSubagents(sessionID: string) {
+  try {
+    await api.sessionBackground(sessionID);
+    debouncedRefreshSessions();
+  } catch (err) {
+    console.warn("backgroundSubagents failed:", err);
+  }
+}
+
 export async function replyPermission(requestID: string, reply: "once" | "always" | "reject") {
   const req = state.permissions.find((p) => p.id === requestID);
   if (!req) return;

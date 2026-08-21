@@ -5,6 +5,7 @@ import type { FsEntry, PromptFile } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
 import {
   activateSkill,
+  backgroundSubagents,
   childSessionsOf,
   compactSession,
   forkSession,
@@ -525,6 +526,18 @@ export function Composer({ sessionID }: { sessionID: string }) {
                           selectActiveSlashItem();
                           return;
                         }
+                      }
+                      if (e.key.toLowerCase() === "b" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                        // TUI parity: ctrl+b = session.background — background
+                        // this session's synchronous (task-tool) subagents so
+                        // they keep running after the parent step ends. Only
+                        // meaningful while a run is active; the TUI enables
+                        // the bind only with foreground tasks present.
+                        if (!isSlash) {
+                          e.preventDefault();
+                          if (running || queued) void backgroundSubagents(sessionID);
+                        }
+                        return;
                       }
                       if (e.key === "Escape") {
                         e.preventDefault();
