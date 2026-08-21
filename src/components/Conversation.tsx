@@ -54,7 +54,11 @@ export function Conversation({ sessionID }: { sessionID: string }) {
               {(() => {
                 let prevAssistant = false;
                 let insertedLive = false;
-                const liveStarted = live.length > 0 ? Math.min(...live.map((assistant) => assistant.started)) : Infinity;
+                const hasLocalMessage = messages.some((m) => m.id.startsWith("msg_local_"));
+                const liveStarted =
+                  !hasLocalMessage && live.length > 0
+                    ? Math.min(...live.map((assistant) => assistant.started))
+                    : Infinity;
                 const rows: ReactNode[] = [];
                 const addLive = () => {
                   if (insertedLive || live.length === 0) return;

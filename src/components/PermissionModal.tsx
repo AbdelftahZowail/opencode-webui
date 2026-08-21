@@ -11,12 +11,14 @@ const contentCls =
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 text-sm text-popover-foreground duration-100 outline-none sm:max-w-lg data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95";
 
 export function PermissionModal() {
+  const currentID = useStore((s) => s.currentSessionID);
   const permissions = useStore((s) => s.permissions);
+  const mine = permissions.filter((p) => p.sessionID === currentID);
 
-  if (permissions.length === 0) return null;
-  const req = permissions[0]!;
+  if (mine.length === 0) return null;
+  const req = mine[0]!;
 
-  return <PermissionDialog key={req.id} req={req} queued={permissions.length - 1} />;
+  return <PermissionDialog key={req.id} req={req} queued={mine.length - 1} />;
 }
 
 function PermissionDialog({ req, queued }: { req: PermissionRequest; queued: number }) {

@@ -13,9 +13,12 @@ const inputCls =
   "w-full rounded-md border border-[var(--border-weak-base)] bg-[var(--input-base)] px-2.5 py-1.5 text-sm text-[var(--text-strong)] outline-none transition-colors placeholder:text-[var(--text-weaker)] focus:border-[var(--border-selected)] focus:ring-1 focus:ring-[var(--border-selected)]";
 
 export function FormModal() {
+  const currentID = useStore((s) => s.currentSessionID);
   const forms = useStore((s) => s.forms);
-  if (forms.length === 0) return null;
-  const form = forms[0]!;
+  const mine = forms.filter((f) => f.sessionID === currentID);
+
+  if (mine.length === 0) return null;
+  const form = mine[0]!;
   return <FormView key={form.id} formID={form.id} title={form.title} fields={form.fields} />;
 }
 

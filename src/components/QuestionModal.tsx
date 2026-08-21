@@ -12,12 +12,14 @@ const contentCls =
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 text-sm text-popover-foreground duration-100 outline-none sm:max-w-lg data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95";
 
 export function QuestionModal() {
+  const currentID = useStore((s) => s.currentSessionID);
   const questions = useStore((s) => s.questions);
+  const mine = questions.filter((q) => q.sessionID === currentID);
 
-  if (questions.length === 0) return null;
-  const req = questions[0]!;
+  if (mine.length === 0) return null;
+  const req = mine[0]!;
 
-  return <QuestionDialog key={req.id} req={req} queued={questions.length - 1} />;
+  return <QuestionDialog key={req.id} req={req} queued={mine.length - 1} />;
 }
 
 function QuestionDialog({ req, queued }: { req: QuestionRequest; queued: number }) {
