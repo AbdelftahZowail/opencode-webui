@@ -40,7 +40,13 @@ export function Conversation({ sessionID }: { sessionID: string }) {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <Header title={session?.title} sessionID={sessionID} running={running} queued={queued} />
+      <Header
+        title={session?.title}
+        sessionID={sessionID}
+        running={running}
+        queued={queued}
+        parentID={session?.parentID}
+      />
       <SubagentStrip sessionID={sessionID} />
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
@@ -112,10 +118,33 @@ function EmptyHint() {
   );
 }
 
-function Header({ title, sessionID, running, queued }: { title?: string; sessionID: string; running: boolean; queued: boolean }) {
+function Header({
+  title,
+  sessionID,
+  running,
+  queued,
+  parentID,
+}: {
+  title?: string;
+  sessionID: string;
+  running: boolean;
+  queued: boolean;
+  parentID?: string;
+}) {
+  const parentTitle = useStore((s) => s.sessionDetails[parentID ?? ""]?.title);
   return (
     <div className="flex items-center justify-between border-b border-[var(--border-base)] px-4 py-2.5">
       <div className="flex min-w-0 items-center gap-2">
+        {parentID && (
+          <button
+            type="button"
+            onClick={() => void selectSession(parentID)}
+            title={`Back to parent session${parentTitle ? `: ${parentTitle}` : ""}`}
+            className="cursor-pointer rounded-md border border-[var(--border-weak-base)] px-1.5 py-0.5 text-xs text-[var(--text-weak)] transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
+          >
+            ↑ Parent
+          </button>
+        )}
         <button
           type="button"
           className="mr-1 cursor-pointer text-[var(--text-weaker)] transition-colors hover:text-[var(--text-strong)] lg:hidden"

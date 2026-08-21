@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Send, Terminal } from "lucide-react";
 import { api } from "../api/client";
-import type { FsEntry, PromptFile } from "../api/client";
+import type { FsEntry, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
 import {
   activateSkill,
@@ -134,12 +134,12 @@ function usePrefs(): Prefs {
 }
 
 /**
- * Count running shells + PTYs for the session's workspace. Light 5s poll,
- * paused while the tab is hidden — the same cadence ShellPanel uses when
- * its dialog is open.
+ * Live shells (backgrounded or currently-running commands) and PTYs for the
+ * session's workspace. Light 5s poll, paused while the tab is hidden — the
+ * same cadence ShellPanel uses when its dialog is open.
  */
-function useRunningShellCounts(location?: string) {
-  const [counts, setCounts] = useState({ shells: 0, ptys: 0 });
+function useRunningRuns(location?: string): { shells: ShellInfo[]; ptys: PtyInfo[] } {
+  const [runs, setRuns] = useState<{ shells: ShellInfo[]; ptys: PtyInfo[] }>({ shells: [], ptys: [] });
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -148,12 +148,9 @@ function useRunningShellCounts(location?: string) {
         const loc = location ? { directory: location } : undefined;
         const [shells, ptys] = await Promise.all([api.shellList(loc), api.ptyList(loc)]);
         if (cancelled) return;
-        setCounts({
-          shells: shells.data.filter((s) => s.status === "running").length,
-          ptys: ptys.data.filter((p) => p.status === "running").length,
-        });
+        setRuns({ shells: shells.data, ptys: ptys.data });
       } catch {
-        /* transient; keep last counts */
+        /* transient; keep last lists */
       }
     }
     void load();
@@ -163,7 +160,21 @@ function useRunningShellCounts(location?: string) {
       window.clearInterval(timer);
     };
   }, [location]);
-  return counts;
+  return runs;
+}
+
+/** Close-on-outside-click ref for the meta-row dropdowns. */
+function useDismiss(active: boolean, onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!active) return;
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [active, onClose]);
+  return ref;
 }
 
 export function Composer({ sessionID }: { sessionID: string }) {
@@ -188,17 +199,40 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
 
-  // Meta-row run indicators: child/subagent sessions of this session and
-  // running shells/PTYs in the workspace (see useRunningShellCounts).
+  // Meta-row run indicators: child/subagent sessions of this session plus
+  // live shells (backgrounded / currently-running commands) and PTYs.
   const children = useStore((s) => childSessionsOf(s.sessions, sessionID));
   const runningMap = useStore((s) => s.running);
   const activeIDs = useStore((s) => s.activeIDs);
-  const shellCounts = useRunningShellCounts(sessionLocation);
-  const runningChildren = children.filter((c) => runningMap[c.id] || activeIDs.includes(c.id));
-  const openNewestChild = () => {
-    const target = runningChildren[0] ?? children[0];
-    if (target) void selectSession(target.id);
-  };
+  const runs = useRunningRuns(sessionLocation);
+  const isChildRunning = (id: string) => runningMap[id] || activeIDs.includes(id);
+  const sortedChildren = useMemo(
+    () => [...children].sort((a, b) => Number(isChildRunning(b.id)) - Number(isChildRunning(a.id))),
+    [children, runningMap, activeIDs],
+  );
+  const runningChildrenCount = children.filter((c) => isChildRunning(c.id)).length;
+  const runningShellCount =
+    runs.shells.filter((s) => s.status === "running").length + runs.ptys.filter((p) => p.status === "running").length;
+  const [runMenu, setRunMenu] = useState<"agents" | "shells" | null>(null);
+  const runMenuRef = useDismiss(runMenu !== null, () => setRunMenu(null));
+  const [openShellId, setOpenShellId] = useState<string | null>(null);
+  const [shellOutput, setShellOutput] = useState<Record<string, string>>({});
+
+  async function toggleShellOutput(id: string) {
+    if (openShellId === id) {
+      setOpenShellId(null);
+      return;
+    }
+    setOpenShellId(id);
+    if (!shellOutput[id]) {
+      try {
+        const res = await api.shellOutput(id, { limit: 8000 });
+        setShellOutput((prev) => ({ ...prev, [id]: res.data.output || "(no output)" }));
+      } catch {
+        setShellOutput((prev) => ({ ...prev, [id]: "(output unavailable)" }));
+      }
+    }
+  }
 
   useEffect(() => {
     void api.commands().then(setCommands);
@@ -579,37 +613,135 @@ export function Composer({ sessionID }: { sessionID: string }) {
                 </div>
               </FilePicker>
               <div className="mt-1 flex items-center gap-1 border-t border-[color:var(--border-weak-base)] px-1 pt-1">
-                {children.length > 0 && (
-                  <button
-                    type="button"
-                    title={
-                      runningChildren.length > 0
-                        ? `Subagents: ${runningChildren.length} running — click to open the active one`
-                        : `Subagents: ${children.length} — click to open the newest`
-                    }
-                    onClick={openNewestChild}
-                    className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
-                      runningChildren.length > 0
-                        ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
-                        : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                    }`}
-                  >
-                    <ChevronRight className="size-3" />
-                    {runningChildren.length > 0
-                      ? `${runningChildren.length}/${children.length} agents`
-                      : `${children.length} agents`}
-                  </button>
-                )}
-                {shellCounts.shells + shellCounts.ptys > 0 && (
-                  <button
-                    type="button"
-                    title="Running shells & terminals — click to open the shell panel"
-                    onClick={requestShellPanel}
-                    className="flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] text-[color:var(--text-weaker)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                  >
-                    <Terminal className="size-3" />
-                    {shellCounts.shells + shellCounts.ptys} shells
-                  </button>
+                {(children.length > 0 || runs.shells.length + runs.ptys.length > 0) && (
+                  <div ref={runMenuRef} className="relative flex items-center gap-1">
+                    {children.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setRunMenu(runMenu === "agents" ? null : "agents")}
+                        title="Subagent sessions — pick one to open"
+                        className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                          runMenu === "agents" || runningChildrenCount > 0
+                            ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
+                            : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                        }`}
+                      >
+                        <ChevronRight className="size-3" />
+                        {runningChildrenCount > 0
+                          ? `${runningChildrenCount}/${children.length} agents`
+                          : `${children.length} agents`}
+                      </button>
+                    )}
+                    {runs.shells.length + runs.ptys.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setRunMenu(runMenu === "shells" ? null : "shells")}
+                        title="Running & backgrounded shell commands, plus terminals"
+                        className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                          runMenu === "shells" || runningShellCount > 0
+                            ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
+                            : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                        }`}
+                      >
+                        <Terminal className="size-3" />
+                        {runningShellCount > 0
+                          ? `${runningShellCount}/${runs.shells.length + runs.ptys.length} shells`
+                          : `${runs.shells.length + runs.ptys.length} shells`}
+                      </button>
+                    )}
+                    {runMenu !== null && (
+                      <div className="absolute bottom-full left-0 z-50 mb-1 max-h-80 w-80 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl">
+                        {runMenu === "agents" &&
+                          sortedChildren.map((c) => {
+                            const active = isChildRunning(c.id);
+                            return (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => {
+                                  setRunMenu(null);
+                                  void selectSession(c.id);
+                                }}
+                                className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
+                              >
+                                <span
+                                  className={`size-1.5 shrink-0 rounded-full ${active ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"}`}
+                                />
+                                <span className="min-w-0 flex-1 truncate text-[color:var(--text-strong)]">
+                                  {c.title || c.id}
+                                </span>
+                                {c.agent && (
+                                  <span className="font-mono text-[10px] text-[color:var(--text-weaker)]">{c.agent}</span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        {runMenu === "shells" && (
+                          <>
+                            <p className="px-2.5 pt-2 text-[10px] uppercase tracking-wide text-[color:var(--text-weaker)]">
+                              Shell commands — click for output
+                            </p>
+                            {runs.shells.map((s) => (
+                              <div key={s.id}>
+                                <button
+                                  type="button"
+                                  onClick={() => void toggleShellOutput(s.id)}
+                                  className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
+                                >
+                                  <span
+                                    className={`size-1.5 shrink-0 rounded-full ${
+                                      s.status === "running" ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"
+                                    }`}
+                                  />
+                                  <span className="min-w-0 flex-1 truncate font-mono text-[color:var(--text-strong)]">
+                                    {s.command || s.shell}
+                                  </span>
+                                  <span className="font-mono text-[10px] text-[color:var(--text-weaker)]">
+                                    {s.pid ? `pid ${s.pid}` : s.status}
+                                  </span>
+                                </button>
+                                {openShellId === s.id && (
+                                  <pre className="mx-2 mb-1.5 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-[color:var(--border-weak-base)] bg-[color:var(--background-strong)] p-2 font-mono text-[10px] text-[color:var(--text-weak)]">
+                                    {shellOutput[s.id] ?? "loading…"}
+                                  </pre>
+                                )}
+                              </div>
+                            ))}
+                            {runs.shells.length === 0 && (
+                              <p className="px-2.5 py-1.5 text-xs text-[color:var(--text-weaker)]">No shell commands</p>
+                            )}
+                            {runs.ptys.length > 0 && (
+                              <>
+                                <p className="border-t border-[color:var(--border-weak-base)] px-2.5 pt-2 text-[10px] uppercase tracking-wide text-[color:var(--text-weaker)]">
+                                  Terminals
+                                </p>
+                                {runs.ptys.map((p) => (
+                                  <button
+                                    key={p.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setRunMenu(null);
+                                      requestShellPanel();
+                                    }}
+                                    className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
+                                  >
+                                    <span
+                                      className={`size-1.5 shrink-0 rounded-full ${
+                                        p.status === "running" ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"
+                                      }`}
+                                    />
+                                    <span className="min-w-0 flex-1 truncate text-[color:var(--text-strong)]">
+                                      {p.title || p.command}
+                                    </span>
+                                  </button>
+                                ))}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
                 <button
                   type="button"
@@ -636,7 +768,14 @@ export function Composer({ sessionID }: { sessionID: string }) {
               </div>
             </div>
           </PopoverAnchor>
-          <PopoverContent ref={popRef} side="top" align="start" sideOffset={8} className="w-[min(26rem,calc(100vw-2rem))] p-0">
+          <PopoverContent
+            ref={popRef}
+            side="top"
+            align="start"
+            sideOffset={8}
+            className="w-[min(26rem,calc(100vw-2rem))] p-0"
+            onOpenAutoFocus={(e) => e.preventDefault()}
+          >
             <Command>
               <CommandList>
                 {filteredSlash.map((entry) => (
