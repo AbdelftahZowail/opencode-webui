@@ -243,6 +243,25 @@ checks where applicable.**
       multi-step rendering with tool cards, and second-message flow all
       confirmed working in the browser ("streaming almost perfect").
 
+**Composer polish round (2026-08-21, `c19f949`→`b2afa47`):**
+- [x] Slash menu no longer steals focus from the textarea
+      (`onOpenAutoFocus` prevented) — typing after "/" stays in the editor;
+      all menu keys already route through the textarea's handler.
+- [x] Meta-row chips became LISTS: agents chip opens every child session
+      (running first, status dots, agent label) instead of jumping to the
+      newest; shells chip lists real `shellList` commands with pid/status and
+      click-expands inline output via `shellOutput`; Terminals group still
+      routes to the shell panel. Child sessions show an "↑ Parent" header
+      button (parent title as tooltip).
+- [x] Hint line reads "Working… · esc to interrupt" during a run (`0621d61`).
+- [x] Site-wide Esc interrupts the active run (`b2afa47`): useHotkeys handlers
+      now receive the KeyboardEvent; App registers "escape" but yields when the
+      composer owns the key (no double-interrupt) or an overlay
+      (dialog/popover/cmdk) needs Esc to dismiss itself.
+- [x] New sessions are created WITH the resolved default model instead of
+      create-then-switch, so the engine stops persisting "Model switched to…"
+      notes; historical model-switched messages are hidden from transcripts too.
+
 **TUI-parity composer wave (2026-08-21, commits `1f90128`→`95e73e6`) — done:**
 - [x] Composer rebuilt v2-TUI-style (`1f90128`): meta row inside the input box
       (shell-mode toggle, agent+model pickers MOVED HERE from the header,

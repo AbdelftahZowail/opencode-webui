@@ -58,13 +58,15 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   `POST /api/session/{id}/form/{formID}/reply`.
 - When the UI sends a prompt it is fire-and-forget: `POST .../prompt` only
   queues the message; the events drive everything rendered.
-- **Model pinning**: sessions created with `model:null` let the service pick
-  its own default at run time (which may be a rate-limited provider). The
-  store's `send*` actions and `newSession()` pin the session to the UI default
-  (`resolveDefaultModel` → the primary agent's model) via
-  `POST .../model` so what the picker shows is what executes. The pickers
-  read the authoritative `GET /api/session/{id}` from the `sessionDetails`
-  store slice.
+- **Model pinning**: new sessions are created WITH the resolved default
+  (`resolveDefaultModel()` passed into `POST /session`) — creating model-less
+  and switching after made the engine persist a "Model switched…" message in
+  every fresh session. Legacy unpinned sessions still get pinned on first send
+  (`ensureSessionModel` via `POST .../model`). The pickers read the
+  authoritative `GET /api/session/{id}` from the `sessionDetails` store slice.
+- **Esc** interrupts the active run site-wide (global hotkey map), yielding to
+  the composer when it's focused and to any open overlay (dialog/popover/menu)
+  that needs Esc to dismiss itself.
 - **Session navigation**: session rows are native `/session/{id}` anchors.
   Unmodified left-clicks switch sessions in place through `pushState`; browser
   back/forward uses `popstate`, and direct session URLs load the conversation.
@@ -220,11 +222,10 @@ treats the step events as the run lifecycle and keeps an ordered live projection
 
 ## Model pinning & pickers
 
-Sessions created with `model:null` let the service resolve its own default at
-run time (which may be a rate-limited provider). The store's `send*` actions
-and `newSession()` pin the session to the UI default (`resolveDefaultModel` →
-the primary agent's model) via `POST .../model` so what the picker shows is
-what executes. The pickers read the authoritative `GET /api/session/{id}`
+New sessions are created WITH the resolved default (`resolveDefaultModel()`
+passed into `POST /session`) so no "Model switched…" note is persisted. Legacy
+unpinned sessions get pinned on first send (`ensureSessionModel` via
+`POST .../model`). The pickers read the authoritative `GET /api/session/{id}`
 from the `sessionDetails` store slice.
 
 ## Debug logging
