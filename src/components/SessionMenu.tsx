@@ -30,7 +30,7 @@ export function SessionMenu({ sessionID }: { sessionID: string }) {
           <DropdownMenuItem onSelect={() => setDialog("fork")}>
             <GitFork /> Fork…
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void handleExport(sessionID)}>
+          <DropdownMenuItem onSelect={() => void downloadTranscript(sessionID)}>
             <Download /> Export
           </DropdownMenuItem>
           <DropdownMenuSeparator />
@@ -172,7 +172,8 @@ function CompactDialog({ sessionID, onClose }: { sessionID: string; onClose: () 
   );
 }
 
-async function handleExport(sessionID: string) {
+/** Fetch a session transcript and trigger a markdown download. */
+export async function downloadTranscript(sessionID: string) {
   try {
     const data = await exportSession(sessionID);
     const blob = new Blob([formatTranscript(data)], { type: "text/markdown" });

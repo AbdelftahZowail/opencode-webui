@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Send, Sparkles, Terminal } from "lucide-react";
+import { Send, Terminal } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, PromptFile } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
 import {
   activateSkill,
+  compactSession,
+  forkSession,
   interrupt,
   loadSessionDetail,
+  newSession,
+  renameSession,
+  selectSession,
   sendCommand,
   sendPrompt,
   sendPromptWithFiles,
@@ -14,17 +19,17 @@ import {
   switchAgent,
   useStore,
 } from "../store";
+import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { AgentPicker, ModelPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
+import { downloadTranscript } from "./SessionMenu";
 import { Spinner } from "./ui";
 import { Button } from "@/components/ui/button";
 import {
   Command,
   CommandEmpty,
-  CommandGroup,
   CommandItem,
   CommandList,
-  CommandSeparator,
 } from "@/components/ui/command";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,12 +48,97 @@ function loadAgents(): Promise<AgentInfo[]> {
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+// ---- slash menu (v2 TUI autocomplete parity) -----------------------------
+//
+// Upstream (packages/tui/src/component/prompt/autocomplete.tsx) shows ONE
+// flat list for "/" mode: built-in palette actions that have a slashName and
+// server commands, sorted alphabetically by display, capped at 10 items,
+// fuzzy-filtered over [name, description, aliases]. Built-ins execute
+// immediately on select; server commands insert "/<name> " into the input
+// (insert-with-args). Rows show the display text plus a muted trailing
+// description — no icons, no group headings.
+
+const SLASH_MENU_LIMIT = 10;
+
+interface SlashEntry {
+  key: string;
+  display: string;
+  /** Primary name first, then aliases — matched without the leading "/". */
+  names: string[];
+  description?: string;
+  onSelect: () => void;
+}
+
+function isSubsequence(needle: string, haystack: string): boolean {
+  let i = 0;
+  for (const ch of haystack) {
+    if (ch === needle[i]) i += 1;
+    if (i === needle.length) return true;
+  }
+  return i === needle.length;
+}
+
+/**
+ * Approximation of the TUI's fuzzysort.go over keys [display/value,
+ * description, aliases] with threshold 0 and the ×2 boost for targets that
+ * start with the typed query: prefix > alias-prefix > substring >
+ * subsequence > description. Deterministic and dependency-free.
+ */
+export function filterSlashEntries(entries: SlashEntry[], query: string): SlashEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return entries.slice(0, SLASH_MENU_LIMIT);
+  const hits: { entry: SlashEntry; score: number }[] = [];
+  for (const entry of entries) {
+    let score = 0;
+    const primary = `/${entry.names[0]}`;
+    if (primary.startsWith(`/${q}`)) {
+      score = 1000;
+    } else if (primary.includes(q)) {
+      score = 600;
+    } else if (isSubsequence(q, primary)) {
+      score = 200;
+    } else {
+      for (const alias of entry.names.slice(1)) {
+        const target = `/${alias}`;
+        if (target.startsWith(`/${q}`)) {
+          score = Math.max(score, 800);
+        } else if (target.includes(q)) {
+          score = Math.max(score, 400);
+        }
+      }
+    }
+    // Description matching mirrors upstream's slash-only description key.
+    if (score < 100 && entry.description?.toLowerCase().includes(q)) score = 100;
+    if (score > 0) hits.push({ entry, score });
+  }
+  hits.sort((a, b) => b.score - a.score || a.entry.display.localeCompare(b.entry.display));
+  return hits.slice(0, SLASH_MENU_LIMIT).map((hit) => hit.entry);
+}
+
+/** A built-in slash action wired to a UI capability (TUI palette parity). */
+interface SlashAction {
+  name: string;
+  aliases?: string[];
+  description?: string;
+  /** Executes immediately when selected or submitted as "/name args". */
+  run: (args: string) => void;
+}
+
+function usePrefs(): Prefs {
+  const [prefs, setPrefs] = useState<Prefs>(getPrefs);
+  useEffect(() => subscribePrefs(() => setPrefs(getPrefs())), []);
+  return prefs;
+}
+
 export function Composer({ sessionID }: { sessionID: string }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [filter, setFilter] = useState("");
+  const prefs = usePrefs();
+  // The text present when the menu was last dismissed; the menu stays closed
+  // for exactly this text (upstream closes on select and reopens on typing).
+  const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   const [pickedFiles, setPickedFiles] = useState<{ path: string; content?: string }[]>([]);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [shellMode, setShellMode] = useState(false);
@@ -60,6 +150,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const detail = useStore((s) => s.sessionDetails[sessionID]);
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void api.commands().then(setCommands);
@@ -72,9 +163,120 @@ export function Composer({ sessionID }: { sessionID: string }) {
     textareaRef.current?.focus();
   }, [sessionID]);
 
-  const isSlash = text.startsWith("/") && !text.includes(" ");
-  const filteredCommands = commands.filter((c) => c.name.startsWith(filter));
-  const filteredSkills = skills.filter((s) => (s.description ?? "").toLowerCase().includes(filter.toLowerCase()));
+  const isSlash =
+    !shellMode &&
+    text.startsWith("/") &&
+    // Upstream hides once a command word is followed by argument text
+    // ("/init extra"); a lone trailing space stays open with an empty filter.
+    !/^\S+\s+\S/.test(text) &&
+    dismissedAt !== text;
+  const slashQuery = text.slice(1);
+
+  const slashActions = useMemo<SlashAction[]>(
+    () => [
+      {
+        name: "new",
+        aliases: ["clear"],
+        description: "New session",
+        run: () => void newSession(),
+      },
+      {
+        name: "sessions",
+        aliases: ["resume", "continue"],
+        description: "Switch session",
+        run: () => void selectSession(null),
+      },
+      {
+        name: "thinking",
+        aliases: ["toggle-thinking"],
+        description: prefs.showReasoning ? "Collapse thinking" : "Expand thinking",
+        run: () => setPref("showReasoning", !getPrefs().showReasoning),
+      },
+      {
+        name: "rename",
+        description: "Rename session",
+        run: (args) => {
+          const title = args.trim();
+          if (title) void renameSession(sessionID, title);
+        },
+      },
+      {
+        name: "fork",
+        description: "Fork session",
+        run: () => void forkSession(sessionID, { type: "through" }).then((id) => void selectSession(id)),
+      },
+      {
+        name: "export",
+        description: "Export session transcript",
+        run: () => void downloadTranscript(sessionID),
+      },
+      {
+        name: "compact",
+        aliases: ["summarize"],
+        description: "Compact session",
+        run: () => void compactSession(sessionID, "steer"),
+      },
+    ],
+    [sessionID, prefs.showReasoning],
+  );
+
+  // Skills the engine also exposes as commands accept upstream's
+  // insert-with-args select action; others use the dedicated skill endpoint.
+  const commandNames = useMemo(() => new Set(commands.map((c) => c.name)), [commands]);
+
+  const slashEntries = useMemo<SlashEntry[]>(() => {
+    const entries: SlashEntry[] = [];
+    for (const action of slashActions) {
+      entries.push({
+        key: `action:${action.name}`,
+        display: `/${action.name}`,
+        names: [action.name, ...(action.aliases ?? [])],
+        description: action.description,
+        onSelect: () => {
+          setText("");
+          action.run("");
+        },
+      });
+    }
+    for (const command of commands) {
+      entries.push({
+        key: `command:${command.name}`,
+        display: `/${command.name}`,
+        names: [command.name],
+        description: command.description,
+        onSelect: () => {
+          setText(`/${command.name} `);
+          setDismissedAt(`/${command.name} `);
+          textareaRef.current?.focus();
+        },
+      });
+    }
+    for (const skill of skills) {
+      const known = commandNames.has(skill.name);
+      entries.push({
+        key: `skill:${skill.id}`,
+        display: `/${skill.name}`,
+        names: [skill.name],
+        description: skill.description,
+        onSelect: () => {
+          if (known) {
+            setText(`/${skill.name} `);
+            setDismissedAt(`/${skill.name} `);
+            textareaRef.current?.focus();
+          } else {
+            setText("");
+            void activateSkill(skill.id);
+          }
+        },
+      });
+    }
+    return entries.sort((a, b) => a.display.localeCompare(b.display));
+  }, [slashActions, commands, skills, commandNames]);
+
+  const filteredSlash = useMemo(
+    () => filterSlashEntries(slashEntries, slashQuery),
+    [slashEntries, slashQuery],
+  );
 
   const mentionQuery = useMemo(() => {
     const idx = text.lastIndexOf("@");
@@ -139,6 +341,15 @@ export function Composer({ sessionID }: { sessionID: string }) {
     textareaRef.current?.focus();
   }
 
+  function selectActiveSlashItem() {
+    // The vendored Command marks the active row with data-selected; clicking
+    // it runs its onSelect (same path as ArrowUp/Down + Enter).
+    const el = popRef.current?.querySelector<HTMLElement>(
+      '[data-slot="command-item"][data-selected="true"]',
+    );
+    el?.click();
+  }
+
   async function submit() {
     const value = text.trim();
     if (!value || busy) return;
@@ -150,7 +361,16 @@ export function Composer({ sessionID }: { sessionID: string }) {
         await sendShell(value.slice(1));
       } else if (value.startsWith("/")) {
         const parts = value.slice(1).split(" ");
-        await sendCommand(parts[0]!, parts.slice(1).join(" ") || undefined);
+        const name = parts[0]!;
+        const args = parts.slice(1).join(" ");
+        const action = slashActions.find((a) => a.name === name);
+        if (action) {
+          // Built-ins are UI actions; the engine's command route would
+          // reject them, so dispatch locally with the typed arguments.
+          action.run(args);
+        } else {
+          await sendCommand(name, args || undefined);
+        }
       } else if (pickedFiles.length > 0) {
         const files: PromptFile[] = [];
         for (const picked of pickedFiles) {
@@ -233,9 +453,32 @@ export function Composer({ sessionID }: { sessionID: string }) {
                     className={`max-h-40 min-h-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-1 text-sm placeholder:text-[color:var(--text-weaker)] focus-visible:ring-0 ${shellMode ? "font-mono" : ""}`}
                     onChange={(e) => {
                       setText(e.target.value);
-                      setFilter(e.target.value.slice(1));
                     }}
                     onKeyDown={(e) => {
+                      if (isSlash) {
+                        // While the slash menu is visible the TUI routes
+                        // Enter/Tab/Esc to the autocomplete, never to submit.
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          // Upstream hide(): wipe the partial "/query" unless
+                          // it ends with a space.
+                          if (!text.endsWith(" ")) {
+                            setText("");
+                          } else {
+                            setDismissedAt(text);
+                          }
+                          return;
+                        }
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          return;
+                        }
+                        if (e.key === "Tab") {
+                          e.preventDefault();
+                          selectActiveSlashItem();
+                          return;
+                        }
+                      }
                       if (e.key === "Escape") {
                         e.preventDefault();
                         if (shellMode) {
@@ -301,49 +544,20 @@ export function Composer({ sessionID }: { sessionID: string }) {
               </div>
             </div>
           </PopoverAnchor>
-          <PopoverContent side="top" align="start" sideOffset={8} className="w-[min(26rem,calc(100vw-2rem))] p-0">
+          <PopoverContent ref={popRef} side="top" align="start" sideOffset={8} className="w-[min(26rem,calc(100vw-2rem))] p-0">
             <Command>
               <CommandList>
-                {filteredCommands.length > 0 && (
-                  <CommandGroup heading="Commands">
-                    {filteredCommands.map((c) => (
-                      <CommandItem
-                        key={c.name}
-                        onSelect={() => {
-                          setText(`/${c.name} `);
-                          textareaRef.current?.focus();
-                        }}
-                      >
-                        <Terminal className="text-[color:var(--text-weak)]" />
-                        <span className="font-mono text-[color:var(--text-interactive-base)]">/{c.name}</span>
-                        {c.description && (
-                          <span className="ml-auto max-w-[55%] truncate pl-3 text-xs text-[color:var(--text-weaker)]">
-                            {c.description}
-                          </span>
-                        )}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                )}
-                {filteredCommands.length > 0 && filteredSkills.length > 0 && <CommandSeparator />}
-                {filteredSkills.length > 0 && (
-                  <CommandGroup heading="Skills">
-                    {filteredSkills.map((s) => (
-                      <CommandItem key={s.id} onSelect={() => void activateSkill(s.id)}>
-                        <Sparkles className="text-[color:var(--surface-brand-base)]" />
-                        <span className="text-[color:var(--surface-brand-base)]">{s.name}</span>
-                        {s.description && (
-                          <span className="ml-auto max-w-[55%] truncate pl-3 text-xs text-[color:var(--text-weaker)]">
-                            {s.description}
-                          </span>
-                        )}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                )}
-                {filteredCommands.length === 0 && filteredSkills.length === 0 && (
-                  <CommandEmpty>No matching commands or skills</CommandEmpty>
-                )}
+                {filteredSlash.map((entry) => (
+                  <CommandItem key={entry.key} value={entry.key} onSelect={entry.onSelect}>
+                    <span className="font-mono text-[color:var(--text-base)]">{entry.display}</span>
+                    {entry.description && (
+                      <span className="ml-auto max-w-[55%] truncate pl-3 text-xs text-[color:var(--text-weaker)]">
+                        {entry.description}
+                      </span>
+                    )}
+                  </CommandItem>
+                ))}
+                {filteredSlash.length === 0 && <CommandEmpty>No matching items</CommandEmpty>}
               </CommandList>
             </Command>
           </PopoverContent>
