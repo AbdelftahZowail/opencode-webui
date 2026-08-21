@@ -76,7 +76,9 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   newest sessions by default. Each workspace header independently collapses all
   rows; reopening resets the separate `Show N more…` expansion state. The
   sidebar itself can collapse to a 56px icon rail and resize from 240px to
-  480px, with double-click on the divider restoring 288px.
+  480px, with double-click on the divider restoring 288px. Subagent sessions
+  (parentID set) are excluded from top-level lists/counts and managed inside
+  their parent conversation (SubagentStrip: open/message children).
 
 ## Rules for editing
 

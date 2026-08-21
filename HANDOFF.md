@@ -242,6 +242,42 @@ checks where applicable.**
 - [x] Visual confirmations from the user (2026-08-21): live streaming,
       multi-step rendering with tool cards, and second-message flow all
       confirmed working in the browser ("streaming almost perfect").
+
+**TUI-parity composer wave (2026-08-21, commits `1f90128`→`95e73e6`) — done:**
+- [x] Composer rebuilt v2-TUI-style (`1f90128`): meta row inside the input box
+      (shell-mode toggle, agent+model pickers MOVED HERE from the header,
+      context readout = last-assistant tokens ÷ model limit.context + cost),
+      dynamic hint line (status/spinner, shell esc-hint, keybinds, cwd),
+      Tab/Shift+Tab agent cycling, dropdowns open upward, Send queues while
+      running instead of disabling.
+- [x] Request modals scoped per-session (`08db430`): Permission/Form/Question
+      filtered by currentSessionID; foreign requests stay queued behind a
+      bottom-right "N waiting elsewhere — switch" chip.
+- [x] Live-block ordering fixed (`08db430`): optimistic msg_local_* rows force
+      live placement below them (browser-vs-service clock skew made the
+      timestamp comparison flip).
+- [x] Esc stops a run; Stop clears spinner/badge instantly (`d214cce`).
+- [x] Slash menu mirrors TUI autocomplete (`2c33b54`): flat alphabetized
+      list (built-ins + commands + skills), trigger/hide rules incl.
+      trailing-space nuance, execute-vs-insert select semantics, Enter never
+      submits while open, Tab completes, Esc wipes query, fuzzy-ish filter
+      over name/alias/description, built-ins wired (/new /sessions /thinking
+      /rename /fork /export /compact with local dispatch).
+- [x] Meta-row run indicators (`44f6a1b`): "▸ N agents" (children by parentID)
+      and "⌨ M shells" chips → navigate/open ShellPanel; 5s poll paused on
+      hidden tab; additive store shellPanelTick/requestShellPanel +
+      childSessionsOf.
+- [x] Ctrl+B backgrounds synchronous subagents (`d5d55cd`) via real
+      api.sessionBackground() route (verified live, additive store action).
+- [x] Subagents out of top-level lists (`95e73e6`): parentID sessions excluded
+      from Sidebar groups/counts/pagination AND palette Sessions; new
+      SubagentStrip under parent Conversation headers — children w/ running
+      dots, Open, inline Message (additive sendPromptTo action).
+- Follow-ups recorded: controlled Pickers/ThemePicker so /models /agents
+  /themes built-ins can open them; spawn-subagent UI if engine ever allows
+  parentID on POST /session; popover child-list for the agents chip;
+  /timestamps needs a timestamps pref; palette is hand-curated vs upstream's
+  registry-driven keymap (deliberate).
 - **New-session send failing = dead model pinned in SERVICE config, not a UI
   bug** (2026-08-21): symptom was `session.execution.failed` ~60ms after
   `execution.started` with NO assistant message persisted (only the optimistic
