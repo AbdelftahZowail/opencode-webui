@@ -23,6 +23,7 @@ import { Button } from "./ui/button";
 import { Composer } from "./Composer";
 import { MessageItem, MessagePart } from "./MessageItem";
 import { SessionMenu } from "./SessionMenu";
+import { SubagentStrip } from "./SubagentStrip";
 import { ThemePicker } from "./ThemePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 
@@ -40,6 +41,7 @@ export function Conversation({ sessionID }: { sessionID: string }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <Header title={session?.title} sessionID={sessionID} running={running} queued={queued} />
+      <SubagentStrip sessionID={sessionID} />
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
         <MessageScroller className="flex-1">

@@ -1251,11 +1251,20 @@ export async function selectSession(
 export async function sendPrompt(text: string) {
   const sid = state.currentSessionID;
   if (!sid) return;
-  log("send", `prompt ${sid}: ${text.slice(0, 80)}`);
-  await ensureSessionModel(sid);
-  appendOptimisticUserMessage(sid, text);
-  markPending(sid);
-  await api.prompt(sid, text);
+  await sendPromptTo(sid, text);
+}
+
+/**
+ * Send a prompt to an explicit session — child/subagent sessions included.
+ * Sessions are uniform, so messaging a child is a normal prompt against its
+ * id; optimistic copies and the pending flag are keyed by that id.
+ */
+export async function sendPromptTo(sessionID: string, text: string) {
+  log("send", `prompt ${sessionID}: ${text.slice(0, 80)}`);
+  await ensureSessionModel(sessionID);
+  appendOptimisticUserMessage(sessionID, text);
+  markPending(sessionID);
+  await api.prompt(sessionID, text);
 }
 
 export async function sendCommand(name: string, args?: string) {

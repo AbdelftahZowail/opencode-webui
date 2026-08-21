@@ -84,6 +84,9 @@ export function Sidebar() {
     const home = findHome(sessions.map((s) => s.location?.directory));
     const buckets = new Map<string, typeof sessions>();
     for (const s of sessions) {
+      // Subagent (child) sessions are managed inside their parent session,
+      // never listed or counted as top-level workspace entries.
+      if (s.parentID) continue;
       if (q && !(s.title ?? "Untitled session").toLowerCase().includes(q)) continue;
       const key = workspaceName(s.location?.directory, home);
       const list = buckets.get(key) ?? [];

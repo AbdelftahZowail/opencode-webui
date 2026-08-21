@@ -70,7 +70,11 @@ export function CommandPalette() {
     };
   }, []);
 
-  const sortedSessions = [...sessions].sort((a, b) => b.time.updated - a.time.updated);
+  // Child/subagent sessions are managed inside their parent conversation,
+  // not offered as top-level navigation.
+  const sortedSessions = [...sessions]
+    .filter((s) => !s.parentID)
+    .sort((a, b) => b.time.updated - a.time.updated);
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
