@@ -90,6 +90,15 @@ matches the shell running the command and kills it too (gotcha #4 below).
     assistantMessageID, so the store created a "pending" placeholder that was
     never re-keyed; `session.step.started` now adopts it into the real
     assistant id (`adoptPendingAssistant`).
+- **Streaming projection rebuilt** (2026-08-16): the live reducer now keeps
+  text/reasoning parts by ordinal and tools by call ID in event order instead
+  of merging separate text, reasoning, and tool buckets. SSE events are reduced
+  in 16ms batches, duplicate event IDs are ignored, and disclosure state is
+  keyed by stable part IDs so open reasoning/tool panels survive streaming and
+  the live-to-history handoff. Poll reconciliation replaces updated messages,
+  but leaves unfinished persisted assistants behind the live overlay. Verified
+  with the two-prompt regression, a tool-heavy smoke run, and a live browser
+  pass with reasoning opened while new events arrived.
 - **Default-model mismatch fixed & verified** (2026-08-16): sessions created
   with `model:null` were silently resolved by the SERVICE at run time (to
   glm-5.3, rate-limited) while the picker displayed the primary agent's model
@@ -118,9 +127,10 @@ matches the shell running the command and kills it too (gotcha #4 below).
      connect). Verified firing + recovery live in the browser.
   2. **Live-poll fallback** in the store: while a session is `running` (or has
      live content), poll its messages every 2s and reconcile the transcript
-     (merge persisted messages, prune settled live assistants and optimistic
-     local user messages once the real copy exists). A finished answer can
-     never be lost behind a dead stream again.
+     (replace updated messages, keep unfinished assistants behind the live
+     overlay, and prune settled live assistants and optimistic local user
+     messages once the real copy exists). A finished answer can never be lost
+     behind a dead stream again.
 - **Error boundary + store HMR recovery** (2026-08-16): `ErrorBoundary.tsx`
   wraps the app so a render error never blanks the page again (shows the
   message + Retry). NOTE: the first `import.meta.hot.accept` attempt on
@@ -159,9 +169,9 @@ matches the shell running the command and kills it too (gotcha #4 below).
   assistant message per step (reasoning / tool / text), so during a run the
   transcript stacked partial bubbles and, once persisted, repeated the
   "build <agent> <provider>/<model>@<variant>" header on every step. Fixes:
-  1. **Merged live block**: `Conversation` merges ALL live assistants for the
-     session into one growing block (reasoning + tools + text) so streaming
-     reads like a single assistant message.
+  1. **Ordered live block**: `Conversation` renders ALL live assistants for the
+     session in one growing block while preserving the engine's part order and
+     stable part identity.
   2. **Compact continuation messages**: consecutive assistant messages render
      without the repeated agent/model header (first one keeps it).
   3. **Empty text parts** (e.g. the "\n\n" stub step) are skipped.
@@ -222,13 +232,31 @@ checks where applicable.**
       `scripts/uitest/two-prompt.sh` + `replay-store.mjs`.
 - [x] Queued/waiting feedback for messages sent while a run is active or
       during provider cold start (see DONE notes).
-- [x] Multi-step live rendering: merged live block + compact continuation
+- [x] Multi-step live rendering: ordered live block + compact continuation
       headers + empty-part skipping (see DONE notes). Verified in browser.
+- [x] Streaming projection rebuild: ordered event parts, stable disclosure
+      state, frame-batched deltas, and non-destructive live/history polling
+      (see DONE notes). Verified in browser and with tool-heavy replay.
 - [x] Full frontend+proxy debug logging (`/tmp/webui-debug.log`), clean
       start script (`scripts/start-dev.sh`), kill-by-PID guidance.
-- [ ] Pending visual confirmations from the user: model selector default,
-      second-message streaming, scroll behavior, and the multi-step rendering
-      above.
+- [x] Visual confirmations from the user (2026-08-21): live streaming,
+      multi-step rendering with tool cards, and second-message flow all
+      confirmed working in the browser ("streaming almost perfect").
+- **New-session send failing = dead model pinned in SERVICE config, not a UI
+  bug** (2026-08-21): symptom was `session.execution.failed` ~60ms after
+  `execution.started` with NO assistant message persisted (only the optimistic
+  user message shows). Root cause: `~/.config/opencode/opencode.jsonc` pinned
+  every agent to `opencode/deepseek-v4-flash-free`, which was rejecting runs
+  instantly; the UI's model pinning then faithfully copied that dead model onto
+  every new session (`resolveDefaultModel` → primary agent's model). Fix made in
+  the service config, not the app: top-level `"model": "opencode-go/ox-alpha-free"`
+  plus all three agents switched; the service hot-reloads config changes
+  (verified via `/api/agent`). All existing sessions were re-pinned off the dead
+  model through the API. Diagnostic recipe: diff `GET /api/session/{id}` between
+  a working and a failing session (model + location), then reproduce headlessly
+  with `scripts/uitest/create-session.sh` + `send-prompt.sh`. Remember the UI
+  memoizes the default per page load (`defaultModelPromise`) — hard-refresh
+  after changing agent models in config.
 
 ### 3. GIT — repository history and verification
 - [x] Repository initialized with a sensible `.gitignore` and the whole working

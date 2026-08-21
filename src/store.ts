@@ -8,6 +8,7 @@ import { api, type CompactDelivery, type ForkBoundary, type PromptFile } from ".
 import { connectEvents, type V2Event } from "./api/events";
 import { log } from "./lib/log";
 import type {
+  AssistantMessage,
   MessageInfo,
   ModelRef,
   PermissionRequest,
@@ -33,12 +34,22 @@ export interface LiveTool {
   content?: ToolContent[];
   metadata?: Record<string, unknown>;
   error?: StructuredError;
+  executed?: boolean;
+  created?: number;
+  ran?: number;
+  completed?: number;
 }
+
+export type LiveContentPart =
+  | { type: "text"; ordinal: number; text: string }
+  | { type: "reasoning"; ordinal: number; text: string }
+  | { type: "tool"; tool: LiveTool };
 
 export interface LiveAssistant {
   id: string;
   agent?: string;
   model?: ModelRef;
+  content: LiveContentPart[];
   text: string;
   reasoning: string;
   tools: Map<string, LiveTool>;
@@ -46,6 +57,7 @@ export interface LiveAssistant {
   cost?: number;
   error?: StructuredError;
   started: number;
+  completed?: number;
 }
 
 export interface State {
@@ -84,13 +96,32 @@ const initialState: State = {
 
 let state: State = initialState;
 const listeners = new Set<() => void>();
+let stateBatchDepth = 0;
+let stateBatchPending = false;
 
 function setState(patch: Partial<State>) {
   state = { ...state, ...patch };
+  if (stateBatchDepth > 0) {
+    stateBatchPending = true;
+    return;
+  }
   emit();
 }
 function emit() {
   for (const fn of listeners) fn();
+}
+
+function batchState(fn: () => void) {
+  stateBatchDepth += 1;
+  try {
+    fn();
+  } finally {
+    stateBatchDepth -= 1;
+    if (stateBatchDepth === 0 && stateBatchPending) {
+      stateBatchPending = false;
+      emit();
+    }
+  }
 }
 
 /**
@@ -213,21 +244,13 @@ async function refreshQueues() {
 }
 
 export async function loadMessages(sessionID: string) {
+  const request = beginMessageRequest(sessionID);
   try {
     const res = await api.messages(sessionID, 100);
+    if (messageRequests.get(sessionID) !== request) return;
     const history = [...res.data].reverse();
     log("load", `messages ${sessionID}: ${history.length} (limit 100)`);
-    if (state.currentSessionID === sessionID) {
-      // Keep live assistants whose persisted copy isn't in the fetched history
-      // yet (the write may lag execution end); drop the "pending" placeholder.
-      // This prevents a finicky refresh race from hiding a just-finished answer.
-      setState({
-        messages: { ...state.messages, [sessionID]: history },
-        live: state.live.filter((m) => m.id !== "pending" && !history.some((h) => h.id === m.id)),
-      });
-    } else {
-      setState({ messages: { ...state.messages, [sessionID]: history } });
-    }
+    applyFetchedMessages(sessionID, history);
   } catch (err) {
     console.warn("loadMessages failed:", err);
   }
@@ -235,28 +258,355 @@ export async function loadMessages(sessionID: string) {
 
 // ---- live message helpers ----------------------------------------------
 
-function ensureLiveAssistant(id: string): LiveAssistant {
+const messageRequests = new Map<string, number>();
+
+function beginMessageRequest(sessionID: string): number {
+  const request = (messageRequests.get(sessionID) ?? 0) + 1;
+  messageRequests.set(sessionID, request);
+  return request;
+}
+
+function isUnfinishedAssistant(message: MessageInfo | undefined): boolean {
+  return message?.type === "assistant" && message.time.completed === undefined;
+}
+
+function liveContentSummary(content: LiveContentPart[]) {
+  return {
+    text: content
+      .filter((part): part is Extract<LiveContentPart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join(""),
+    reasoning: content
+      .filter((part): part is Extract<LiveContentPart, { type: "reasoning" }> => part.type === "reasoning")
+      .map((part) => part.text)
+      .join(""),
+    tools: new Map(
+      content
+        .filter((part): part is Extract<LiveContentPart, { type: "tool" }> => part.type === "tool")
+        .map((part) => [part.tool.id, part.tool]),
+    ),
+  };
+}
+
+function withLiveContent(assistant: LiveAssistant, content: LiveContentPart[]): LiveAssistant {
+  return { ...assistant, content, ...liveContentSummary(content) };
+}
+
+function persistedToolToLive(tool: ToolPart): LiveTool {
+  const toolState = tool.state;
+  const inputText =
+    toolState.status === "streaming" ? toolState.input : JSON.stringify(toolState.input);
+  return {
+    id: tool.id,
+    name: tool.name,
+    inputText,
+    input: toolState.status === "streaming" ? undefined : toolState.input,
+    status: toolState.status,
+    content: "content" in toolState ? toolState.content : undefined,
+    metadata: "metadata" in toolState ? toolState.metadata : undefined,
+    error: toolState.status === "error" ? toolState.error : undefined,
+    executed: tool.executed,
+    created: tool.time.created,
+    ran: tool.time.ran,
+    completed: tool.time.completed,
+  };
+}
+
+function liveAssistantFromPersisted(message: AssistantMessage): LiveAssistant {
+  const ordinal = { text: 0, reasoning: 0 };
+  const content = message.content.map((part): LiveContentPart => {
+    if (part.type === "tool") return { type: "tool", tool: persistedToolToLive(part) };
+    const currentOrdinal = ordinal[part.type]++;
+    return { type: part.type, ordinal: currentOrdinal, text: part.text };
+  });
+  const assistant: LiveAssistant = {
+    id: message.id,
+    agent: message.agent,
+    model: message.model,
+    content: [],
+    text: "",
+    reasoning: "",
+    tools: new Map(),
+    finish: message.finish,
+    cost: message.cost,
+    error: message.error,
+    started: message.time.created,
+    completed: message.time.completed,
+  };
+  return withLiveContent(assistant, content);
+}
+
+function mergeStreamText(base: string, current: string): string {
+  if (!base) return current;
+  if (!current) return base;
+  if (current.startsWith(base) || base.endsWith(current)) return current.length >= base.length ? current : base;
+  if (base.startsWith(current)) return base;
+  return `${base}${current}`;
+}
+
+function livePartKey(part: LiveContentPart): string {
+  return part.type === "tool" ? `tool:${part.tool.id}` : `${part.type}:${part.ordinal}`;
+}
+
+function mergePersistedIntoLive(live: LiveAssistant, message: AssistantMessage): LiveAssistant {
+  const persisted = liveAssistantFromPersisted(message);
+  if (live.content.length === 0) return { ...persisted, id: live.id, started: live.started };
+
+  const currentByKey = new Map(live.content.map((part) => [livePartKey(part), part]));
+  const content = persisted.content.map((part) => {
+    const current = currentByKey.get(livePartKey(part));
+    if (!current) return part;
+    if (part.type === "tool" && current.type === "tool") {
+      const persistedTool = part.tool;
+      const currentTool = current.tool;
+      return {
+        type: "tool" as const,
+        tool: {
+          ...persistedTool,
+          ...currentTool,
+          inputText: mergeStreamText(persistedTool.inputText, currentTool.inputText),
+          input: currentTool.input ?? persistedTool.input,
+          status:
+            currentTool.status === "streaming" && persistedTool.status !== "streaming"
+              ? persistedTool.status
+              : currentTool.status,
+          content: currentTool.content ?? persistedTool.content,
+          metadata: currentTool.metadata ?? persistedTool.metadata,
+          error: currentTool.error ?? persistedTool.error,
+          executed: currentTool.executed ?? persistedTool.executed,
+          created: persistedTool.created ?? currentTool.created,
+          ran: currentTool.ran ?? persistedTool.ran,
+          completed: currentTool.completed ?? persistedTool.completed,
+        },
+      };
+    }
+    if (part.type !== "tool" && current.type !== "tool") {
+      return { ...part, text: mergeStreamText(part.text, current.text) };
+    }
+    return part;
+  });
+  const persistedKeys = new Set(content.map(livePartKey));
+  content.push(...live.content.filter((part) => !persistedKeys.has(livePartKey(part))));
+  return withLiveContent(
+    {
+      ...live,
+      agent: live.agent ?? persisted.agent,
+      model: live.model ?? persisted.model,
+      finish: live.finish ?? persisted.finish,
+      cost: live.cost ?? persisted.cost,
+      error: live.error ?? persisted.error,
+      completed: live.completed ?? persisted.completed,
+    },
+    content,
+  );
+}
+
+function hydrateLiveFromHistory(sessionID: string, history: MessageInfo[]) {
+  if (state.currentSessionID !== sessionID) return;
+  const persisted = new Map(
+    history
+      .filter((message): message is AssistantMessage => message.type === "assistant" && isUnfinishedAssistant(message))
+      .map((message) => [message.id, message]),
+  );
+  let changed = false;
+  const live = state.live.map((assistant) => {
+    const message = persisted.get(assistant.id);
+    if (!message) return assistant;
+    const next = mergePersistedIntoLive(assistant, message);
+    changed ||= next !== assistant;
+    return next;
+  });
+  if (changed) setState({ live });
+}
+
+function liveOverlayIDs(history: MessageInfo[]): Set<string> {
+  const fetched = new Map(history.map((message) => [message.id, message]));
+  return new Set(
+    state.live
+      .filter((live) => {
+        const persisted = fetched.get(live.id);
+        return live.id !== "pending" && (!persisted || isUnfinishedAssistant(persisted));
+      })
+      .map((live) => live.id),
+  );
+}
+
+function mergeFetchedMessages(sessionID: string, history: MessageInfo[]): MessageInfo[] {
+  const existing = state.messages[sessionID] ?? [];
+  const overlayIDs = liveOverlayIDs(history);
+  const existingUserCounts = new Map<string, number>();
+  const fetchedUserCounts = new Map<string, number>();
+  for (const message of existing) {
+    if (message.type === "user" && !message.id.startsWith("msg_local_")) {
+      existingUserCounts.set(message.text, (existingUserCounts.get(message.text) ?? 0) + 1);
+    }
+  }
+  for (const message of history) {
+    if (message.type === "user") {
+      fetchedUserCounts.set(message.text, (fetchedUserCounts.get(message.text) ?? 0) + 1);
+    }
+  }
+  const optimisticRemoval = new Map<string, number>();
+  for (const [text, count] of fetchedUserCounts) {
+    const extra = count - (existingUserCounts.get(text) ?? 0);
+    if (extra > 0) optimisticRemoval.set(text, extra);
+  }
+  const merged = new Map<string, MessageInfo>();
+
+  for (const message of existing) {
+    if (overlayIDs.has(message.id)) continue;
+    if (message.id.startsWith("msg_local_") && message.type === "user") {
+      const remaining = optimisticRemoval.get(message.text) ?? 0;
+      if (remaining > 0) {
+        optimisticRemoval.set(message.text, remaining - 1);
+        continue;
+      }
+    }
+    merged.set(message.id, message);
+  }
+  for (const message of history) {
+    if (!overlayIDs.has(message.id)) merged.set(message.id, message);
+  }
+
+  return [...merged.values()].sort(
+    (a, b) => a.time.created - b.time.created || a.id.localeCompare(b.id),
+  );
+}
+
+function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
+  hydrateLiveFromHistory(sessionID, history);
+  const merged = mergeFetchedMessages(sessionID, history);
+  if (state.currentSessionID !== sessionID) {
+    setState({ messages: { ...state.messages, [sessionID]: merged } });
+    return;
+  }
+
+  const fetchedByID = new Map(history.map((message) => [message.id, message]));
+  const pending = state.live.find((live) => live.id === "pending");
+  const pendingSettled = !!pending && history.some(
+    (message) =>
+      message.type === "assistant" &&
+      message.time.completed !== undefined &&
+      message.time.created >= pending.started - 5_000,
+  );
+  const settled = new Set(
+    state.live
+      .filter((live) => {
+        const persisted = fetchedByID.get(live.id);
+        return persisted?.type === "assistant" && persisted.time.completed !== undefined;
+      })
+      .map((live) => live.id),
+  );
+  const running = { ...state.running };
+  if (pendingSettled) {
+    delete running[sessionID];
+    seenExecution.delete(sessionID);
+  }
+  setState({
+    messages: { ...state.messages, [sessionID]: merged },
+    live: state.live.filter((live) => (live.id === "pending" ? !pendingSettled : !settled.has(live.id))),
+    running,
+  });
+}
+
+function ensureLiveAssistant(id: string, started = Date.now()): LiveAssistant {
   const existing = state.live.find((m) => m.id === id);
   if (existing) return existing;
-  const fresh: LiveAssistant = { id, text: "", reasoning: "", tools: new Map(), started: Date.now() };
-  setState({ live: [...state.live, fresh] });
+  const currentMessages = state.currentSessionID ? state.messages[state.currentSessionID] : undefined;
+  const persisted = currentMessages?.find(
+    (message): message is AssistantMessage =>
+      message.id === id && message.type === "assistant" && isUnfinishedAssistant(message),
+  );
+  const fresh = persisted
+    ? liveAssistantFromPersisted(persisted)
+    : {
+        id,
+        content: [],
+        text: "",
+        reasoning: "",
+        tools: new Map<string, LiveTool>(),
+        started,
+      };
+  setState({
+    live: [...state.live, fresh],
+    ...(persisted && state.currentSessionID
+      ? {
+          messages: {
+            ...state.messages,
+            [state.currentSessionID]: currentMessages!.filter((message) => message.id !== id),
+          },
+        }
+      : {}),
+  });
   return fresh;
+}
+
+function hideUnfinishedHistory(id: string) {
+  const sessionID = state.currentSessionID;
+  if (!sessionID) return;
+  const messages = state.messages[sessionID];
+  if (!messages?.some((message) => message.id === id && isUnfinishedAssistant(message))) return;
+  setState({
+    messages: {
+      ...state.messages,
+      [sessionID]: messages.filter((message) => message.id !== id),
+    },
+  });
 }
 
 function patchLiveAssistant(id: string, patch: Partial<LiveAssistant>) {
   setState({
-    live: state.live.map((m) => (m.id === id ? { ...m, ...patch, tools: new Map(m.tools) } : m)),
+    live: state.live.map((m) => {
+      if (m.id !== id) return m;
+      const next = { ...m, ...patch, tools: new Map(m.tools) };
+      return patch.content ? withLiveContent(next, patch.content) : next;
+    }),
   });
+}
+
+function ensureLiveContentPart(
+  assistantID: string,
+  type: "text" | "reasoning",
+  ordinal: number,
+): LiveContentPart | undefined {
+  const assistant = ensureLiveAssistant(assistantID);
+  const existing = assistant.content.find((part) => part.type === type && part.ordinal === ordinal);
+  if (existing) return existing;
+  const part: LiveContentPart = { type, ordinal, text: "" };
+  patchLiveAssistant(assistantID, { content: [...assistant.content, part] });
+  return part;
+}
+
+function patchLiveContentPart(
+  assistantID: string,
+  type: "text" | "reasoning",
+  ordinal: number,
+  text: string,
+  mode: "append" | "replace",
+) {
+  const assistant = state.live.find((m) => m.id === assistantID);
+  if (!assistant) return;
+  const content = assistant.content.map((part) => {
+    if (part.type !== type || part.ordinal !== ordinal) return part;
+    return { ...part, text: mode === "append" ? part.text + text : text };
+  });
+  patchLiveAssistant(assistantID, { content });
 }
 
 function ensureLiveTool(assistantID: string, toolID: string, name?: string): LiveTool {
   const assistant = ensureLiveAssistant(assistantID);
   const existing = assistant.tools.get(toolID);
   if (existing) return existing;
-  const tool: LiveTool = { id: toolID, name: name ?? "tool", inputText: "", status: "streaming" };
-  const tools = new Map(assistant.tools);
-  tools.set(toolID, tool);
-  setState({ live: state.live.map((m) => (m.id === assistantID ? { ...m, tools } : m)) });
+  const tool: LiveTool = {
+    id: toolID,
+    name: name ?? "tool",
+    inputText: "",
+    status: "streaming",
+    created: Date.now(),
+  };
+  patchLiveAssistant(assistantID, {
+    content: [...assistant.content, { type: "tool", tool }],
+  });
   return tool;
 }
 
@@ -265,9 +615,12 @@ function patchLiveTool(assistantID: string, toolID: string, patch: Partial<LiveT
   if (!assistant) return;
   const tool = assistant.tools.get(toolID);
   if (!tool) return;
-  const tools = new Map(assistant.tools);
-  tools.set(toolID, { ...tool, ...patch });
-  setState({ live: state.live.map((m) => (m.id === assistantID ? { ...m, tools } : m)) });
+  const updated = { ...tool, ...patch };
+  patchLiveAssistant(assistantID, {
+    content: assistant.content.map((part) =>
+      part.type === "tool" && part.tool.id === toolID ? { type: "tool", tool: updated } : part,
+    ),
+  });
 }
 
 /**
@@ -296,7 +649,14 @@ export function liveToolPart(t: LiveTool): ToolPart {
         : t.status === "running"
           ? { status: "running", input: input as Record<string, unknown>, metadata: t.metadata }
           : { status: "streaming", input: t.inputText };
-  return { type: "tool", id: t.id, name: t.name, state, time: { created: Date.now() } };
+  return {
+    type: "tool",
+    id: t.id,
+    name: t.name,
+    executed: t.executed,
+    state,
+    time: { created: t.created ?? Date.now(), ran: t.ran, completed: t.completed },
+  };
 }
 
 /**
@@ -398,24 +758,76 @@ async function settleLiveMessages(sessionID: string) {
 // remembers which sessions gave us a real execution.started so we can fall
 // back to step-level signals without double-clearing the running flag.
 const seenExecution = new Set<string>();
+const seenEventIDs = new Set<string>();
+const LIVE_TYPES = new Set([
+  "session.execution.started", "session.execution.succeeded", "session.execution.failed",
+  "session.execution.interrupted", "session.step.started", "session.step.ended", "session.step.failed",
+  "session.text.started", "session.text.delta", "session.text.ended",
+  "session.reasoning.started", "session.reasoning.delta", "session.reasoning.ended",
+  "session.tool.called", "session.tool.input.started", "session.tool.input.delta",
+  "session.tool.input.ended", "session.tool.progress", "session.tool.success", "session.tool.failed",
+  "session.retry.scheduled",
+]);
+
+function lastLiveAssistant(): LiveAssistant | undefined {
+  return [...state.live].reverse().find((assistant) => assistant.id !== "pending");
+}
+
+function settleRun(sessionID: string) {
+  const running = { ...state.running };
+  delete running[sessionID];
+  seenExecution.delete(sessionID);
+  setState({ running, queued: { ...state.queued, [sessionID]: false } });
+  if (state.currentSessionID === sessionID) {
+    if (state.live.some((assistant) => assistant.id === "pending")) {
+      setState({ live: state.live.filter((assistant) => assistant.id !== "pending") });
+    }
+    void settleLiveMessages(sessionID);
+  }
+  debouncedRefreshSessions();
+}
+
+function finishRun(sessionID: string, type: string, error?: StructuredError) {
+  const running = { ...state.running };
+  delete running[sessionID];
+  seenExecution.delete(sessionID);
+  setState({ running, queued: { ...state.queued, [sessionID]: false } });
+
+  if (state.currentSessionID === sessionID) {
+    if (state.live.some((assistant) => assistant.id === "pending")) {
+      setState({ live: state.live.filter((assistant) => assistant.id !== "pending") });
+    }
+    const active = lastLiveAssistant();
+    if (active) {
+      patchLiveAssistant(active.id, {
+        finish:
+          type === "session.execution.succeeded"
+            ? "stop"
+            : type === "session.execution.failed"
+              ? "error"
+              : "interrupted",
+        error: error ?? (type === "session.execution.succeeded" ? undefined : active.error),
+      });
+    }
+    void settleLiveMessages(sessionID);
+  }
+  debouncedRefreshSessions();
+}
 
 export function handleEvent(event: V2Event) {
   const { type, data } = event;
   const current = state.currentSessionID;
+  const eventSessionID = (data as { sessionID?: string }).sessionID;
+  if (event.id && eventSessionID === current && seenEventIDs.has(event.id)) return;
+  if (event.id && eventSessionID === current) {
+    seenEventIDs.add(event.id);
+  }
+
   const forCurrent = (sid?: string) => !!sid && sid === current;
 
   log("evt", type, `sid=${(data as { sessionID?: string }).sessionID ?? "-"}`,
     `current=${current ?? "-"}`, `mid=${(data as { assistantMessageID?: string }).assistantMessageID ?? "-"}`);
 
-  const LIVE_TYPES = new Set([
-    "session.execution.started", "session.execution.succeeded", "session.execution.failed",
-    "session.execution.interrupted", "session.step.started", "session.step.ended",
-    "session.text.started", "session.text.delta", "session.text.ended",
-    "session.reasoning.started", "session.reasoning.delta", "session.reasoning.ended",
-    "session.tool.called", "session.tool.input.started", "session.tool.input.delta",
-    "session.tool.input.ended", "session.tool.success", "session.tool.failed",
-    "session.retry.scheduled",
-  ]);
   if (current && LIVE_TYPES.has(type) && (data as { sessionID?: string }).sessionID !== current) {
     log("gate", `${type} for non-current session ${(data as { sessionID?: string }).sessionID} — skipped`);
   }
@@ -446,8 +858,6 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "session.inbox.delivered":
-      // delivered may precede execution.started; keep `queued` until a real
-      // run begins so the user still sees feedback during the handoff.
       break;
 
     case "session.execution.started":
@@ -457,7 +867,7 @@ export function handleEvent(event: V2Event) {
         running: { ...state.running, [data.sessionID]: true },
         queued: { ...state.queued, [data.sessionID]: false },
       });
-      if (forCurrent(data.sessionID)) ensureLiveAssistant(data.assistantMessageID ?? "pending");
+      if (forCurrent(data.sessionID)) ensureLiveAssistant(data.assistantMessageID ?? "pending", event.created);
       break;
 
     case "session.retry.scheduled":
@@ -474,37 +884,24 @@ export function handleEvent(event: V2Event) {
 
     case "session.execution.succeeded":
     case "session.execution.failed":
-    case "session.execution.interrupted": {
-      const running = { ...state.running };
-      delete running[data.sessionID];
-      seenExecution.delete(data.sessionID);
+    case "session.execution.interrupted":
       log("run", `finished ${data.sessionID} (${type})`);
-      setState({
-        running,
-        queued: { ...state.queued, [data.sessionID]: false },
-      });
-      if (forCurrent(data.sessionID)) {
-        const real = state.live.filter((m) => m.id !== "pending");
-        if (real.length !== state.live.length) setState({ live: real });
-      }
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        patchLiveAssistant(data.assistantMessageID, {
-          finish: type === "session.execution.succeeded" ? "stop" : "interrupted",
-          error: data.error,
-        });
-      }
-      if (forCurrent(data.sessionID)) void settleLiveMessages(data.sessionID);
-      debouncedRefreshSessions();
+      finishRun(data.sessionID, type, data.error);
       break;
-    }
 
     case "session.step.started":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
         adoptPendingAssistant(data.assistantMessageID, { agent: data.agent, model: data.model });
-        // No execution.started in this environment? A step starting means the
-        // queued message is now live — promote it to "running" so the UI
-        // engages (working badge, Stop, composer state).
-        if (state.queued[data.sessionID]) {
+        ensureLiveAssistant(data.assistantMessageID, event.created);
+        hideUnfinishedHistory(data.assistantMessageID);
+        patchLiveAssistant(data.assistantMessageID, {
+          agent: data.agent,
+          model: data.model,
+          finish: undefined,
+          error: undefined,
+          completed: undefined,
+        });
+        if (!seenExecution.has(data.sessionID) && !state.running[data.sessionID]) {
           log("run", `live via step.started ${data.sessionID}`);
           setState({
             running: { ...state.running, [data.sessionID]: true },
@@ -514,18 +911,12 @@ export function handleEvent(event: V2Event) {
       }
       break;
 
-    case "session.text.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && state.queued[data.sessionID]) {
-        // safety net: any live text means the run has started
-        setState({ queued: { ...state.queued, [data.sessionID]: false } });
-      }
-      break;
-
     case "session.step.ended":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
         patchLiveAssistant(data.assistantMessageID, {
           finish: data.finish,
           cost: data.cost,
+          completed: event.created,
         });
         if (!seenExecution.has(data.sessionID) && data.finish === "stop") {
           const running = { ...state.running };
@@ -535,49 +926,59 @@ export function handleEvent(event: V2Event) {
       }
       break;
 
+    case "session.step.failed":
+      if (forCurrent(data.sessionID) && data.assistantMessageID) {
+        patchLiveAssistant(data.assistantMessageID, {
+          finish: "error",
+          error: data.error,
+          cost: data.cost,
+          completed: event.created,
+        });
+        if (!seenExecution.has(data.sessionID)) {
+          const running = { ...state.running };
+          delete running[data.sessionID];
+          setState({ running });
+        }
+      }
+      break;
+
     case "session.text.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) ensureLiveAssistant(data.assistantMessageID);
+      if (forCurrent(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+        if (state.queued[data.sessionID]) setState({ queued: { ...state.queued, [data.sessionID]: false } });
+      }
       break;
     case "session.text.delta":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveAssistant(data.assistantMessageID);
-        patchLiveAssistant(data.assistantMessageID, { text: (state.live.find((m) => m.id === data.assistantMessageID)?.text ?? "") + (data.delta ?? "") });
+        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+        patchLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0, data.delta ?? "", "append");
       }
       break;
     case "session.text.ended":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        patchLiveAssistant(data.assistantMessageID, { text: data.text ?? "" });
+        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+        patchLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0, data.text ?? "", "replace");
       }
       break;
 
     case "session.reasoning.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) ensureLiveAssistant(data.assistantMessageID);
+      if (forCurrent(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+      }
       break;
     case "session.reasoning.delta":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveAssistant(data.assistantMessageID);
-        const base = state.live.find((m) => m.id === data.assistantMessageID)?.reasoning ?? "";
-        patchLiveAssistant(data.assistantMessageID, { reasoning: base + (data.delta ?? "") });
+        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+        patchLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0, data.delta ?? "", "append");
       }
       break;
     case "session.reasoning.ended":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        patchLiveAssistant(data.assistantMessageID, { reasoning: data.text ?? "" });
+        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+        patchLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0, data.text ?? "", "replace");
       }
       break;
 
-    case "session.tool.called":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        const tool = ensureLiveTool(data.assistantMessageID, data.id);
-        if (data.input !== undefined) {
-          patchLiveTool(data.assistantMessageID, data.id, {
-            input: data.input,
-            inputText: JSON.stringify(data.input),
-            status: tool.status === "streaming" ? "running" : tool.status,
-          });
-        }
-      }
-      break;
     case "session.tool.input.started":
       if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
         ensureLiveTool(data.assistantMessageID, data.id, data.name);
@@ -587,15 +988,13 @@ export function handleEvent(event: V2Event) {
       if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
         ensureLiveTool(data.assistantMessageID, data.id);
         const tool = state.live.find((m) => m.id === data.assistantMessageID)?.tools.get(data.id);
-        patchLiveTool(data.assistantMessageID, data.id, {
-          inputText: (tool?.inputText ?? "") + (data.delta ?? ""),
-        });
+        patchLiveTool(data.assistantMessageID, data.id, { inputText: (tool?.inputText ?? "") + (data.delta ?? "") });
       }
       break;
     case "session.tool.input.ended":
       if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
         const tool = ensureLiveTool(data.assistantMessageID, data.id);
-        let parsed: unknown = undefined;
+        let parsed: unknown;
         try {
           parsed = JSON.parse(data.text ?? "");
         } catch {
@@ -608,12 +1007,32 @@ export function handleEvent(event: V2Event) {
         });
       }
       break;
+    case "session.tool.called":
+      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
+        const tool = ensureLiveTool(data.assistantMessageID, data.id);
+        patchLiveTool(data.assistantMessageID, data.id, {
+          input: data.input,
+          inputText: data.input === undefined ? tool.inputText : JSON.stringify(data.input),
+          status: tool.status === "streaming" ? "running" : tool.status,
+          executed: data.executed,
+          ran: event.created,
+        });
+      }
+      break;
+    case "session.tool.progress":
+      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
+        ensureLiveTool(data.assistantMessageID, data.id);
+        patchLiveTool(data.assistantMessageID, data.id, { metadata: data.metadata });
+      }
+      break;
     case "session.tool.success":
       if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
         patchLiveTool(data.assistantMessageID, data.id, {
           status: "completed",
           content: (data.content as ToolContent[]) ?? undefined,
           metadata: data.metadata,
+          executed: data.executed,
+          completed: event.created,
         });
       }
       break;
@@ -623,8 +1042,24 @@ export function handleEvent(event: V2Event) {
           status: "error",
           error: data.error,
           content: (data.content as ToolContent[]) ?? undefined,
+          metadata: data.metadata,
+          executed: data.executed,
+          completed: event.created,
         });
       }
+      break;
+
+    case "session.status": {
+      const status = (data as { status?: { type?: string } }).status?.type;
+      if (status === "busy") {
+        setState({ running: { ...state.running, [data.sessionID]: true }, queued: { ...state.queued, [data.sessionID]: false } });
+      } else if (status === "idle") {
+        settleRun(data.sessionID);
+      }
+      break;
+    }
+    case "session.idle":
+      settleRun(data.sessionID);
       break;
 
     case "permission.asked":
@@ -654,9 +1089,7 @@ export function handleEvent(event: V2Event) {
       break;
     case "question.replied":
     case "question.rejected":
-      setState({
-        questions: state.questions.filter((q) => q.id !== (data as { requestID?: string }).requestID),
-      });
+      setState({ questions: state.questions.filter((q) => q.id !== (data as { requestID?: string }).requestID) });
       break;
 
     default:
@@ -670,6 +1103,20 @@ export function handleEvent(event: V2Event) {
 // ---- lifecycle ----------------------------------------------------------
 
 let started = false;
+const pendingEvents: V2Event[] = [];
+let eventFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function enqueueEvent(event: V2Event) {
+  pendingEvents.push(event);
+  if (eventFlushTimer) return;
+  eventFlushTimer = setTimeout(() => {
+    eventFlushTimer = null;
+    const events = pendingEvents.splice(0, pendingEvents.length);
+    batchState(() => {
+      for (const item of events) handleEvent(item);
+    });
+  }, 16);
+}
 
 export function startStore() {
   if (started) return;
@@ -695,7 +1142,7 @@ export function startStore() {
     .health()
     .then((h) => setState({ serviceOK: h.ok }))
     .catch(() => setState({ serviceOK: false }));
-  void connectEvents((env) => handleEvent(env.data), {
+  void connectEvents((env) => enqueueEvent(env.data), {
     onOpen: () => {
       setState({ connected: true });
       void refreshSessions();
@@ -716,6 +1163,7 @@ export function startStore() {
 const POLL_MS = 2000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
 
 function startPolling() {
   if (pollTimer) return;
@@ -725,50 +1173,35 @@ function startPolling() {
 async function reconcileSession(sid: string, historyDesc: MessageInfo[]) {
   if (state.currentSessionID !== sid) return;
   const history = [...historyDesc].reverse();
-  const fetchedIDs = new Set(history.map((h) => h.id));
-  const existing = state.messages[sid] ?? [];
-  const present = new Set(existing.map((m) => m.id));
-  const merged = [...existing];
-  for (const h of history) {
-    if (!present.has(h.id) && !h.id.startsWith("msg_local_")) {
-      merged.push(h);
-      present.add(h.id);
-    }
-  }
-  // Drop optimistic local user messages once the persisted copy with the
-  // same text shows up in fetched history.
-  const realUserTexts = new Set(history.filter((h) => h.type === "user").map((h) => h.text));
-  const clean = merged.filter(
-    (m) => !(m.id.startsWith("msg_local_") && m.type === "user" && realUserTexts.has(m.text)),
-  );
-  const liveAfter = state.live.filter((m) => m.id === "pending" || !fetchedIDs.has(m.id));
-  const messagesChanged =
-    clean.length !== state.messages[sid]?.length ||
-    clean.some((m, i) => m !== (state.messages[sid] ?? [])[i]);
-  const liveChanged = liveAfter.length !== state.live.length;
-  if (messagesChanged || liveChanged) {
-    setState({
-      messages: messagesChanged ? { ...state.messages, [sid]: clean } : state.messages,
-      live: liveChanged ? liveAfter : state.live,
-    });
-  }
+  applyFetchedMessages(sid, history);
 }
 
 async function pollOnce() {
+  if (pollInFlight) return;
   const sids = new Set<string>();
   for (const [sid, on] of Object.entries(state.running)) if (on) sids.add(sid);
-  if (state.currentSessionID) sids.add(state.currentSessionID);
+  if (state.currentSessionID && (state.live.length > 0 || state.queued[state.currentSessionID])) {
+    sids.add(state.currentSessionID);
+  }
   if (sids.size === 0) return;
-  for (const sid of sids) {
-    try {
-      const res = await api.messages(sid, 50);
-      const before = state.messages[sid]?.length ?? 0;
-      await reconcileSession(sid, res.data);
-      const after = state.messages[sid]?.length ?? 0;
-      if (after !== before) log("poll", `reconcile ${sid}: ${before} -> ${after} messages`);
-    } catch {
-      /* transient; try again next tick */
+
+  pollInFlight = true;
+  try {
+    for (const sid of sids) {
+      const request = beginMessageRequest(sid);
+      try {
+        const res = await api.messages(sid, 50);
+        if (messageRequests.get(sid) !== request) continue;
+        const before = state.messages[sid]?.length ?? 0;
+        await reconcileSession(sid, res.data);
+        const after = state.messages[sid]?.length ?? 0;
+        if (after !== before) log("poll", `reconcile ${sid}: ${before} -> ${after} messages`);
+      } catch {
+        /* transient; try again next tick */
+      }
     }
+  } finally {
+    pollInFlight = false;
   }
 }
 
@@ -780,6 +1213,9 @@ export async function selectSession(
 ) {
   log("session", "select", sessionID ?? "null");
   if (options.history !== "none") updateSessionHistory(sessionID, options.history ?? "push");
+  // A reconnect can replay events that were already handled before navigation;
+  // the newly selected session must be allowed to hydrate from that replay.
+  seenEventIDs.clear();
   setState({
     currentSessionID: sessionID,
     live: [],

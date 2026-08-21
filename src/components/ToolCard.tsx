@@ -6,8 +6,20 @@ import { Badge, formatTime } from "./ui";
 import { ToolContentView } from "./MessageItem";
 import { getPrefs, subscribePrefs } from "../prefs";
 
-export function ToolCard({ part }: { part: ToolPart }) {
-  const [expanded, setExpanded] = useState(true);
+const toolDisclosureState = new Map<string, boolean>();
+
+function rememberToolDisclosure(key: string, value: boolean) {
+  toolDisclosureState.delete(key);
+  toolDisclosureState.set(key, value);
+  while (toolDisclosureState.size > 2_000) {
+    const oldest = toolDisclosureState.keys().next().value;
+    if (!oldest) break;
+    toolDisclosureState.delete(oldest);
+  }
+}
+
+export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string }) {
+  const [expanded, setExpanded] = useState(() => (stateKey ? toolDisclosureState.get(stateKey) ?? true : true));
   const [showToolDetails, setShowToolDetails] = useState(getPrefs().showToolDetails);
   useEffect(() => subscribePrefs(() => setShowToolDetails(getPrefs().showToolDetails)), []);
 
@@ -28,7 +40,11 @@ export function ToolCard({ part }: { part: ToolPart }) {
     <div className="overflow-hidden rounded-lg border border-(color:--border-weak-base) bg-(--background-strong)">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          const next = !expanded;
+          setExpanded(next);
+          if (stateKey) rememberToolDisclosure(stateKey, next);
+        }}
         className="flex w-full items-center justify-between px-2.5 py-1.5 text-left hover:bg-(--surface-base-hover) cursor-pointer"
       >
         <span className="flex min-w-0 items-center gap-2">

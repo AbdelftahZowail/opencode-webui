@@ -126,23 +126,48 @@ function AssistantView({ message, compact }: { message: AssistantMessage; compac
             {message.error.type}: {message.error.message}
           </div>
         )}
-        {message.content.map((part, i) => (
-          <MessagePart key={i} part={part} />
-        ))}
+        {(() => {
+          const ordinal = { text: 0, reasoning: 0 };
+          return message.content.map((part) => {
+            const key =
+              part.type === "tool"
+                ? `${message.id}:tool:${part.id}`
+                : `${message.id}:${part.type}:${ordinal[part.type]++}`;
+            return <MessagePart key={key} stateKey={key} part={part} />;
+          });
+        })()}
       </div>
     </Row>
   );
 }
 
-export function MessagePart({ part }: { part: ToolPart | { type: "text"; text: string } | { type: "reasoning"; text: string } }) {
-  if (part.type === "reasoning") return <ReasoningBlock text={part.text} />;
-  if (part.type === "tool") return <ToolCard part={part} />;
+export function MessagePart({
+  part,
+  stateKey,
+}: {
+  part: ToolPart | { type: "text"; text: string } | { type: "reasoning"; text: string };
+  stateKey?: string;
+}) {
+  if (part.type === "reasoning") return <ReasoningBlock text={part.text} stateKey={stateKey} />;
+  if (part.type === "tool") return <ToolCard part={part} stateKey={stateKey} />;
   if (!part.text || !part.text.trim()) return null;
   return <Markdown text={part.text} />;
 }
 
-function ReasoningBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+const disclosureState = new Map<string, boolean>();
+
+function rememberDisclosure(key: string, value: boolean) {
+  disclosureState.delete(key);
+  disclosureState.set(key, value);
+  while (disclosureState.size > 2_000) {
+    const oldest = disclosureState.keys().next().value;
+    if (!oldest) break;
+    disclosureState.delete(oldest);
+  }
+}
+
+function ReasoningBlock({ text, stateKey }: { text: string; stateKey?: string }) {
+  const [open, setOpen] = useState(() => (stateKey ? disclosureState.get(stateKey) ?? false : false));
   const [showReasoning, setShowReasoning] = useState(getPrefs().showReasoning);
   useEffect(() => subscribePrefs(() => setShowReasoning(getPrefs().showReasoning)), []);
   if (!text) return null;
@@ -157,7 +182,11 @@ function ReasoningBlock({ text }: { text: string }) {
     <div className="overflow-hidden rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-inset-base)]">
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (stateKey) rememberDisclosure(stateKey, next);
+        }}
         className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-left text-xs text-[var(--text-weak)] transition-colors hover:text-[var(--text-base)]"
       >
         <ChevronRight className={`size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />

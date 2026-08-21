@@ -173,7 +173,7 @@ principle: each API resource group gets a UI surface, in the order above.
 
 The service emits one assistant message per step (reasoning / tool / text)
 and in this deployment often NO `session.execution.*` events — so the store
-treats the step events as the run lifecycle:
+treats the step events as the run lifecycle and keeps an ordered live projection:
 
 - **`store.queued` ("waiting")**: set optimistically on every send AND on
   `session.inbox.enqueued`; cleared on the first live event
@@ -183,12 +183,18 @@ treats the step events as the run lifecycle:
   `step.started` for a queued session promotes it to running; the final
   `step.ended` with `finish:"stop"` clears it (`seenExecution` remembers
   sessions with real execution events so they keep the canonical path).
+- **Ordered live parts**: each live assistant keeps text/reasoning parts by
+  event ordinal and tools by call ID, in event order. The renderer never
+  rebuilds a stream as separate reasoning → text → tools buckets.
+- **Frame-batched events**: SSE events are reduced in 16ms batches so a burst
+  of token deltas produces one React update instead of one render per delta.
 - **SSE watchdog** (`events.ts`): if no bytes arrive for 30s the reader is
   cancelled and the stream reconnects (the service replays recent events).
 - **Always-poll fallback** (`store.pollOnce`): every 2s the current session's
-  messages are fetched and reconciled — merge persisted messages, prune live
-  assistants that are now in history, drop optimistic `msg_local_` copies
-  once the real message exists. A finished answer can never be lost.
+  messages are fetched and reconciled — replace newer copies of existing
+  messages, keep unfinished persisted assistants behind the live overlay, and
+  drop optimistic `msg_local_` copies once the real message exists. A finished
+  answer can never be lost.
 - **`settleLiveMessages`**: on execution end, reload history; if live
   assistants aren't persisted yet, keep them visible and retry once after
   1.5s.
@@ -198,9 +204,9 @@ treats the step events as the run lifecycle:
 
 ## Rendering (live vs history)
 
-- **Merged live block**: `Conversation` merges all live assistants for the
-  session into ONE growing block (reasoning + tools + text) so a multi-step
-  run streams like a single assistant message.
+- **Ordered live block**: `Conversation` renders all live assistants for the
+  session in ONE growing block, preserving the engine's part order and stable
+  part identity so a multi-step run streams like a single assistant message.
 - **Compact continuation messages**: consecutive assistant messages render
   without the repeated `agent provider/model@variant` header — only the first
   in a group shows it.

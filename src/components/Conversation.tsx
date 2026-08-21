@@ -1,7 +1,14 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Square } from "lucide-react";
-import type { StructuredError } from "../api/types";
-import { interrupt, liveToolPart, loadMessages, selectSession, useStore, type LiveTool } from "../store";
+import {
+  interrupt,
+  liveToolPart,
+  loadMessages,
+  selectSession,
+  useStore,
+  type LiveAssistant,
+  type LiveContentPart,
+} from "../store";
 import { SlotOutlet } from "../extensions/registry";
 import {
   MessageScroller,
@@ -31,25 +38,6 @@ export function Conversation({ sessionID }: { sessionID: string }) {
     void loadMessages(sessionID);
   }, [sessionID]);
 
-  // During streaming the engine emits one assistant message per step (tool,
-  // reasoning, text…). Merge all live assistants for the current session into
-  // a single growing block so it reads like one assistant message instead of
-  // a pile of partial bubbles.
-  const mergedLive = useMemo(() => {
-    if (live.length === 0) return null;
-    const reasoning = live
-      .map((m) => m.reasoning)
-      .filter((t) => t && t.trim())
-      .join("\n\n");
-    const text = live
-      .map((m) => m.text)
-      .filter((t) => t && t.trim())
-      .join("\n\n");
-    const tools: LiveTool[] = live.flatMap((m) => [...m.tools.values()]);
-    const error = live.find((m) => m.error)?.error;
-    return { reasoning, text, tools, error };
-  }, [live]);
-
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <Header title={session?.title} sessionID={sessionID} running={running} queued={queued} />
@@ -58,29 +46,41 @@ export function Conversation({ sessionID }: { sessionID: string }) {
         <MessageScroller className="flex-1">
           <MessageScrollerViewport>
             <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6">
-              {messages.length === 0 && !mergedLive && !running && (
+              {messages.length === 0 && live.length === 0 && !running && (
                 <MessageScrollerItem>
                   <EmptyHint />
                 </MessageScrollerItem>
               )}
               {(() => {
                 let prevAssistant = false;
-                return messages.map((m) => {
-                  const isAssistant = m.type === "assistant";
+                let insertedLive = false;
+                const liveStarted = live.length > 0 ? Math.min(...live.map((assistant) => assistant.started)) : Infinity;
+                const rows: ReactNode[] = [];
+                const addLive = () => {
+                  if (insertedLive || live.length === 0) return;
+                  rows.push(
+                    <MessageScrollerItem key="live">
+                      <LiveAssistantView assistants={live} running={running} />
+                    </MessageScrollerItem>,
+                  );
+                  insertedLive = true;
+                  prevAssistant = true;
+                };
+
+                for (const message of messages) {
+                  if (!insertedLive && message.time.created > liveStarted) addLive();
+                  const isAssistant = message.type === "assistant";
                   const compact = isAssistant && prevAssistant;
                   prevAssistant = isAssistant;
-                  return (
-                    <MessageScrollerItem key={m.id} messageId={m.id}>
-                      <MessageItem message={m} compact={compact} />
-                    </MessageScrollerItem>
+                  rows.push(
+                    <MessageScrollerItem key={message.id} messageId={message.id}>
+                      <MessageItem message={message} compact={compact} />
+                    </MessageScrollerItem>,
                   );
-                });
+                }
+                addLive();
+                return rows;
               })()}
-              {mergedLive && (
-                <MessageScrollerItem>
-                  <LiveAssistantView content={mergedLive} running={running} />
-                </MessageScrollerItem>
-              )}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton direction="end" />
@@ -155,34 +155,46 @@ function Header({ title, sessionID, running, queued }: { title?: string; session
 }
 
 function LiveAssistantView({
-  content,
+  assistants,
   running,
 }: {
-  content: { reasoning: string; text: string; tools: LiveTool[]; error?: StructuredError };
+  assistants: LiveAssistant[];
   running: boolean;
 }) {
-  const parts = [
-    ...(content.reasoning.trim() ? [{ type: "reasoning" as const, text: content.reasoning }] : []),
-    ...(content.text.trim() ? [{ type: "text" as const, text: content.text }] : []),
-    ...content.tools.map(liveToolPart),
-  ];
-  if (parts.length === 0 && !running && !content.error) return null;
+  const parts = assistants.flatMap((assistant) =>
+    assistant.content.map((part) => ({
+      key: livePartKey(assistant.id, part),
+      part,
+    })),
+  );
+  const error = assistants.find((assistant) => assistant.error)?.error;
+  if (parts.length === 0 && !running && !error) return null;
   return (
     <div className="border-l-2 border-[color-mix(in_oklch,var(--border-selected)_40%,transparent)] pl-3">
-      {content.error && (
+      {error && (
         <div className="mb-2 rounded-md border border-[color-mix(in_oklch,var(--surface-critical-strong)_40%,transparent)] bg-[var(--surface-critical-weak)] px-3 py-2 text-xs text-[var(--text-on-critical-strong)]">
-          <span className="font-medium">{content.error.type}</span>
-          <div className="mt-0.5">{content.error.message}</div>
+          <span className="font-medium">{error.type}</span>
+          <div className="mt-0.5">{error.message}</div>
         </div>
       )}
-      {parts.length === 0 && running && !content.error && (
+      {parts.length === 0 && running && !error && (
         <div className="flex items-center gap-2 py-1 text-[var(--font-size-base)] text-[var(--text-weak)] animate-pulse">
           thinking…
         </div>
       )}
-      {parts.map((p, i) => (
-        <MessagePart key={i} part={p as never} />
+      {parts.map(({ key, part }) => (
+        <MessagePart
+          key={key}
+          stateKey={key}
+          part={part.type === "tool" ? liveToolPart(part.tool) : part}
+        />
       ))}
     </div>
   );
+}
+
+function livePartKey(assistantID: string, part: LiveContentPart): string {
+  return part.type === "tool"
+    ? `${assistantID}:tool:${part.tool.id}`
+    : `${assistantID}:${part.type}:${part.ordinal}`;
 }
