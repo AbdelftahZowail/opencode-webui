@@ -429,11 +429,14 @@ stream hiccupped and auto-recovered. Console mirror of the same lines:
 
 ## Reference material
 
+- **`docs/upstream-references.md` — READ THIS for upstream help**: what the
+  local `anomalyco/opencode` checkouts (`~/opencode-reference` = dev,
+  `~/opencode-reference-v1` = v1.18.9) contain, what each package is good for
+  (session-ui spec, their v2 event reducer, SDK types, TUI dialogs), and
+  verified findings (their web app is hybrid/Solid/non-extensible and does NOT
+  work against our service).
 - `docs/reference/openapi.json` — the live v2 OpenAPI spec snapshot
   (authoritative for field names). Refresh with `bun run scripts/fetch-openapi.ts`.
-- `/tmp/opencode-src` etc. are GONE (wiped); re-clone anomalyco/opencode if
-  needed: `packages/tui` (v2 behavioral spec) and `packages/ui/src/styles`
-  (token source). The tokens themselves live in `src/styles.css`.
 
 ## Rules that must survive (the extension philosophy)
 
