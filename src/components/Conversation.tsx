@@ -62,6 +62,7 @@ export function Conversation({ sessionID }: { sessionID: string }) {
                 let prevAssistant = false;
                 let insertedLive = false;
                 const hasLocalMessage = messages.some((m) => m.id.startsWith("msg_local_"));
+                const visibleMessages = messages.filter((m) => m.type !== "model-switched");
                 const liveStarted =
                   !hasLocalMessage && live.length > 0
                     ? Math.min(...live.map((assistant) => assistant.started))
@@ -78,7 +79,7 @@ export function Conversation({ sessionID }: { sessionID: string }) {
                   prevAssistant = true;
                 };
 
-                for (const message of messages) {
+                for (const message of visibleMessages) {
                   if (!insertedLive && message.time.created > liveStarted) addLive();
                   const isAssistant = message.type === "assistant";
                   const compact = isAssistant && prevAssistant;

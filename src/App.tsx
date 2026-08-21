@@ -6,13 +6,32 @@ import { QuestionModal } from "./components/QuestionModal";
 import { Sidebar } from "./components/Sidebar";
 import { SlotOutlet } from "./extensions/registry";
 import { useHotkeys } from "./hooks/useHotkeys";
-import { newSession, selectSession, useStore } from "./store";
+import { interrupt, newSession, selectSession, useStore } from "./store";
 
 export default function App() {
   const sessionID = useStore((s) => s.currentSessionID);
   const connected = useStore((s) => s.connected);
+  const running = useStore((s) => (s.currentSessionID ? s.running[s.currentSessionID] ?? false : false));
 
-  useHotkeys({ "ctrl+n": () => void newSession() });
+  useHotkeys({
+    "ctrl+n": () => void newSession(),
+    escape: (e) => {
+      // Site-wide Esc interrupts the active run, EXCEPT when a composer or an
+      // overlay owns the key: the composer handles its own shell-mode/run Esc,
+      // and dialogs/dropdowns/menus need Esc to close themselves.
+      const target = e?.target as HTMLElement | null;
+      if (
+        target &&
+        (target.id === "composer-input" ||
+          target.closest(
+            '[role="dialog"], [data-radix-popper-content-wrapper], [cmdk-root], [data-slot="command"]',
+          ))
+      ) {
+        return;
+      }
+      if (running) void interrupt();
+    },
+  });
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">

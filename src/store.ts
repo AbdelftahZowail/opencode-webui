@@ -1399,17 +1399,13 @@ export async function rejectQuestion(requestID: string) {
 
 export async function newSession(options: { history?: "push" | "replace" } = {}) {
   log("session", "newSession create");
-  const res = await api.createSession({ title: null, agent: null, model: null, location: null });
+  // Create WITH the resolved default model: pinning after creation makes the
+  // engine persist a noisy "Model switched to …" message in every fresh
+  // session. If resolution fails, model:null lets the service pick its own.
+  const model = await resolveDefaultModel();
+  const res = await api.createSession({ title: null, agent: null, model: model ?? null, location: null });
   const sid = res.data.id;
-  if (!res.data.model) {
-    // The service resolves its own default model at run time unless pinned.
-    // Pin to the UI default so what the picker shows is what actually runs.
-    const m = await resolveDefaultModel();
-    if (m) {
-      await api.switchModel(sid, m).catch(() => undefined);
-      log("model", `new session ${sid} pinned -> ${m.providerID}/${m.id}`);
-    }
-  }
+  if (model) log("model", `new session ${sid} -> ${model.providerID}/${model.id}`);
   await refreshSessions();
   await loadSessionDetail(sid);
   await selectSession(sid, { history: options.history ?? "push" });

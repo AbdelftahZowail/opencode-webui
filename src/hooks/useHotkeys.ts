@@ -45,9 +45,10 @@ function matches(combo: string, e: KeyboardEvent): boolean {
  * Binds keydown on window for the given combo → handler map (e.g.
  * "ctrl+p", "ctrl+n", "escape"). Registered combos fire even while
  * focus is in an input/textarea/contenteditable; unregistered keys are
- * left untouched so typing is never blocked.
+ * left untouched so typing is never blocked. Handlers receive the raw
+ * KeyboardEvent so they can opt out per context.
  */
-export function useHotkeys(map: Record<string, () => void>): void {
+export function useHotkeys(map: Record<string, (e?: KeyboardEvent) => void>): void {
   const mapRef = useRef(map);
   mapRef.current = map;
 
@@ -58,7 +59,7 @@ export function useHotkeys(map: Record<string, () => void>): void {
       const handler = combo ? mapRef.current[combo] : undefined;
       if (!handler) return;
       e.preventDefault();
-      handler();
+      handler(e);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
