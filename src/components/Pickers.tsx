@@ -32,7 +32,7 @@ async function defaultAgent(): Promise<AgentInfo | undefined> {
   }
 }
 
-function useSessionDetail(sessionID: string) {
+export function useSessionDetail(sessionID: string) {
   const session = useStore((s) => s.sessions.find((x) => x.id === sessionID));
   const detail = useStore((s) => s.sessionDetails[sessionID]);
   useEffect(() => {
@@ -41,7 +41,15 @@ function useSessionDetail(sessionID: string) {
   return { session, detail };
 }
 
-export function ModelPicker({ sessionID }: { sessionID: string }) {
+export function ModelPicker({
+  sessionID,
+  openUp = false,
+  align = "right",
+}: {
+  sessionID: string;
+  openUp?: boolean;
+  align?: "left" | "right";
+}) {
   const { session, detail } = useSessionDetail(sessionID);
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -62,30 +70,39 @@ export function ModelPicker({ sessionID }: { sessionID: string }) {
     }
   }, [session?.model, fallback]);
 
+  const menuPos = `${openUp ? "bottom-full mb-1" : "mt-1"} ${align === "right" ? "right-0" : "left-0"}`;
+
   return (
     <div ref={ref} className="relative">
-      <Button variant="outline" onClick={() => setOpen(!open)} title="Switch model" className="max-w-56 font-mono text-xs">
+      <Button
+        variant="outline"
+        onClick={() => setOpen(!open)}
+        title="Switch model"
+        className="h-7 max-w-48 gap-1 px-2 font-mono text-[11px]"
+      >
         <span className="truncate">
           {current ? `${current.providerID}/${current.id}${current.variant ? `@${current.variant}` : ""}` : "model"}
         </span>
       </Button>
       {open && (
-        <div className="absolute right-0 z-40 mt-1 max-h-80 w-72 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-900 shadow-xl">
+        <div
+          className={`absolute z-40 max-h-80 w-72 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl ${menuPos}`}
+        >
           {models
             .filter((m) => m.enabled)
             .map((m) => (
               <button
-                key={m.id}
+                key={`${m.providerID}/${m.modelID}`}
                 type="button"
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-neutral-800 cursor-pointer"
+                className="flex w-full cursor-pointer items-center justify-between px-3 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
                 onClick={() => {
                   void switchModel(sessionID, { id: m.modelID, providerID: m.providerID }).then(refreshSessions);
                   setOpen(false);
                 }}
               >
                 <span>
-                  <span className="font-mono text-neutral-200">{m.name}</span>
-                  <span className="ml-2 font-mono text-neutral-600">{m.providerID}</span>
+                  <span className="font-mono text-[color:var(--text-strong)]">{m.name}</span>
+                  <span className="ml-2 font-mono text-[color:var(--text-weaker)]">{m.providerID}</span>
                 </span>
                 {current?.id === m.modelID && current?.providerID === m.providerID && (
                   <span className="text-emerald-500">✓</span>
@@ -98,7 +115,15 @@ export function ModelPicker({ sessionID }: { sessionID: string }) {
   );
 }
 
-export function AgentPicker({ sessionID }: { sessionID: string }) {
+export function AgentPicker({
+  sessionID,
+  openUp = false,
+  align = "right",
+}: {
+  sessionID: string;
+  openUp?: boolean;
+  align?: "left" | "right";
+}) {
   const { session, detail } = useSessionDetail(sessionID);
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -119,26 +144,35 @@ export function AgentPicker({ sessionID }: { sessionID: string }) {
     }
   }, [session?.agent, fallback]);
 
+  const menuPos = `${openUp ? "bottom-full mb-1" : "mt-1"} ${align === "right" ? "right-0" : "left-0"}`;
+
   return (
     <div ref={ref} className="relative">
-      <Button variant="outline" onClick={() => setOpen(!open)} title="Switch agent" className="max-w-32 text-xs">
+      <Button
+        variant="outline"
+        onClick={() => setOpen(!open)}
+        title="Switch agent (Tab)"
+        className="h-7 max-w-28 px-2 text-[11px]"
+      >
         <span className="truncate">{current ?? "agent"}</span>
       </Button>
       {open && (
-        <div className="absolute right-0 z-40 mt-1 max-h-80 w-60 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-900 shadow-xl">
+        <div
+          className={`absolute z-40 max-h-80 w-60 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl ${menuPos}`}
+        >
           {agents
             .filter((a) => !a.hidden)
             .map((a) => (
               <button
                 key={a.id}
                 type="button"
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-neutral-800 cursor-pointer"
+                className="flex w-full cursor-pointer items-center justify-between px-3 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
                 onClick={() => {
                   void switchAgent(sessionID, a.id).then(refreshSessions);
                   setOpen(false);
                 }}
               >
-                <span className="text-neutral-200">{a.name}</span>
+                <span className="text-[color:var(--text-strong)]">{a.name}</span>
                 {current === a.id && <span className="text-emerald-500">✓</span>}
               </button>
             ))}

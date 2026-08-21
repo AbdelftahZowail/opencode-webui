@@ -22,7 +22,6 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Composer } from "./Composer";
 import { MessageItem, MessagePart } from "./MessageItem";
-import { AgentPicker, ModelPicker } from "./Pickers";
 import { SessionMenu } from "./SessionMenu";
 import { ThemePicker } from "./ThemePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
@@ -143,8 +142,6 @@ function Header({ title, sessionID, running, queued }: { title?: string; session
         )}
       </div>
       <div className="flex items-center gap-1.5">
-        <AgentPicker sessionID={sessionID} />
-        <ModelPicker sessionID={sessionID} />
         <WorkspacePicker sessionID={sessionID} />
         <ThemePicker />
         <SessionMenu sessionID={sessionID} />
