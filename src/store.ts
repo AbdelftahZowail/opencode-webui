@@ -1298,6 +1298,11 @@ export async function interrupt() {
   const sid = state.currentSessionID;
   if (!sid) return;
   await api.interrupt(sid);
+  // Reflect the stop immediately; events/poll reconciliation confirms after.
+  setState({
+    running: { ...state.running, [sid]: false },
+    queued: { ...state.queued, [sid]: false },
+  });
 }
 
 export async function replyPermission(requestID: string, reply: "once" | "always" | "reject") {

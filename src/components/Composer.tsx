@@ -5,6 +5,7 @@ import type { FsEntry, PromptFile } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
 import {
   activateSkill,
+  interrupt,
   loadSessionDetail,
   sendCommand,
   sendPrompt,
@@ -193,7 +194,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
   ) : running || queued ? (
     <p className="flex items-center gap-1.5">
       <Spinner className="size-3" />
-      {running ? "Working…" : "Waiting…"}
+      {running ? "Working… · press esc to stop" : "Waiting…"}
     </p>
   ) : (
     <p>
@@ -235,9 +236,16 @@ export function Composer({ sessionID }: { sessionID: string }) {
                       setFilter(e.target.value.slice(1));
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === "Escape" && shellMode) {
+                      if (e.key === "Escape") {
                         e.preventDefault();
-                        setShellMode(false);
+                        if (shellMode) {
+                          setShellMode(false);
+                          return;
+                        }
+                        if (running) {
+                          void interrupt();
+                          return;
+                        }
                         return;
                       }
                       if (e.key === "Tab") {
