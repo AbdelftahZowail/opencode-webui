@@ -23,6 +23,58 @@ import type {
   FormInfo,
 } from "./api/types";
 
+// ---- pending request queue (permissions / forms / questions) ------------
+//
+// All three "the agent needs a human decision" surfaces share ONE popup,
+// shown in arrival order no matter which session raised them. Entries are
+// stamped with a client-side sequence number at insertion time — the engine
+// gives no ordering across kinds, and refreshQueues() replaces whole arrays
+// on boot/reconnect, so stamps are reused for known ids to keep order stable.
+
+export interface QueuedPermission extends PermissionRequest {
+  seq: number;
+}
+export interface QueuedForm extends FormInfo {
+  seq: number;
+}
+export interface QueuedQuestion extends QuestionRequest {
+  seq: number;
+}
+
+export type PendingRequest =
+  | { kind: "permission"; req: QueuedPermission }
+  | { kind: "form"; req: QueuedForm }
+  | { kind: "question"; req: QueuedQuestion };
+
+let requestSeq = 0;
+const nextRequestSeq = () => ++requestSeq;
+
+/** Stamp incoming requests, reusing the seq of ids we already track. */
+function stampSeq<T extends { id: string }>(current: { id: string; seq: number }[], incoming: T[]): (T & { seq: number })[] {
+  const known = new Map(current.map((r) => [r.id, r.seq]));
+  return incoming.map((r) => ({ ...r, seq: known.get(r.id) ?? nextRequestSeq() }));
+}
+
+/** Every unanswered permission/form/question across ALL sessions, FIFO. */
+export function pendingRequests(s: State): PendingRequest[] {
+  const all: PendingRequest[] = [
+    ...s.permissions.map((req) => ({ kind: "permission" as const, req })),
+    ...s.forms.map((req) => ({ kind: "form" as const, req })),
+    ...s.questions.map((req) => ({ kind: "question" as const, req })),
+  ];
+  return all.sort((a, b) => a.req.seq - b.req.seq);
+}
+
+/** Best human-readable name for any session (sidebar list or detail cache). */
+export function sessionLabel(s: State, sessionID: string): string {
+  if (isDraftSession(sessionID)) return "New session";
+  return (
+    s.sessions.find((x) => x.id === sessionID)?.title ??
+    s.sessionDetails[sessionID]?.title ??
+    `session ${sessionID.slice(0, 8)}…`
+  );
+}
+
 // ---- live message model -------------------------------------------------
 
 export interface LiveTool {
@@ -60,6 +112,17 @@ export interface LiveAssistant {
   completed?: number;
 }
 
+export type RunNoticeKind = "retry" | "error" | "interrupted" | "failed";
+
+/** One transient run-problem row above the composer. */
+export interface RunNotice {
+  id: string;
+  kind: RunNoticeKind;
+  text: string;
+  /** Epoch ms when the underlying event fired. */
+  at: number;
+}
+
 export interface State {
   connected: boolean;
   serviceOK: boolean;
@@ -71,9 +134,9 @@ export interface State {
   live: LiveAssistant[];
   running: Record<string, boolean>;
   queued: Record<string, boolean>;
-  permissions: PermissionRequest[];
-  forms: FormInfo[];
-  questions: QuestionRequest[];
+  permissions: QueuedPermission[];
+  forms: QueuedForm[];
+  questions: QueuedQuestion[];
   currentSessionID: string | null;
   /**
    * Incremented whenever any surface asks to open/focus the shell panel;
@@ -81,6 +144,71 @@ export interface State {
    * prop plumbing. Additive signal only — never read for logic.
    */
   shellPanelTick: number;
+  /**
+   * One-shot open requests for surfaces whose open state lives elsewhere
+   * (pickers, file explorer, runs dialog, help). Components subscribe to
+   * their counter and open themselves when it increments.
+   */
+  uiSignals: UiSignals;
+  /** Text restored by /undo — the composer consumes it once and clears it. */
+  revertPrompt: string | null;
+  runsPanelOpen: boolean;
+  /**
+   * Subagent pages open read-only: the composer stays hidden behind an
+   * "Enter to message" hint until Enter reveals it. Reset on every session
+   * switch, so arriving on a subagent page is always gated first.
+   */
+  subagentComposerOpen: boolean;
+  /**
+   * Client-only draft session (id === DRAFT_SESSION_ID). Nothing exists
+   * server-side until the first message is sent — clicking New again simply
+   * re-binds the draft to another workspace, navigating away discards it.
+   */
+  draftWorkspace: string | null;
+  /**
+   * Dirty agent/model selections for the CURRENT session: applied locally
+   * immediately, committed to the engine only when the next message is sent
+   * (and silently dropped if switched back first). Never persists an
+   * "Agent/Model switched …" note for a change that never ran.
+   */
+  pendingAgent: string | null;
+  pendingModel: ModelRef | null;
+  /** Last send failure per session — rendered above the composer. */
+  sendErrors: Record<string, StructuredError>;
+  /**
+   * Transient run-problem notes per session (provider retries, failures,
+   * interrupts), newest last, capped — rendered above the composer.
+   */
+  runNotices: Record<string, RunNotice[]>;
+  /** Workspace targeted by the sidebar for the NEXT new session (highlight). */
+  pendingWorkspace: string | null;
+  /**
+   * Two-step interrupt arming: the first Esc sets this (the composer swaps
+   * its status line for a yellow confirm hint); a second Esc inside the
+   * window aborts, and the flag self-clears on timeout.
+   */
+  interruptArmed: boolean;
+}
+
+/**
+ * Sentinel id for the optimistic not-yet-created session. It NEVER hits the
+ * wire: every api.* call site must materialize the draft into a real session
+ * first (see materializeDraft).
+ */
+export const DRAFT_SESSION_ID = "__draft__";
+
+export function isDraftSession(id: string | null | undefined): boolean {
+  return id === DRAFT_SESSION_ID;
+}
+
+export interface UiSignals {
+  models: number;
+  agents: number;
+  themes: number;
+  explorer: number;
+  runsDialog: number;
+  help: number;
+  variants: number;
 }
 
 const initialState: State = {
@@ -99,6 +227,17 @@ const initialState: State = {
   questions: [],
   currentSessionID: null,
   shellPanelTick: 0,
+  uiSignals: { models: 0, agents: 0, themes: 0, explorer: 0, runsDialog: 0, help: 0, variants: 0 },
+  revertPrompt: null,
+  runsPanelOpen: false,
+  subagentComposerOpen: false,
+  draftWorkspace: null,
+  pendingAgent: null,
+  pendingModel: null,
+  sendErrors: {},
+  runNotices: {},
+  pendingWorkspace: null,
+  interruptArmed: false,
 };
 
 let state: State = initialState;
@@ -196,7 +335,9 @@ function isNewSessionRoute(): boolean {
 
 function updateSessionHistory(sessionID: string | null, mode: "push" | "replace") {
   if (typeof window === "undefined") return;
-  const next = sessionID ? sessionHref(sessionID) : "/";
+  // The draft session lives at /new-session — it IS the new-session route.
+  const next =
+    sessionID === DRAFT_SESSION_ID ? NEW_SESSION_HREF : sessionID ? sessionHref(sessionID) : "/";
   if (window.location.pathname === next && !window.location.search && !window.location.hash) return;
   window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", next);
 }
@@ -244,13 +385,18 @@ async function refreshQueues() {
       api.pendingForms(),
       api.questionRequestGet(),
     ]);
-    setState({ permissions: perms.data, forms: forms.data, questions: questions.data });
+    setState({
+      permissions: stampSeq(state.permissions, perms.data),
+      forms: stampSeq(state.forms, forms.data),
+      questions: stampSeq(state.questions, questions.data),
+    });
   } catch (err) {
     console.warn("refreshQueues failed:", err);
   }
 }
 
 export async function loadMessages(sessionID: string) {
+  if (isDraftSession(sessionID)) return; // nothing exists server-side yet
   const request = beginMessageRequest(sessionID);
   try {
     const res = await api.messages(sessionID, 100);
@@ -504,6 +650,20 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
       })
       .map((live) => live.id),
   );
+  // Ghost GC: a live assistant whose run is over but which never persisted
+  // (aborted step, lost execution events) would linger in `state.live`
+  // forever. Its old `started` timestamp then drags the transcript's live
+  // insert point above newer turns — the "response renders above my message"
+  // bug. Once the session is idle and the entry had a fair chance (~30s) to
+  // show up in history, retire it.
+  const idle = !state.running[sessionID] && !state.queued[sessionID];
+  const ghosts = new Set(
+    idle
+      ? state.live
+          .filter((live) => live.id !== "pending" && !fetchedByID.has(live.id) && Date.now() - live.started > 30_000)
+          .map((live) => live.id)
+      : [],
+  );
   const running = { ...state.running };
   if (pendingSettled) {
     delete running[sessionID];
@@ -511,7 +671,9 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
   }
   setState({
     messages: { ...state.messages, [sessionID]: merged },
-    live: state.live.filter((live) => (live.id === "pending" ? !pendingSettled : !settled.has(live.id))),
+    live: state.live.filter(
+      (live) => (live.id === "pending" ? !pendingSettled : !(settled.has(live.id) || ghosts.has(live.id))),
+    ),
     running,
   });
 }
@@ -691,6 +853,8 @@ function adoptPendingAssistant(id: string, patch: Pick<LiveAssistant, "agent" | 
 // ---- authoritative session detail & model pinning -----------------------
 
 export async function loadSessionDetail(sessionID: string) {
+  // The draft has no server-side session; fetching would just 404-log.
+  if (isDraftSession(sessionID)) return;
   try {
     const res = await api.getSession(sessionID);
     setState({ sessionDetails: { ...state.sessionDetails, [sessionID]: res.data } });
@@ -731,8 +895,42 @@ export function resolveDefaultModel(): Promise<ModelRef | undefined> {
   return defaultModelPromise;
 }
 
+/**
+ * Commit any uncommitted agent/model picks right before a message goes out.
+ * A pick switched back before any send simply evaporates — nothing was ever
+ * written engine-side.
+ */
+async function commitPendingSelections(sessionID: string) {
+  if (state.pendingAgent && !isDraftSession(sessionID)) {
+    const agent = state.pendingAgent;
+    try {
+      await api.switchAgent(sessionID, agent);
+      log("model", `committed agent ${agent} on send`);
+    } catch (err) {
+      console.warn("switchAgent on send failed:", err);
+    }
+    setState({ pendingAgent: null });
+  }
+  if (state.pendingModel && !isDraftSession(sessionID)) {
+    const model = state.pendingModel;
+    try {
+      await api.switchModel(sessionID, model);
+      log("model", `committed model ${model.providerID}/${model.id} on send`);
+    } catch (err) {
+      console.warn("switchModel on send failed:", err);
+    }
+    setState({ pendingModel: null });
+  }
+}
+
 async function ensureSessionModel(sessionID: string) {
-  if (state.sessions.find((s) => s.id === sessionID)?.model) return;
+  if (isDraftSession(sessionID)) return; // draft pins its model at creation
+  // A pending (uncommitted) pick satisfies the "session must have a model"
+  // invariant — it will be committed right below before the prompt goes out.
+  if (state.sessions.find((s) => s.id === sessionID)?.model || state.pendingModel) {
+    await commitPendingSelections(sessionID);
+    return;
+  }
   const m = await resolveDefaultModel();
   if (m) {
     try {
@@ -758,6 +956,51 @@ async function settleLiveMessages(sessionID: string) {
   }
 }
 
+// ---- run notices ---------------------------------------------------------
+
+const RUN_NOTICES_MAX = 3;
+/** SSE reconnects replay recent events; an identical note inside this window is a replay, not a fresh incident. */
+const RUN_NOTICE_DEDUPE_MS = 15_000;
+
+let runNoticeSeq = 0;
+
+function setRunNotices(sessionID: string, list: RunNotice[] | null) {
+  const next = { ...state.runNotices };
+  if (list && list.length > 0) next[sessionID] = list;
+  else delete next[sessionID];
+  setState({ runNotices: next });
+}
+
+function clearRunNotices(sessionID: string) {
+  if (state.runNotices[sessionID]) setRunNotices(sessionID, null);
+}
+
+/** Retries are moot once their run has ended one way or another. */
+function expireRetryNotices(sessionID: string) {
+  const list = state.runNotices[sessionID];
+  if (!list?.some((n) => n.kind === "retry")) return;
+  setRunNotices(sessionID, list.filter((n) => n.kind !== "retry"));
+}
+
+function pushRunNotice(sessionID: string, kind: RunNoticeKind, text: string, at = Date.now()) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  const list = state.runNotices[sessionID] ?? [];
+  const last = list[list.length - 1];
+  if (last && last.kind === kind && last.text === text && at - last.at < RUN_NOTICE_DEDUPE_MS) return;
+  const notice: RunNotice = { id: `rn_${++runNoticeSeq}`, kind, text, at };
+  setRunNotices(sessionID, [...list, notice].slice(-RUN_NOTICES_MAX));
+}
+
+/** Dismiss one rendered run notice. */
+export function dismissRunNotice(sessionID: string, id: string) {
+  const list = state.runNotices[sessionID];
+  if (!list?.some((n) => n.id === id)) return;
+  setRunNotices(
+    sessionID,
+    list.filter((n) => n.id !== id),
+  );
+}
+
 // ---- event handling -----------------------------------------------------
 
 // In some deployments the service emits session.execution.* events; in others
@@ -781,6 +1024,8 @@ function lastLiveAssistant(): LiveAssistant | undefined {
 }
 
 function settleRun(sessionID: string) {
+  // The run is over: scheduled-but-unfired retries can no longer happen.
+  expireRetryNotices(sessionID);
   const running = { ...state.running };
   delete running[sessionID];
   seenExecution.delete(sessionID);
@@ -848,7 +1093,14 @@ export function handleEvent(event: V2Event) {
     case "session.usage.updated":
     case "session.revert.staged":
     case "session.revert.committed":
+    case "session.revert.cleared":
       debouncedRefreshSessions();
+      // A revert rewrites history — refresh the transcript of any session
+      // whose messages we hold so removed turns disappear immediately.
+      if (eventSessionID && (state.messages[eventSessionID]?.length ?? 0) > 0) {
+        void loadMessages(eventSessionID);
+      }
+      if (type !== "session.usage.updated") void loadSessionDetail(data.sessionID);
       break;
 
     case "session.agent.selected":
@@ -867,6 +1119,25 @@ export function handleEvent(event: V2Event) {
     case "session.inbox.delivered":
       break;
 
+    case "session.error":
+      // Run-level failure the step/execution events don't carry (e.g.
+      // provider auth errors). Surface it inline; clear any waiting state —
+      // the run is over even if no terminal execution event follows.
+      if (data.sessionID) {
+        const err = (data as { error?: StructuredError }).error;
+        if (err) {
+          setState({
+            sendErrors: {
+              ...state.sendErrors,
+              [data.sessionID]: { type: err.type ?? "error", message: err.message, status: err.status },
+            },
+          });
+          pushRunNotice(data.sessionID, "error", `${err.type}: ${err.message}`, event.created);
+        }
+        clearPending(data.sessionID);
+      }
+      break;
+
     case "session.execution.started":
       seenExecution.add(data.sessionID);
       log("run", `started ${data.sessionID}`);
@@ -877,7 +1148,16 @@ export function handleEvent(event: V2Event) {
       if (forCurrent(data.sessionID)) ensureLiveAssistant(data.assistantMessageID ?? "pending", event.created);
       break;
 
-    case "session.retry.scheduled":
+    case "session.retry.scheduled": {
+      if (data.sessionID && data.error) {
+        const attempt = (data as { attempt?: number }).attempt;
+        pushRunNotice(
+          data.sessionID,
+          "retry",
+          `Retry attempt ${attempt ?? "?"} scheduled — ${data.error.message}`,
+          event.created,
+        );
+      }
       if (forCurrent(data.sessionID) && data.assistantMessageID && data.error) {
         patchLiveAssistant(data.assistantMessageID, {
           error: {
@@ -888,13 +1168,39 @@ export function handleEvent(event: V2Event) {
         });
       }
       break;
+    }
 
     case "session.execution.succeeded":
     case "session.execution.failed":
-    case "session.execution.interrupted":
+    case "session.execution.interrupted": {
       log("run", `finished ${data.sessionID} (${type})`);
+      // A clean finish leaves nothing to account for; a failure or an
+      // interrupt is exactly what the strip exists to show.
+      if (type === "session.execution.succeeded") {
+        clearRunNotices(data.sessionID);
+      } else {
+        expireRetryNotices(data.sessionID);
+        if (type === "session.execution.failed") {
+          const err = data.error;
+          pushRunNotice(
+            data.sessionID,
+            "failed",
+            err ? `${err.type}: ${err.message}` : "Run failed",
+            event.created,
+          );
+        } else {
+          const reason = (data as { reason?: string }).reason;
+          pushRunNotice(
+            data.sessionID,
+            "interrupted",
+            `Run interrupted${reason && reason !== "user" ? ` (${reason})` : ""}`,
+            event.created,
+          );
+        }
+      }
       finishRun(data.sessionID, type, data.error);
       break;
+    }
 
     case "session.step.started":
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
@@ -934,6 +1240,9 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "session.step.failed":
+      if (data.sessionID && data.error) {
+        pushRunNotice(data.sessionID, "failed", `${data.error.type}: ${data.error.message}`, event.created);
+      }
       if (forCurrent(data.sessionID) && data.assistantMessageID) {
         patchLiveAssistant(data.assistantMessageID, {
           finish: "error",
@@ -1074,7 +1383,13 @@ export function handleEvent(event: V2Event) {
         setState({
           permissions: [
             ...state.permissions,
-            { id: data.id!, sessionID: data.sessionID, action: data.action ?? "", resources: (data.resources as string[]) ?? [] },
+            {
+              id: data.id!,
+              sessionID: data.sessionID,
+              action: data.action ?? "",
+              resources: (data.resources as string[]) ?? [],
+              seq: nextRequestSeq(),
+            },
           ],
         });
       }
@@ -1089,7 +1404,13 @@ export function handleEvent(event: V2Event) {
         setState({
           questions: [
             ...state.questions,
-            { id: data.id!, sessionID: data.sessionID, questions: payload.questions ?? [], tool: payload.tool },
+            {
+              id: data.id!,
+              sessionID: data.sessionID,
+              questions: payload.questions ?? [],
+              tool: payload.tool,
+              seq: nextRequestSeq(),
+            },
           ],
         });
       }
@@ -1135,9 +1456,13 @@ export function startStore() {
       if (sessionID) {
         void selectSession(sessionID, { history: "none" });
       } else if (isNewSessionRoute()) {
-        void newSession({ history: "replace" });
+        // /new-session is now the free draft — nothing is created until the
+        // first message is sent (materializeDraft).
+        startDraftSession(null);
+        void reopenLastSession().catch(() => undefined); // no-op while draft holds
       } else {
         void selectSession(null, { history: "none" });
+        void reopenLastSession();
       }
     };
     window.addEventListener("popstate", syncLocation);
@@ -1187,7 +1512,11 @@ async function pollOnce() {
   if (pollInFlight) return;
   const sids = new Set<string>();
   for (const [sid, on] of Object.entries(state.running)) if (on) sids.add(sid);
-  if (state.currentSessionID && (state.live.length > 0 || state.queued[state.currentSessionID])) {
+  if (
+    state.currentSessionID &&
+    !isDraftSession(state.currentSessionID) &&
+    (state.live.length > 0 || state.queued[state.currentSessionID])
+  ) {
     sids.add(state.currentSessionID);
   }
   if (sids.size === 0) return;
@@ -1219,11 +1548,52 @@ export function requestShellPanel() {
   setState({ shellPanelTick: state.shellPanelTick + 1 });
 }
 
+/** Fire a one-shot UI open request (see State.uiSignals). */
+export function signalUI(key: keyof UiSignals) {
+  if (key === "runsDialog") {
+    setState({ runsPanelOpen: true, uiSignals: { ...state.uiSignals, [key]: state.uiSignals[key] + 1 } });
+    return;
+  }
+  setState({ uiSignals: { ...state.uiSignals, [key]: state.uiSignals[key] + 1 } });
+}
+
+export function openRunsPanel() {
+  setState({ runsPanelOpen: true, uiSignals: { ...state.uiSignals, runsDialog: state.uiSignals.runsDialog + 1 } });
+}
+
+export function closeRunsPanel() {
+  if (!state.runsPanelOpen) return;
+  setState({ runsPanelOpen: false });
+}
+
+/** Subagent pages gate the composer behind an "Enter to message" hint. */
+export function revealSubagentComposer() {
+  if (state.subagentComposerOpen) return;
+  setState({ subagentComposerOpen: true });
+}
+
+/** Composer takes ownership of /undo's restored text. */
+export function consumeRevertPrompt(): string | null {
+  const value = state.revertPrompt;
+  if (state.revertPrompt !== null) setState({ revertPrompt: null });
+  return value;
+}
+
 /** Child/subagent sessions of the given parent, newest first. */
 export function childSessionsOf(sessions: SessionInfo[], parentID: string): SessionInfo[] {
   return sessions
     .filter((s) => s.parentID === parentID)
     .sort((a, b) => b.time.updated - a.time.updated);
+}
+
+/**
+ * TUI messagesBeforeRevert: with a staged revert the transcript is cut at
+ * the revert message (exclusive) — the service still returns full history.
+ */
+export function applyRevertView<T extends { id: string }>(messages: T[], revertMessageID?: string): T[] {
+  if (!revertMessageID) return messages;
+  const index = messages.findIndex((m) => m.id === revertMessageID);
+  return index === -1 ? messages : messages.slice(0, index);
 }
 
 export async function selectSession(
@@ -1235,16 +1605,56 @@ export async function selectSession(
   // A reconnect can replay events that were already handled before navigation;
   // the newly selected session must be allowed to hydrate from that replay.
   seenEventIDs.clear();
+  if (sessionID === DRAFT_SESSION_ID) {
+    setState({ currentSessionID: DRAFT_SESSION_ID, live: [], subagentComposerOpen: false });
+    return;
+  }
   setState({
     currentSessionID: sessionID,
     live: [],
+    subagentComposerOpen: false,
     queued: sessionID ? { ...state.queued, [sessionID]: false } : state.queued,
   });
   if (sessionID) {
+    rememberLastSession(sessionID);
+    // Navigating to a real session discards the pending draft — the draft
+    // only exists while it IS the current surface.
+    if (state.draftWorkspace !== null) setState({ draftWorkspace: null });
     if (!state.sessions.some((s) => s.id === sessionID) && !state.sessionDetails[sessionID]) {
       void loadSessionDetail(sessionID);
     }
     await loadMessages(sessionID);
+  } else if (state.draftWorkspace !== null) {
+    setState({ draftWorkspace: null });
+  }
+}
+
+// ---- last-open session persistence ---------------------------------------
+
+const LAST_SESSION_KEY = "webui.last-session";
+
+function rememberLastSession(sessionID: string) {
+  try {
+    localStorage.setItem(LAST_SESSION_KEY, sessionID);
+  } catch {
+    /* private mode */
+  }
+}
+
+/** Reopen the last active session on startup (TUI resume feel). */
+async function reopenLastSession() {
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(LAST_SESSION_KEY);
+  } catch {
+    return;
+  }
+  if (!last || state.currentSessionID) return;
+  await refreshSessions();
+  if (state.currentSessionID || !last) return;
+  if (state.sessions.some((s) => s.id === last)) {
+    log("session", `reopen last session ${last}`);
+    await selectSession(last, { history: "replace" });
   }
 }
 
@@ -1264,37 +1674,84 @@ export async function sendPromptTo(sessionID: string, text: string) {
   await ensureSessionModel(sessionID);
   appendOptimisticUserMessage(sessionID, text);
   markPending(sessionID);
-  await api.prompt(sessionID, text);
+  try {
+    await api.prompt(sessionID, text);
+  } catch (err) {
+    clearPending(sessionID);
+    recordSendError(sessionID, err);
+    throw err;
+  }
+}
+
+/**
+ * The composer materializes the draft itself (resolveSendTarget) and then
+ * sends to the REAL id — but sendCommand/sendShell/sendPromptWithFiles read
+ * currentSessionID directly, so a draft id slipping through would hit the
+ * API with "__draft__". These guards make that a loud no-op instead of a
+ * bogus request; the composer's catch restores the typed text.
+ */
+function assertRealTarget(sid: string | null | undefined): sid is string {
+  if (!sid || isDraftSession(sid)) throw new Error("send before materialize");
+  return true;
 }
 
 export async function sendCommand(name: string, args?: string) {
   const sid = state.currentSessionID;
   if (!sid) return;
+  assertRealTarget(sid);
   log("send", `command ${sid}: /${name} ${args ?? ""}`.trim());
   await ensureSessionModel(sid);
   appendOptimisticUserMessage(sid, args ? `/${name} ${args}` : `/${name}`);
   markPending(sid);
-  await api.runCommand(sid, name, args);
+  try {
+    await api.runCommand(sid, name, args);
+  } catch (err) {
+    clearPending(sid);
+    recordSendError(sid, err);
+    throw err;
+  }
 }
 
 export async function sendShell(command: string) {
   const sid = state.currentSessionID;
   if (!sid) return;
+  assertRealTarget(sid);
   log("send", `shell ${sid}: !${command.slice(0, 60)}`);
   await ensureSessionModel(sid);
   appendOptimisticUserMessage(sid, `!${command}`);
   markPending(sid);
-  await api.sessionShell(sid, command);
+  try {
+    await api.sessionShell(sid, command);
+  } catch (err) {
+    clearPending(sid);
+    recordSendError(sid, err);
+    throw err;
+  }
 }
 
 export async function sendPromptWithFiles(text: string, files: PromptFile[]) {
   const sid = state.currentSessionID;
   if (!sid) return;
+  assertRealTarget(sid);
   log("send", `prompt+files ${sid}: ${text.slice(0, 80)}`);
   await ensureSessionModel(sid);
   appendOptimisticUserMessage(sid, text);
   markPending(sid);
-  await api.promptWithFiles(sid, text, files);
+  try {
+    await api.promptWithFiles(sid, text, files);
+  } catch (err) {
+    clearPending(sid);
+    recordSendError(sid, err);
+    throw err;
+  }
+}
+
+/** Dismiss a rendered send failure. */
+export function clearSendError(sessionID: string) {
+  if (!state.sendErrors[sessionID]) return;
+  const next = { ...state.sendErrors };
+  delete next[sessionID];
+  setState({ sendErrors: next });
 }
 
 function appendOptimisticUserMessage(sid: string, text: string) {
@@ -1312,25 +1769,89 @@ function appendOptimisticUserMessage(sid: string, text: string) {
 /** Mark a session as awaiting its run start (covers provider cold-start gaps). */
 function markPending(sid: string) {
   log("run", `pending ${sid} (awaiting run start)`);
+  // A fresh prompt supersedes whatever went wrong in the previous run.
+  clearRunNotices(sid);
   setState({ queued: { ...state.queued, [sid]: true } });
+}
+
+/**
+ * The send failed before the engine ever queued the run — drop the waiting
+ * state immediately so the UI can never stick in "Waiting…" until refresh
+ * (the stuck-queued bug), and surface the failure inline.
+ */
+function clearPending(sid: string) {
+  setState({ queued: { ...state.queued, [sid]: false } });
+}
+
+function recordSendError(sessionID: string, err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  let detail: unknown;
+  if (err && typeof err === "object" && "payload" in (err as Record<string, unknown>)) {
+    detail = (err as { payload?: unknown }).payload;
+  }
+  const error: StructuredError =
+    detail && typeof detail === "object" && "message" in (detail as Record<string, unknown>)
+      ? {
+          type: String((detail as { name?: unknown }).name ?? "error"),
+          message: String((detail as { message?: unknown }).message ?? message),
+        }
+      : { type: "request-failed", message };
+  console.warn("send failed:", error.type, error.message);
+  setState({
+    sendErrors: { ...state.sendErrors, [sessionID]: error },
+  });
 }
 
 export async function activateSkill(id: string) {
   const sid = state.currentSessionID;
-  if (!sid) return;
+  if (!sid || isDraftSession(sid)) return;
   await api.activateSkill(sid, id);
   void refreshQueues();
 }
 
 export async function interrupt() {
   const sid = state.currentSessionID;
-  if (!sid) return;
+  if (!sid || isDraftSession(sid)) return;
+  disarmInterrupt();
   await api.interrupt(sid);
   // Reflect the stop immediately; events/poll reconciliation confirms after.
   setState({
     running: { ...state.running, [sid]: false },
     queued: { ...state.queued, [sid]: false },
   });
+}
+
+/** How long the armed interrupt confirmation stays live before resetting. */
+const INTERRUPT_ARM_MS = 2500;
+let interruptArmTimer: ReturnType<typeof setTimeout> | null = null;
+
+function disarmInterrupt() {
+  if (interruptArmTimer) {
+    clearTimeout(interruptArmTimer);
+    interruptArmTimer = null;
+  }
+  if (state.interruptArmed) setState({ interruptArmed: false });
+}
+
+/**
+ * The Esc handler behind "esc to interrupt": the first press only ARMS the
+ * abort (the composer swaps its status line for a yellow confirm hint); a
+ * second press inside INTERRUPT_ARM_MS actually interrupts. Left
+ * unconfirmed, the hint self-reverts and the next Esc re-arms.
+ */
+export function requestInterrupt() {
+  const sid = state.currentSessionID;
+  if (!sid || !state.running[sid]) return;
+  if (!state.interruptArmed) {
+    if (interruptArmTimer) clearTimeout(interruptArmTimer);
+    setState({ interruptArmed: true });
+    interruptArmTimer = setTimeout(() => {
+      interruptArmTimer = null;
+      setState({ interruptArmed: false });
+    }, INTERRUPT_ARM_MS);
+    return;
+  }
+  void interrupt();
 }
 
 /**
@@ -1397,29 +1918,130 @@ export async function rejectQuestion(requestID: string) {
   }
 }
 
+/**
+ * Esc / overlay-click / ✕ on the pending-request popup: cancel whichever
+ * kind is on top. Permissions and questions are rejected, forms cancelled —
+ * each is the "make it stop" reply for its surface.
+ */
+export function cancelPendingRequest(item: PendingRequest) {
+  if (item.kind === "permission") void replyPermission(item.req.id, "reject");
+  else if (item.kind === "question") void rejectQuestion(item.req.id);
+  else void cancelForm(item.req.id);
+}
+
+// ---- optimistic draft session --------------------------------------------
+//
+// "New session" never creates anything server-side up front: it opens a
+// client-only draft bound to a workspace. The real POST /api/session happens
+// only when the first message is sent. Clicking New again while a draft is
+// open re-binds it (never duplicates); opening a real session discards it.
+
+/**
+ * Open (or retarget) the draft. Idempotent by design: pressing New twice —
+ * even in different workspaces — leaves exactly one draft, pointed at the
+ * last requested workspace.
+ */
+export function startDraftSession(directory?: string | null) {
+  // No explicit pick: inherit the workspace of the session being viewed, so
+  // "New session" keeps you in place. Subagents may not carry a location of
+  // their own — fall back to their parent's.
+  const dirOf = (sid?: string | null): string | undefined => {
+    if (!sid || isDraftSession(sid)) return undefined;
+    const s = state.sessions.find((x) => x.id === sid) ?? state.sessionDetails[sid];
+    return s?.location?.directory;
+  };
+  const current = state.currentSessionID && !isDraftSession(state.currentSessionID)
+    ? state.sessions.find((x) => x.id === state.currentSessionID) ?? state.sessionDetails[state.currentSessionID]
+    : undefined;
+  const inherited =
+    dirOf(state.currentSessionID) ?? (current?.parentID ? dirOf(current.parentID) : undefined);
+  const workspace = directory ?? state.pendingWorkspace ?? state.draftWorkspace ?? inherited ?? null;
+  const retarget = isDraftSession(state.currentSessionID);
+  log("session", `draft ${retarget ? "retarget" : "open"} (workspace=${workspace ?? "default"})`);
+  setState({
+    currentSessionID: DRAFT_SESSION_ID,
+    draftWorkspace: workspace,
+    pendingWorkspace: null,
+    live: [],
+    // A fresh surface must not inherit uncommitted picks from the previous
+    // session — they were never sent anywhere.
+    ...(retarget ? {} : { pendingAgent: null, pendingModel: null }),
+  });
+  if (typeof window !== "undefined") updateSessionHistory(DRAFT_SESSION_ID, "push");
+}
+
+/** Sidebar highlight: mark a workspace as the next new session's target. */
+export function setPendingWorkspace(directory: string | null) {
+  setState({ pendingWorkspace: directory });
+}
+
+/**
+ * Turn the draft into a real session and deliver its first message.
+ * Returns the created session id. Safe against double-invocation via the
+ * materializing flag (the composer awaits this before its send).
+ */
+let materializing = false;
+
+export async function materializeDraft(text: string): Promise<string> {
+  void text;
+  if (!isDraftSession(state.currentSessionID) && state.draftWorkspace === null) {
+    throw new Error("no draft session");
+  }
+  if (materializing) throw new Error("draft already materializing");
+  materializing = true;
+  try {
+    const directory = state.draftWorkspace;
+    log("session", `draft -> create (workspace=${directory ?? "default"})`);
+    const model = await resolveDefaultModel();
+    const res = await api.createSession({
+      title: null,
+      agent: null,
+      model: model ?? null,
+      location: directory ? { directory } : null,
+    });
+    const sid = res.data.id;
+    if (model) log("model", `new session ${sid} -> ${model.providerID}/${model.id}`);
+    await refreshSessions();
+    await loadSessionDetail(sid);
+    // Carry any optimistic user copy across so the transcript never blanks
+    // between the draft surface and the real session.
+    const draftMessages = state.messages[DRAFT_SESSION_ID] ?? [];
+    seenEventIDs.clear();
+    setState({
+      currentSessionID: sid,
+      draftWorkspace: null,
+      live: [],
+      messages: { ...state.messages, [sid]: draftMessages, [DRAFT_SESSION_ID]: [] },
+    });
+    rememberLastSession(sid);
+    // /new-session replaces itself with the canonical URL — no extra history entry.
+    if (typeof window !== "undefined") updateSessionHistory(sid, "replace");
+    return sid;
+  } finally {
+    materializing = false;
+  }
+}
+
 export async function newSession(options: { history?: "push" | "replace" } = {}) {
-  log("session", "newSession create");
-  // Create WITH the resolved default model: pinning after creation makes the
-  // engine persist a noisy "Model switched to …" message in every fresh
-  // session. If resolution fails, model:null lets the service pick its own.
-  const model = await resolveDefaultModel();
-  const res = await api.createSession({ title: null, agent: null, model: model ?? null, location: null });
-  const sid = res.data.id;
-  if (model) log("model", `new session ${sid} -> ${model.providerID}/${model.id}`);
-  await refreshSessions();
-  await loadSessionDetail(sid);
-  await selectSession(sid, { history: options.history ?? "push" });
-  return sid;
+  // Legacy entry point (palette, ctrl+n): now opens the free draft instead
+  // of creating a server-side session immediately.
+  void options;
+  startDraftSession(null);
 }
 
 export async function switchAgent(sessionID: string, agent: string) {
-  await api.switchAgent(sessionID, agent);
-  debouncedRefreshSessions();
+  // Dirty-detector switching: record locally, commit at send time. Switching
+  // back before sending means nothing was ever persisted — no "Agent
+  // switched to …" note, no engine round-trip.
+  setState({ pendingAgent: agent });
+  void sessionID;
 }
 
 export async function switchModel(sessionID: string, model: ModelRef) {
-  await api.switchModel(sessionID, model);
-  debouncedRefreshSessions();
+  // Same dirty-detector contract as switchAgent: local until the next send.
+  // The pickers read the pending override first, then the session detail.
+  setState({ pendingModel: model });
+  void sessionID;
 }
 
 export async function renameSession(sessionID: string, title: string) {
@@ -1441,6 +2063,49 @@ export async function exportSession(sessionID: string) {
 export async function compactSession(sessionID: string, delivery: CompactDelivery = "steer") {
   await api.compactSession(sessionID, delivery);
   await refreshSessions();
+}
+
+/**
+ * TUI session.undo: abort a running engine run, stage a revert at the last
+ * user message, and hand its text back to the composer (via `revertPrompt`).
+ */
+export async function undoSession(sessionID: string) {
+  if (state.running[sessionID]) await interrupt();
+  const detail =
+    state.sessionDetails[sessionID] ??
+    (await api.getSession(sessionID).then((r) => r.data).catch(() => undefined));
+  const revertMessageID = (detail as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+  // Consecutive undos walk backwards: start from the already-reverted view.
+  const visible = applyRevertView(state.messages[sessionID] ?? [], revertMessageID);
+  const lastUser = [...visible].reverse().find((m) => m.type === "user");
+  if (!lastUser || lastUser.id.startsWith("msg_local_")) return;
+  try {
+    await api.revertStage(sessionID, lastUser.id);
+  } finally {
+    void loadSessionDetail(sessionID);
+    void loadMessages(sessionID);
+    debouncedRefreshSessions();
+  }
+  setState({ revertPrompt: lastUser.text ?? null });
+}
+
+/** TUI session.redo: revert forward to the next user message, or clear. */
+export async function redoSession(sessionID: string) {
+  const detail =
+    state.sessionDetails[sessionID] ??
+    (await api.getSession(sessionID).then((r) => r.data).catch(() => undefined));
+  const revertMessageID = (detail as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+  if (!revertMessageID) return;
+  try {
+    const messages = state.messages[sessionID] ?? [];
+    const nextUser = messages.find((m) => m.type === "user" && m.id > revertMessageID);
+    if (!nextUser) await api.revertClear(sessionID);
+    else await api.revertStage(sessionID, nextUser.id);
+  } finally {
+    void loadSessionDetail(sessionID);
+    void loadMessages(sessionID);
+    debouncedRefreshSessions();
+  }
 }
 
 export function toolStateFor(part: { state?: ToolState }): ToolState | undefined {

@@ -243,6 +243,75 @@ checks where applicable.**
       multi-step rendering with tool cards, and second-message flow all
       confirmed working in the browser ("streaming almost perfect").
 
+**TUI-parity round 2 (2026-08-22) — slash/arrow/tool-card parity:**
+- [x] Slash built-ins completed against the v2 TUI palette: added `/undo`
+  (abort + revert/stage at last user msg, text restored into composer via
+  `revertPrompt`), `/redo` (stage forward or clear; reads
+  `sessionDetails.revert.messageID`), `/copy` (transcript to clipboard),
+  `/timestamps` (+pref, renders clock times in message headers),
+  `/models` `/agents` `/themes` (open pickers via new `uiSignals` store ticks —
+  the recorded follow-up), `/mcps` `/status` (openSettings(section)),
+  `/diff` (opens FileExplorer), `/help` (keybind cheatsheet dialog).
+  Skipped with reasons: `/share` `/unshare` (no route on our service),
+  `/exit` `/editor` `/debug` (desktop-only), `/org` `/connect` `/warp`
+  `/workspaces` (console/experimental), `/variants` (no variant list UI yet),
+  `/timeline` (needs message anchors — follow-up), `/move` (WorkspacePicker
+  supersedes). Verified in browser: menu lists + execute.
+- [x] Staged-revert transcript view: service returns FULL history even when
+  reverted; UI now cuts at `session.revert.messageID` (`applyRevertView`,
+  same as TUI `messagesBeforeRevert`). Revert events reload messages+detail.
+- [x] Arrow keys copied from the TUI keymap: composer ↑/↓ = prompt history at
+  buffer start/end only (`src/lib/promptHistory.ts`, localStorage, mode
+  restore incl. shell); ↓ on an empty input or at the very end opens the
+  RunsPanel; unfocused ↑ = parent, ←/→ = cycle subagent siblings (TUI
+  moveChild formula, wraps), ↓ = RunsPanel. `useHotkeys` now skips
+  modifier-free combos on editable targets so plain arrows stay native while
+  typing. All verified live in browser.
+- [x] **RunsPanel** (`src/components/RunsPanel.tsx`, replaced an earlier
+  centered-modal attempt): the v2 TUI's bottom subagents/shells widget,
+  restyled to user screenshots — mono font, left accent border, "Subagents |
+  Shell" tabs + esc hint + `tabs ←/→` footer. It REPLACES the composer while
+  open (`store.runsPanelOpen` + `openRunsPanel`/`closeRunsPanel`; Conversation
+  renders panel XOR composer). ↓/↑ walk the selection through ALL subagents
+  (running first, finished included); ↑ at the very top closes and refocuses
+  the composer so ↑ then walks prompt history; ←/→ switch tabs with wrap
+  ("two lefts come back"); Enter opens; Esc closes. Keys are owned by a
+  window CAPTURE-phase listener while open. Gotcha found & fixed: a
+  session-change effect closed the panel on first mount (open tick raced the
+  sessionID effect) — guarded by comparing against a prev-sessionID ref.
+- [x] Tool cards rebuilt to the v2 TUI rendering model: inline icon+label rows
+  (spinner/muted/red-expandable), block widgets for edit (real per-file diffs
+  from `metadata.files[].patch` through DiffView — answer to "do code diffs
+  work": yes, verified visually), write (numbered code), shell (command +
+  output collapsed >10 lines, exit badge), subagent (opens child session),
+  execute (↳ tool-call list). Tool-details OFF now hides completed tools
+  (TUI shouldHide parity). Fixed vendored Command selectActive(-1) so Enter
+  picks the first row without an initial ArrowDown.
+- Note: our service's tool schema differs from upstream TUI expectations
+  (`path` not `filePath`, `metadata.files[]` patches, `subagent` not `task`);
+  ToolCard keys off OUR shapes (checked against live sessions).
+
+**Slash round 3 (2026-08-23) — /variants, /skills, /connect:**
+- [x] `/variants` + `VariantPicker` (`Pickers.tsx`): TUI DialogVariant parity —
+  Default + one row per id from `Model.Info.variants` on `GET /api/model`;
+  picker (and menu entry) hidden entirely when the current model has none
+  (upstream `hidden:` parity). Selecting reuses `POST /session/{id}/model`
+  with `variant` set on the ModelRef — verified live (persisted `@high`,
+  cleared back). **Gotcha:** the service normalizes the unset state to
+  `variant:"default"` rather than omitting it — ModelPicker label,
+  MessageItem header, and VariantPicker all now treat `"default"` as unset
+  (previously every pinned session rendered a spurious `@default`). Opens
+  via a new `uiSignals.variants` tick, same pattern as /models /agents.
+- [x] `/skills`: dedicated picker above the composer (runMenu-style dropdown,
+  Esc/outside-click close) listing every engine skill; click = insert-or-
+  activate via a shared `pickSkill` helper (same semantics as the slash-menu
+  entries, which remain — this adds the TUI's browse UX on top).
+- [x] `/connect`: opens Settings → Integrations. The upstream dialog's
+  provider.oauth authorize/callback routes don't exist in our build; the
+  integration-scoped connect routes are this engine's equivalent, and the
+  Integrations section already implements key / OAuth-polling / command
+  flows over them — so /connect is a one-liner like /mcps and /status.
+
 **Composer polish round (2026-08-21, `c19f949`→`b2afa47`):**
 - [x] Slash menu no longer steals focus from the textarea
       (`onOpenAutoFocus` prevented) — typing after "/" stays in the editor;
@@ -417,19 +486,22 @@ src/api/client.ts                  typed REST client (all route groups)
 src/api/events.ts                  SSE parser
 src/components/ui/                 shadcn primitives + command + message-scroller
 src/components/Conversation.tsx    header + MessageScroller transcript
-src/components/Composer.tsx        slash menu + @ refs + ! bash
-src/components/ToolCard.tsx        tool cards (extension hook: getToolRenderer)
+src/components/Composer.tsx        slash menu + @ refs + ! bash + prompt history
+src/components/RunsPanel.tsx       subagents/shells strip (replaces composer while open)
+src/components/HelpDialog.tsx      /help keybind cheatsheet
+src/components/ToolCard.tsx        tool cards, v2-TUI style (extension hook: getToolRenderer)
 src/components/Sidebar.tsx         grouped session rail + workspace collapse + resize/icon rail + Files/Shell/Settings/Inbox
 src/components/Pickers.tsx         agent/model pickers (authoritative session detail)
 src/components/ShellPanel.tsx      shell mgmt + terminals (TerminalView)
 src/components/TerminalView.tsx    xterm terminal emulator
 src/components/FileExplorer.tsx    fs tree + preview + diff (DiffView)
 src/components/settings/           settings hub sections
-src/components/QuestionModal.tsx   mid-task questions
+src/components/PendingRequestsModal.tsx  unified permissions/questions/forms popup (all sessions, FIFO)
 src/components/InboxPanel.tsx      inbox queue/steer
 src/theme/themes.ts                7 themes (applyTheme :root:root injection)
-src/prefs.ts                       showReasoning/showToolDetails prefs
-src/hooks/useHotkeys.ts            ctrl+p / ctrl+n / escape
+src/prefs.ts                       showReasoning/showToolDetails/showTimestamps prefs
+src/lib/promptHistory.ts           localStorage prompt history (↑/↓ in composer)
+src/hooks/useHotkeys.ts            ctrl+p / ctrl+n / escape + TUI arrow bindings
 scripts/uitest/                    reusable UI/test helper scripts (see section below)
 AGENTS.md                          architecture rules + roadmap (keep updated)
 ui-extensions/README.md            extension authoring guide (keep updated)

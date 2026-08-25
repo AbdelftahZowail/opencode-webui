@@ -22,7 +22,11 @@ export function parseDiff(diff: string): DiffLine[] {
   let oldNo = 0;
   let newNo = 0;
   for (const text of diff.split("\n")) {
-    if (text.startsWith("diff --git ") || text.startsWith("+++ ") || text.startsWith("--- ")) {
+    // SVN-style patch headers (service edit-tool output) are chrome, not content.
+    if (text.startsWith("Index: ") || text.startsWith("=======") || text.startsWith("diff --git ")) {
+      continue;
+    }
+    if (text.startsWith("+++ ") || text.startsWith("--- ")) {
       rows.push({ text, kind: "file" });
       continue;
     }

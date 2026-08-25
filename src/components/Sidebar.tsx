@@ -1,4 +1,4 @@
-import { useMemo, useState, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import {
   ChevronDown,
   FolderTree,
@@ -11,9 +11,20 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { NEW_SESSION_HREF, loadMoreSessions, newSession, refreshSessions, selectSession, sessionHref, useStore } from "../store";
+import {
+  DRAFT_SESSION_ID,
+  NEW_SESSION_HREF,
+  loadMoreSessions,
+  refreshSessions,
+  selectSession,
+  sessionHref,
+  setPendingWorkspace,
+  startDraftSession,
+  useStore,
+} from "../store";
 import { api } from "../api/client";
 import type { SessionInfo } from "../api/types";
+import { searchContent } from "../lib/searchIndex";
 import { SlotOutlet } from "../extensions/registry";
 import { timeAgo } from "./ui";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +37,9 @@ import { InboxPanel } from "./InboxPanel";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
 const SECTION_LIMIT = 3;
+const CONTENT_GROUP_LIMIT = 20;
+/** Content/server search kicks in from this query length. */
+const SEARCH_DEBOUNCE_MIN_LENGTH = 2;
 const SIDEBAR_DEFAULT_WIDTH = 288;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 480;
@@ -63,14 +77,24 @@ function workspaceName(directory: string | undefined, home?: string): string {
   return trimmed;
 }
 
+/** Directory equality that tolerates trailing slashes. */
+function sameDirectory(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+}
+
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sessionsCursor = useStore((s) => s.sessionsCursor);
   const activeIDs = useStore((s) => s.activeIDs);
   const current = useStore((s) => s.currentSessionID);
   const connected = useStore((s) => s.connected);
-  const [busy, setBusy] = useState(false);
+  const pending = useStore((s) => s.pendingWorkspace);
   const [query, setQuery] = useState("");
+  // Layer B (server title search) + layer C (message content search).
+  const [serverHits, setServerHits] = useState<SessionInfo[]>([]);
+  const [contentMatches, setContentMatches] = useState<Set<string>>(new Set());
+  const [contentSearching, setContentSearching] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
   const [showMore, setShowMore] = useState<Record<string, boolean>>({});
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -78,16 +102,107 @@ export function Sidebar() {
   const [resizing, setResizing] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const explorerSignal = useStore((s) => s.uiSignals.explorer);
+
+  // /diff (and any other surface) can request the file explorer open.
+  useEffect(() => {
+    if (explorerSignal) setFilesOpen(true);
+  }, [explorerSignal]);
+
+  const home = useMemo(() => findHome(sessions.map((s) => s.location?.directory)), [sessions]);
+  const trimmedQuery = query.trim();
+  const normalizedQuery = trimmedQuery.toLowerCase();
+
+  // Layer B: server-side title search, debounced 250ms once the query is
+  // >= 2 chars — catches sessions beyond the currently loaded pages.
+  useEffect(() => {
+    if (trimmedQuery.length < 2) {
+      setServerHits([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api
+        .listSessions({ search: trimmedQuery, limit: 100 })
+        .then((res) => {
+          if (!cancelled) setServerHits(res.data.filter((s) => !s.parentID));
+        })
+        .catch(() => {
+          if (!cancelled) setServerHits([]);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [trimmedQuery]);
+
+  // Layer C: message content search over the known sessions, debounced
+  // 250ms. Reports partial matches while fetch batches land.
+  useEffect(() => {
+    if (trimmedQuery.length < 2) {
+      setContentMatches(new Set());
+      setContentSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setContentSearching(true);
+    const timer = setTimeout(() => {
+      searchContent(trimmedQuery, sessions, (partial) => {
+        if (!cancelled) setContentMatches(partial);
+      })
+        .catch(() => new Set<string>())
+        .then((matches) => {
+          if (!cancelled) {
+            setContentMatches(matches);
+            setContentSearching(false);
+          }
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [trimmedQuery, sessions]);
+
+  // Pending-workspace highlight yields to any click outside the sidebar.
+  useEffect(() => {
+    if (!pending) return;
+    const onDocMouseDown = (event: globalThis.MouseEvent) => {
+      if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
+        setPendingWorkspace(null);
+      }
+    };
+    document.addEventListener("mousedown", onDocMouseDown, true);
+    return () => document.removeEventListener("mousedown", onDocMouseDown, true);
+  }, [pending]);
 
   const groups = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const home = findHome(sessions.map((s) => s.location?.directory));
     const buckets = new Map<string, typeof sessions>();
+    const seen = new Set<string>();
     for (const s of sessions) {
       // Subagent (child) sessions are managed inside their parent session,
       // never listed or counted as top-level workspace entries.
       if (s.parentID) continue;
-      if (q && !(s.title ?? "Untitled session").toLowerCase().includes(q)) continue;
+      if (
+        normalizedQuery &&
+        !(s.title ?? "Untitled session").toLowerCase().includes(normalizedQuery) &&
+        !workspaceName(s.location?.directory, home).toLowerCase().includes(normalizedQuery) &&
+        !(s.location?.directory ?? "").toLowerCase().includes(normalizedQuery)
+      ) {
+        continue;
+      }
+      seen.add(s.id);
+      const key = workspaceName(s.location?.directory, home);
+      const list = buckets.get(key) ?? [];
+      list.push(s);
+      buckets.set(key, list);
+    }
+    // Server hits (layer B): merge in sessions the local list doesn't hold,
+    // grouped under their own workspace like loaded ones.
+    for (const s of serverHits) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
       const key = workspaceName(s.location?.directory, home);
       const list = buckets.get(key) ?? [];
       list.push(s);
@@ -99,7 +214,26 @@ export function Sidebar() {
     }));
     // Stable: keep insertion order of first appearance (newest first already).
     return sorted;
-  }, [sessions, query]);
+  }, [sessions, serverHits, normalizedQuery, home]);
+
+  // Real computation: every known session with a content hit that isn't
+  // already visible in a title/workspace/server group.
+  const contentOnly = useMemo(() => {
+    if (!normalizedQuery || contentMatches.size === 0) return [] as SessionInfo[];
+    const listed = new Set(groups.flatMap((g) => g.list.map((s) => s.id)));
+    const byID = new Map(sessions.map((s) => [s.id, s]));
+    const out: SessionInfo[] = [];
+    for (const id of contentMatches) {
+      if (listed.has(id)) continue;
+      const s = byID.get(id);
+      if (s) out.push(s);
+    }
+    return out.sort((a, b) => b.time.updated - a.time.updated).slice(0, CONTENT_GROUP_LIMIT);
+  }, [sessions, groups, contentMatches, normalizedQuery]);
+
+  /** Total sessions currently surfaced across all search layers. */
+  const matchedCount =
+    groups.reduce((n, g) => n + g.list.length, 0) + contentOnly.length;
 
   const hasMore = sessionsCursor != null;
 
@@ -109,17 +243,19 @@ export function Sidebar() {
     if (nextCollapsed) setShowMore((prev) => ({ ...prev, [name]: false }));
   };
 
+  /**
+   * Workspace header click: mark this workspace as the next new session's
+   * target (highlight). With a draft already open, also retarget it so its
+   * composer subtitle follows the highlight immediately.
+   */
+  const selectPendingWorkspace = (directory: string | undefined) => {
+    const dir = directory ?? null;
+    setPendingWorkspace(dir);
+    if (current === DRAFT_SESSION_ID) startDraftSession(dir);
+  };
+
   const toggleShowMore = (name: string) =>
     setShowMore((prev) => ({ ...prev, [name]: !prev[name] }));
-
-  const createSession = async () => {
-    setBusy(true);
-    try {
-      await newSession();
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const resizeStart = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -143,6 +279,7 @@ export function Sidebar() {
 
   return (
     <aside
+      ref={sidebarRef}
       className={`relative flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-border bg-background ${resizing ? "select-none" : ""}`}
       style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
     >
@@ -165,7 +302,7 @@ export function Sidebar() {
         </div>
         {sidebarCollapsed ? (
           <>
-            <NewSessionLink collapsed busy={busy} onCreate={createSession} />
+            <NewSessionLink collapsed />
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Expand sidebar">
               <PanelLeftOpen />
             </Button>
@@ -175,7 +312,7 @@ export function Sidebar() {
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
             </Button>
-            <NewSessionLink busy={busy} onCreate={createSession} />
+            <NewSessionLink />
           </div>
         )}
       </div>
@@ -195,11 +332,38 @@ export function Sidebar() {
                 className="h-7 pl-7"
               />
             </div>
+            {trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH && (
+              <p className="mt-1 px-1 text-[10px] text-[var(--text-weaker)]" aria-live="polite">
+                {matchedCount} matched
+                {contentSearching ? " · searching messages…" : ""}
+              </p>
+            )}
           </div>
 
           <ScrollArea className="min-h-0 min-w-0 flex-1">
             <div className="w-full min-w-0 max-w-full p-2">
-              {groups.length === 0 && (
+              {contentOnly.length > 0 && (
+                <section className="mb-4 w-full min-w-0 max-w-full last:mb-1">
+                  <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-[var(--border-weak-base)] px-2 py-1.5">
+                    <span className="min-w-0 truncate text-[11px] font-medium tracking-wide text-[var(--text-weaker)] uppercase">
+                      Content matches
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{contentOnly.length}</span>
+                  </div>
+                  {contentOnly.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      id={s.id}
+                      title={s.title ?? "Untitled session"}
+                      updated={s.time.updated}
+                      active={activeIDs.includes(s.id)}
+                      selected={s.id === current}
+                      onSelect={() => void selectSession(s.id)}
+                    />
+                  ))}
+                </section>
+              )}
+              {groups.length === 0 && contentOnly.length === 0 && (
                 <p className="px-2.5 py-4 text-xs text-[var(--text-weak)]">
                   {sessions.length === 0 ? "No sessions yet." : "No matches."}
                 </p>
@@ -209,19 +373,52 @@ export function Sidebar() {
                 const isShowingMore = !!showMore[group.name];
                 const visible = isCollapsed ? [] : isShowingMore ? group.list : group.list.slice(0, SECTION_LIMIT);
                 const moreCount = group.list.length - visible.length;
+                // The highlight keys off the real directory, not its display
+                // name ("~/code" vs "/home/z/code"); "Other" (no directory)
+                // can never be a pending target.
+                const directory = group.list.find((s) => s.location?.directory)?.location?.directory ?? null;
+                const isPending = !!pending && !!directory && sameDirectory(pending, directory);
                 return (
                   <section key={group.name} className="mb-4 w-full min-w-0 max-w-full last:mb-1">
-                    <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-[var(--border-weak-base)] px-2 py-1.5">
+                    <div
+                      onClick={() =>
+                        // Whole header targets this workspace for new
+                        // sessions (highlight); clicking again while already
+                        // highlighted toggles the group instead.
+                        isPending ? toggleWorkspace(group.name) : selectPendingWorkspace(directory ?? undefined)
+                      }
+                      aria-pressed={isPending}
+                      title={isPending ? "Collapse / expand workspace" : "New session here"}
+                      className={`mb-1 flex min-w-0 cursor-pointer select-none items-center gap-2 border-b px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                        isPending ? "ring-1 ring-inset ring-[var(--border-selected)] bg-[var(--surface-raised-base)]" : ""
+                      } ${isPending ? "" : "border-[var(--border-weak-base)]"}`}
+                    >
+                      <span className={`min-w-0 truncate ${isPending ? "text-[var(--text-weak)]" : "text-[var(--text-weaker)]"}`}>{group.name}</span>
                       <button
                         type="button"
                         aria-expanded={!isCollapsed}
-                        onClick={() => toggleWorkspace(group.name)}
-                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left text-[11px] font-medium tracking-wide text-[var(--text-weaker)] uppercase hover:text-[var(--text-weak)]"
+                        aria-label={isCollapsed ? `Expand ${group.name}` : `Collapse ${group.name}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleWorkspace(group.name);
+                        }}
                         title={isCollapsed ? "Expand workspace" : "Collapse workspace"}
+                        className="ml-auto inline-flex shrink-0 cursor-pointer items-center justify-center rounded-sm p-0.5 hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
                       >
-                        <span className="min-w-0 truncate">{group.name}</span>
-                        <ChevronDown className={`size-3 shrink-0 transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
+                        <ChevronDown className={`size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
                       </button>
+                      {isPending && (
+                        <span
+                          className="shrink-0 cursor-pointer text-[var(--text-weaker)] hover:text-foreground"
+                          title="New session here"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            startDraftSession(directory);
+                          }}
+                        >
+                          <Plus className="size-3.5" />
+                        </span>
+                      )}
                       <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{group.list.length}</span>
                     </div>
                     {visible.map((s) => {
@@ -282,7 +479,7 @@ export function Sidebar() {
               </button>
             }
           />
-          <button type="button" onClick={openSettings} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Settings">
+          <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Settings">
             <SettingsIcon className="size-4" />
           </button>
           <button type="button" onClick={() => setInboxOpen(true)} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Inbox">
@@ -323,17 +520,13 @@ export function Sidebar() {
 
 type SessionGroup = { name: string; list: SessionInfo[] };
 
-function NewSessionLink({
-  collapsed = false,
-  busy,
-  onCreate,
-}: {
-  collapsed?: boolean;
-  busy: boolean;
-  onCreate: () => void | Promise<void>;
-}) {
+/**
+ * Instant, offline draft open — no network, so no busy gate. Keeps the
+ * /new-session anchor so middle-click/modified clicks still work natively.
+ */
+function NewSessionLink({ collapsed = false }: { collapsed?: boolean }) {
   return (
-    <Button asChild variant="default" size={collapsed ? "icon" : "sm"} disabled={busy}>
+    <Button asChild variant="default" size={collapsed ? "icon" : "sm"}>
       <a
         href={NEW_SESSION_HREF}
         aria-label="New session"
@@ -341,7 +534,7 @@ function NewSessionLink({
         onClick={(event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          if (!busy) void onCreate();
+          startDraftSession(null);
         }}
       >
         <Plus />
@@ -424,7 +617,7 @@ function SidebarFooter({
             </button>
           }
         />
-        <button type="button" onClick={openSettings} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
+        <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
           <SettingsIcon className="size-3" />
           Settings
         </button>

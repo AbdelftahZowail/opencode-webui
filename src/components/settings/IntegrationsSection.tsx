@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { ChevronRight, ExternalLink, Loader2, XIcon } from "lucide-react";
+import { ChevronRight, ExternalLink, Loader2, Search, XIcon } from "lucide-react";
 import type { IntegrationInfo, IntegrationMethod } from "../../api/client";
 import { api } from "../../api/client";
 import { Badge } from "../ui";
@@ -239,6 +239,11 @@ export function IntegrationsSection() {
     api.integrationList().then((r) => r.data),
   );
   const [open, setOpen] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  // Model counts per provider come from two one-shot catalogs; a failure is
+  // not an integration-list failure, so it degrades to "no counts shown".
+  const models = useAsync(() => api.models());
+  const providers = useAsync(() => api.providerList().then((r) => r.data));
   const [keyDialog, setKeyDialog] = useState<{
     integration: IntegrationInfo;
     method: Extract<IntegrationMethod, { type: "key" }>;
@@ -268,18 +273,81 @@ export function IntegrationsSection() {
     refresh,
   );
 
+  // integration → provider(s) via ProviderInfo.integrationID; models per
+  // integration = models whose providerID belongs to those providers.
+  const modelCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (!models.data || !providers.data) return counts;
+    const byIntegration = new Map<string, Set<string>>();
+    for (const p of providers.data) {
+      if (!p.integrationID) continue;
+      const set = byIntegration.get(p.integrationID) ?? new Set<string>();
+      set.add(p.id);
+      byIntegration.set(p.integrationID, set);
+    }
+    for (const m of models.data) {
+      for (const [integrationID, providerIDs] of byIntegration) {
+        if (providerIDs.has(m.providerID))
+          counts.set(integrationID, (counts.get(integrationID) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [models.data, providers.data]);
+
+  // Connected first, then alphabetical — stable within each group.
+  const integrations = useMemo(() => {
+    if (!data) return [];
+    return [...data].sort((a, b) => {
+      const ac = a.connections.length > 0 ? 1 : 0;
+      const bc = b.connections.length > 0 ? 1 : 0;
+      if (ac !== bc) return bc - ac;
+      return (a.name || a.id).localeCompare(b.name || b.id);
+    });
+  }, [data]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      q
+        ? integrations.filter(
+            (it) => it.name.toLowerCase().includes(q) || it.id.toLowerCase().includes(q),
+          )
+        : integrations,
+    [integrations, q],
+  );
+
   return (
     <div>
       <SectionHeader
         title="Integrations"
-        note="Provider auth: keys, OAuth, commands"
+        note="Connect providers — API keys, OAuth, CLI commands"
         onRefresh={refresh}
         loading={loading}
       />
+      <p className="-mt-1 mb-2 text-xs text-[var(--text-weaker)]">
+        An integration is how the engine authenticates to a model provider. Connect one to enable its models.
+      </p>
+      <div className="relative mb-2">
+        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <input
+          className={`${inputCls} h-7 pl-7`}
+          placeholder="Search integrations"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+      {q && (
+        <p className="mb-1 px-1 text-[11px] text-[var(--text-weaker)]" aria-live="polite">
+          {filtered.length} of {integrations.length}
+        </p>
+      )}
       {error && <ErrorNote message={error} />}
       {!error && data && data.length === 0 && <Empty>No integrations available.</Empty>}
+      {!error && data && data.length > 0 && filtered.length === 0 && (
+        <Empty>No integrations match “{query.trim()}”.</Empty>
+      )}
       <div className="space-y-1">
-        {data?.map((it) => (
+        {filtered.map((it) => (
           <div key={it.id}>
             <button
               type="button"
@@ -296,6 +364,18 @@ export function IntegrationsSection() {
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
+                {(modelCounts.get(it.id) ?? 0) > 0 && (
+                  <span className="text-[11px] text-[var(--text-weaker)]">
+                    · {modelCounts.get(it.id)} models
+                  </span>
+                )}
+                {it.connections.length > 0 ? (
+                  <Badge tone="green">
+                    connected{it.connections.length > 1 ? ` · ${it.connections.length}` : ""}
+                  </Badge>
+                ) : (
+                  <Badge>not connected</Badge>
+                )}
                 {it.connections.map((c, i) => (
                   <Badge key={i} tone="blue">
                     {c.type === "credential" ? c.label : c.name}

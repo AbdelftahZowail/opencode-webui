@@ -37,9 +37,11 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/api/client.ts` | Typed REST client (one function per endpoint) |
 | `src/api/events.ts` | SSE parser for `/api/event` + reconnection |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
-| `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `PermissionModal`, `FormModal`, `ui` (primitives) |
+| `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `PendingRequestsModal` (permissions/questions/forms), `ui` (primitives) |
 | `src/extensions/registry.tsx` | The slot registry — the stable contract for UI extensions (do not change lightly) |
 | `ui-extensions/` | Feature folders; `index.ts` wires them in. Authoring guide: `ui-extensions/README.md` |
+| `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
+| `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
 | `AGENTS.md` | This guide |
 
 ## How the chat UI works
@@ -54,6 +56,14 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 - Permission requests arrive as `permission.asked` events and are answered
   via `POST /api/session/{id}/permission/{requestID}/reply`
   (`once` | `always` | `reject`).
+- **Pending-request popup** (`PendingRequestsModal`): permissions, questions
+  and forms share ONE dialog, FIFO across ALL sessions (each entry gets a
+  `seq` stamp in the store). It is never filtered by the open session — a
+  request from another session still pops up, labelled with its title and an
+  amber "another session" notice plus a Switch button. Esc / overlay click /
+  ✕ cancel the head request (reject/cancel); focus lands on the box itself so
+  a stray Enter can't fire Reject. The old per-kind modals and the corner
+  "waiting in other sessions" chip are gone.
 - Forms arrive via `/api/form/request` and are answered with
   `POST /api/session/{id}/form/{formID}/reply`.
 - When the UI sends a prompt it is fire-and-forget: `POST .../prompt` only
@@ -64,16 +74,25 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   every fresh session. Legacy unpinned sessions still get pinned on first send
   (`ensureSessionModel` via `POST .../model`). The pickers read the
   authoritative `GET /api/session/{id}` from the `sessionDetails` store slice.
-- **Esc** interrupts the active run site-wide (global hotkey map), yielding to
-  the composer when it's focused and to any open overlay (dialog/popover/menu)
-  that needs Esc to dismiss itself.
+- **Esc** interrupts the active run site-wide in TWO steps (`requestInterrupt`):
+  the first press only arms it — the composer's status line swaps to a yellow
+  "press esc again" hint that self-reverts after 2.5s — and the second press
+  aborts. Esc still yields to the composer when it's focused and to any open
+  overlay (dialog/popover/menu) that needs Esc to dismiss itself.
+- **Composer drafts** (`src/lib/drafts.ts`): unsent input is silently saved
+  per session (localStorage) on every change and restored when the session
+  returns; cleared on send. No UI, no labels.
 - **Session navigation**: session rows are native `/session/{id}` anchors.
   Unmodified left-clicks switch sessions in place through `pushState`; browser
   back/forward uses `popstate`, and direct session URLs load the conversation.
   Modified clicks and middle-clicks remain native browser actions. The New
   session control is a native `/new-session` anchor; its route creates a session
   and replaces itself with the new session's canonical URL, so opening it in a
-  new tab creates the session in that tab.
+  new tab creates the session in that tab. New sessions inherit the open
+  session's workspace (`startDraftSession`: explicit picker choice > sidebar
+  pending target > open draft's binding > current session's directory, with
+  a subagent falling back to its parent's — engine subagents carry no
+  location of their own).
 - **Sidebar behavior**: workspaces are grouped by directory and show the three
   newest sessions by default. Each workspace header independently collapses all
   rows; reopening resets the separate `Show N more…` expansion state. The
@@ -88,7 +107,9 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
    touching `src/api/types.ts` or `client.ts`, diff against the running
    service: `bun run scripts/fetch-openapi.ts` writes the live spec to
    `docs/reference/openapi.json` (the proxy forwards only `/api/*`, not
-   `/openapi.json`).
+   `/openapi.json`). Check drift with `bun run scripts/diff-openapi.ts` and
+   update the coverage matrix in `docs/coverage.md` (have / don't-have / why) so
+   intentional skips stay intentional.
 2. **Keep the store as the only place state lives.** Components read via
    `useStore((s) => ...)` and call actions; they never fetch directly except
    for one-shot catalog data (`models`, `agents`, `commands`, `skills`).
@@ -210,8 +231,12 @@ treats the step events as the run lifecycle and keeps an ordered live projection
 ## Rendering (live vs history)
 
 - **Ordered live block**: `Conversation` renders all live assistants for the
-  session in ONE growing block, preserving the engine's part order and stable
-  part identity so a multi-step run streams like a single assistant message.
+  session in ONE growing block, ALWAYS below the entire persisted transcript
+  (persisted = history, streaming = now). Timestamp-anchored placement mixed
+  client/server clocks and let stale live entries float above fresh messages.
+- **Ghost live GC** (`applyFetchedMessages`): a live assistant that never
+  persisted and whose session is idle is retired after ~30s so it can't
+  drag rendering or run-state forever.
 - **Compact continuation messages**: consecutive assistant messages render
   without the repeated `agent provider/model@variant` header — only the first
   in a group shows it.
@@ -219,6 +244,62 @@ treats the step events as the run lifecycle and keeps an ordered live projection
   from a live tool (streaming input = raw `inputText`, then parsed) — the
   ToolCard reads `part.state`, never crashes on a missing state.
 - Empty text parts (e.g. the `"\n\n"` step stub) are skipped.
+- **Staged-revert view**: with `session.revert.messageID` set, the transcript
+  is cut at that message (`applyRevertView`) — the service still returns full
+  history; `/redo` steps forward or clears.
+
+## Tool cards (v2 TUI style)
+
+Tools render as ONE inline row (icon + label, muted when done, spinner while
+running, red + expandable on failure). Rich results get a titled block:
+`edit` shows per-file diffs from `metadata.files[].patch` via DiffView,
+`write` shows the file with line numbers, `shell` shows command + output
+(collapsed past 10 lines), `subagent` links to the child session, `execute`
+lists its tool calls. With tool details OFF, completed tools hide entirely
+(TUI parity). Extension renderers still win via `getToolRenderer`.
+Nested `execute` calls show an inline argument preview
+(`↳ tool [key=value …]`, truncated) — rows with details highlight on hover
+and click to reveal the full input/output/error (state persisted per row).
+
+## Arrow keys & prompt history (v2 TUI bindings)
+
+- Composer focused: ↑/↓ walk prompt history ONLY from buffer start/end
+  (`src/lib/promptHistory.ts`, localStorage-backed); otherwise caret moves.
+  ↓ at the very end with nothing newer opens the RunsPanel — so does ↓ on an
+  empty input. Left/right always move the caret.
+- Composer unfocused: ↑ parent session, ←/→ cycle subagent siblings (wrap),
+  ↓ opens the RunsPanel.
+- **RunsPanel** (`src/components/RunsPanel.tsx`): the v2 TUI's bottom
+  subagents/shells widget — a left-accent-bordered strip that REPLACES the
+  composer while open (`store.runsPanelOpen`; not a modal). Tabs switch
+  Subagents ↔ Shell (←/→ wrap; click works), ↓/↑ move the selection through
+  ALL subagents (running first, finished included), Enter opens, ↑ AT THE TOP
+  or Esc closes and returns focus to the composer so ↑ then walks history.
+  Keys are consumed in a window CAPTURE-phase listener while open. Opened
+  from a subagent page the list anchors at the PARENT (siblings + self),
+  tracked by session ID, with the open session pre-selected and ▸-marked.
+  (Printable keys are handled site-wide — see "Type-anywhere → composer"
+  below.)
+- Modifier-free combos never fire while typing (`useHotkeys` skips editable
+  targets), so plain keys always belong to the text surface.
+- **Subagent pages open read-only** (`store.subagentComposerOpen`): the
+  composer is replaced by a MINIMAL horizontal strip — one small chip per
+  sibling subagent (id order, the same order ←/→ cycle; the open session's
+  chip is highlighted, running siblings pulse green) over the "enter to
+  message this subagent · ↑ back to parent" actions. Enter reveals the
+  composer (site-wide binding; the gate resets on every session switch),
+  Backspace returns to the parent both while gated and with the composer
+  revealed (empty buffer only — handled in Composer when the textarea owns
+  focus, in App otherwise).
+- **Type-anywhere → composer** (`src/lib/composerHandoff.ts`, listener in
+  `App.tsx`): a printable key pressed while focus sits on any non-editable
+  surface (messages list, sidebar, runs-panel box) focuses the composer and
+  lands the character as if typed; on gated subagent pages the gate comes
+  down first. Skipped while dialogs/command palette/menus/popovers are up
+  and for ctrl/meta/alt combos (AltGr kept).
+- **Browser chrome**: the tab title mirrors the open session's title with a
+  `●` prefix while that session is running/queued (effect in `App.tsx`);
+  the favicon is the OpenCode logo (`public/assets/opencode.svg`).
 
 ## Model pinning & pickers
 
@@ -226,7 +307,9 @@ New sessions are created WITH the resolved default (`resolveDefaultModel()`
 passed into `POST /session`) so no "Model switched…" note is persisted. Legacy
 unpinned sessions get pinned on first send (`ensureSessionModel` via
 `POST .../model`). The pickers read the authoritative `GET /api/session/{id}`
-from the `sessionDetails` store slice.
+from the `sessionDetails` store slice. The model picker has a type-to-filter
+search box (autofocused on open; filters name/model/provider; ↑/↓ + Enter
+select over the filtered list; Esc clears the query first, then closes).
 
 ## Debug logging
 

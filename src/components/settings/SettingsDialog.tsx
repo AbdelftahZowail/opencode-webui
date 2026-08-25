@@ -13,10 +13,10 @@ import { ProvidersSection } from "./ProvidersSection";
 import { ServerSection } from "./ServerSection";
 import { WebsearchSection } from "./WebsearchSection";
 
-let openRequest: (() => void) | null = null;
+let openRequest: ((section?: string) => void) | null = null;
 
-export function openSettings() {
-  openRequest?.();
+export function openSettings(section?: string) {
+  openRequest?.(section);
 }
 
 const contentCls =
@@ -37,7 +37,10 @@ export function SettingsDialog() {
   const [tab, setTab] = useState<string>("providers");
 
   useEffect(() => {
-    openRequest = () => setOpen(true);
+    openRequest = (section) => {
+      if (section) setTab(section);
+      setOpen(true);
+    };
     return () => {
       openRequest = null;
     };
@@ -64,7 +67,12 @@ export function SettingsDialog() {
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-col">
             <TabsList className="mb-2 flex w-full flex-wrap justify-start gap-1 rounded-md bg-[var(--surface-base)] p-1">
               {TABS.map((t) => (
-                <TabsTrigger key={t.id} value={t.id} className="h-7 gap-1.5 rounded px-2 text-xs">
+                <TabsTrigger
+                  key={t.id}
+                  value={t.id}
+                  title={t.id === "integrations" ? "Connect providers" : undefined}
+                  className="h-7 gap-1.5 rounded px-2 text-xs"
+                >
                   <t.icon className="size-3.5" />
                   {t.label}
                 </TabsTrigger>

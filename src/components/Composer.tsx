@@ -1,34 +1,55 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Send, Terminal } from "lucide-react";
+import { ChevronRight, Send, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, PromptFile, PtyInfo, ShellInfo } from "../api/client";
-import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo } from "../api/types";
+import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
+import {
+  attachmentPromptFile,
+  bytesToBase64,
+  imagesToAttachments,
+  looksLikeImagePath,
+  mimeFromName,
+  type PendingAttachment,
+} from "../lib/attachments";
 import {
   activateSkill,
   backgroundSubagents,
   childSessionsOf,
   compactSession,
+  consumeRevertPrompt,
+  exportSession,
   forkSession,
-  interrupt,
+  isDraftSession,
   loadSessionDetail,
+  materializeDraft,
   newSession,
+  openRunsPanel,
+  redoSession,
   renameSession,
+  requestInterrupt,
   requestShellPanel,
   selectSession,
   sendCommand,
-  sendPrompt,
+  sendPromptTo,
   sendPromptWithFiles,
   sendShell,
+  signalUI,
   switchAgent,
+  undoSession,
   useStore,
+  getState,
 } from "../store";
+import { loadDraft, saveDraft } from "../lib/drafts";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
-import { AgentPicker, ModelPicker } from "./Pickers";
+import { openSettings } from "./settings/SettingsDialog";
+import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
-import { downloadTranscript } from "./SessionMenu";
+import { downloadTranscript, formatTranscript } from "./SessionMenu";
 import { Spinner } from "./ui";
 import { Button } from "@/components/ui/button";
 import {
+  commandMove,
+  commandSelectActive,
   Command,
   CommandEmpty,
   CommandItem,
@@ -50,6 +71,16 @@ function loadAgents(): Promise<AgentInfo[]> {
 }
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** TUI /copy — transcript markdown to the clipboard. */
+async function copyTranscript(sessionID: string) {
+  try {
+    const data = await exportSession(sessionID);
+    await navigator.clipboard.writeText(formatTranscript(data));
+  } catch {
+    /* clipboard unavailable (permissions/insecure context) */
+  }
+}
 
 // ---- slash menu (v2 TUI autocomplete parity) -----------------------------
 //
@@ -178,7 +209,10 @@ function useDismiss(active: boolean, onClose: () => void) {
 }
 
 export function Composer({ sessionID }: { sessionID: string }) {
-  const [text, setText] = useState("");
+  // The unsent message is a silent per-session draft: seeded from storage,
+  // saved on every change (typing, history walk, /undo restore), cleared on
+  // send. No labels, no UI — switching away and back just works.
+  const [text, setText] = useState(() => loadDraft(sessionID));
   const [busy, setBusy] = useState(false);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -187,17 +221,59 @@ export function Composer({ sessionID }: { sessionID: string }) {
   // for exactly this text (upstream closes on select and reopens on typing).
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   const [pickedFiles, setPickedFiles] = useState<{ path: string; content?: string }[]>([]);
+  /** Images staged for the next send (paste / drop / @-pick), as data URIs. */
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [dragDepth, setDragDepth] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [shellMode, setShellMode] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const running = useStore((s) => s.running[sessionID] ?? false);
   const queued = useStore((s) => !!s.queued[sessionID]);
+  const interruptArmed = useStore((s) => s.interruptArmed);
   const messages = useStore((s) => s.messages[sessionID]);
   const detail = useStore((s) => s.sessionDetails[sessionID]);
+  // Subagent pages: Backspace-on-empty returns to the parent session.
+  const parentID = useStore(
+    (s) => s.sessions.find((x) => x.id === sessionID)?.parentID ?? s.sessionDetails[sessionID]?.parentID,
+  );
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
+
+  // Per-session prompt history, TUI-style: derived from THIS session's real
+  // persisted user messages (newest first), replacing the old global
+  // localStorage history. Optimistic copies (msg_local_) are skipped — the
+  // poll reconciler swaps them for real messages, which land here naturally.
+  const historyTexts = useMemo(
+    () =>
+      (messages ?? [])
+        .filter((m): m is UserMessage => m.type === "user" && !m.id.startsWith("msg_local_"))
+        .map((m) => m.text)
+        .filter((t) => t && !t.startsWith("/"))
+        .reverse(),
+    [messages],
+  );
+  /** Position in historyTexts while walking; null = not navigating. */
+  const [histIdx, setHistIdx] = useState<number | null>(null);
+  /** Buffer captured when the walk started, restored when walking past the end. */
+  const histDraftRef = useRef("");
+
+  /** Which session the current `text` belongs to (guards cross-session saves). */
+  const textSessionRef = useRef(sessionID);
+
+  useEffect(() => {
+    setHistIdx(null);
+    if (textSessionRef.current === sessionID) return;
+    textSessionRef.current = sessionID;
+    setText(loadDraft(sessionID));
+  }, [sessionID]);
+
+  // Persist the buffer whenever it changes — but never attribute a stale
+  // buffer to a freshly switched session before its own draft is restored.
+  useEffect(() => {
+    if (textSessionRef.current !== sessionID) return;
+    saveDraft(sessionID, text);
+  }, [sessionID, text]);
 
   // Meta-row run indicators: child/subagent sessions of this session plus
   // live shells (backgrounded / currently-running commands) and PTYs.
@@ -215,6 +291,8 @@ export function Composer({ sessionID }: { sessionID: string }) {
     runs.shells.filter((s) => s.status === "running").length + runs.ptys.filter((p) => p.status === "running").length;
   const [runMenu, setRunMenu] = useState<"agents" | "shells" | null>(null);
   const runMenuRef = useDismiss(runMenu !== null, () => setRunMenu(null));
+  const [skillsMenu, setSkillsMenu] = useState(false);
+  const skillsMenuRef = useDismiss(skillsMenu, () => setSkillsMenu(false));
   const [openShellId, setOpenShellId] = useState<string | null>(null);
   const [shellOutput, setShellOutput] = useState<Record<string, string>>({});
 
@@ -245,6 +323,17 @@ export function Composer({ sessionID }: { sessionID: string }) {
     textareaRef.current?.focus();
   }, [sessionID]);
 
+  // /undo hands the reverted message's text back to the composer (TUI puts
+  // it into the prompt so it can be edited and re-sent).
+  const revertPrompt = useStore((s) => s.revertPrompt);
+  useEffect(() => {
+    if (revertPrompt) {
+      setText(revertPrompt);
+      consumeRevertPrompt();
+      requestAnimationFrame(() => textareaRef.current?.setSelectionRange(0, 0));
+    }
+  }, [revertPrompt]);
+
   const isSlash =
     !shellMode &&
     text.startsWith("/") &&
@@ -269,10 +358,26 @@ export function Composer({ sessionID }: { sessionID: string }) {
         run: () => void selectSession(null),
       },
       {
+        name: "undo",
+        description: "Undo previous message",
+        run: () => void undoSession(sessionID),
+      },
+      {
+        name: "redo",
+        description: "Redo",
+        run: () => void redoSession(sessionID),
+      },
+      {
         name: "thinking",
         aliases: ["toggle-thinking"],
-        description: prefs.showReasoning ? "Collapse thinking" : "Expand thinking",
+        description: prefs.showReasoning ? "Collapse all thinking" : "Expand all thinking",
         run: () => setPref("showReasoning", !getPrefs().showReasoning),
+      },
+      {
+        name: "timestamps",
+        aliases: ["toggle-timestamps"],
+        description: prefs.showTimestamps ? "Hide timestamps" : "Show timestamps",
+        run: () => setPref("showTimestamps", !getPrefs().showTimestamps),
       },
       {
         name: "rename",
@@ -293,22 +398,101 @@ export function Composer({ sessionID }: { sessionID: string }) {
         run: () => void downloadTranscript(sessionID),
       },
       {
+        name: "copy",
+        description: "Copy session transcript",
+        run: () => void copyTranscript(sessionID),
+      },
+      {
         name: "compact",
         aliases: ["summarize"],
         description: "Compact session",
         run: () => void compactSession(sessionID, "steer"),
       },
+      {
+        name: "connect",
+        description: "Connect providers & integrations",
+        run: () => openSettings("integrations"),
+      },
+      {
+        name: "models",
+        aliases: ["mo"],
+        description: "Switch model",
+        run: () => signalUI("models"),
+      },
+      {
+        name: "variants",
+        description: "Switch model variant",
+        run: () => signalUI("variants"),
+      },
+      {
+        name: "agents",
+        description: "Switch agent",
+        run: () => signalUI("agents"),
+      },
+      {
+        name: "themes",
+        description: "Switch theme",
+        run: () => signalUI("themes"),
+      },
+      {
+        name: "skills",
+        description: "Browse skills",
+        run: () => setSkillsMenu(true),
+      },
+      {
+        name: "mcps",
+        description: "Toggle MCPs",
+        run: () => openSettings("mcp"),
+      },
+      {
+        name: "status",
+        description: "View status",
+        run: () => openSettings("server"),
+      },
+      {
+        name: "diff",
+        description: "Open diff viewer",
+        run: () => signalUI("explorer"),
+      },
+      {
+        name: "help",
+        description: "Help",
+        run: () => signalUI("help"),
+      },
     ],
-    [sessionID, prefs.showReasoning],
+    [sessionID, prefs.showReasoning, prefs.showTimestamps],
   );
 
   // Skills the engine also exposes as commands accept upstream's
   // insert-with-args select action; others use the dedicated skill endpoint.
   const commandNames = useMemo(() => new Set(commands.map((c) => c.name)), [commands]);
 
+  function pickSkill(skill: SkillInfo) {
+    if (commandNames.has(skill.name)) {
+      setText(`/${skill.name} `);
+      setDismissedAt(`/${skill.name} `);
+      textareaRef.current?.focus();
+    } else {
+      setText("");
+      void activateSkill(skill.id);
+    }
+  }
+
+  // TUI parity: /variants only exists while the current model has variants.
+  const currentModel = detail?.model;
+  const modelHasVariants = useMemo(() => {
+    if (!currentModel) return false;
+    return (
+      (models.find(
+        (m) => m.enabled && m.modelID === currentModel.id && m.providerID === currentModel.providerID,
+      )?.variants?.length ?? 0) > 0
+    );
+  }, [models, currentModel]);
+
   const slashEntries = useMemo<SlashEntry[]>(() => {
     const entries: SlashEntry[] = [];
     for (const action of slashActions) {
+      if (action.name === "variants" && !modelHasVariants) continue;
       entries.push({
         key: `action:${action.name}`,
         display: `/${action.name}`,
@@ -334,26 +518,16 @@ export function Composer({ sessionID }: { sessionID: string }) {
       });
     }
     for (const skill of skills) {
-      const known = commandNames.has(skill.name);
       entries.push({
         key: `skill:${skill.id}`,
         display: `/${skill.name}`,
         names: [skill.name],
         description: skill.description,
-        onSelect: () => {
-          if (known) {
-            setText(`/${skill.name} `);
-            setDismissedAt(`/${skill.name} `);
-            textareaRef.current?.focus();
-          } else {
-            setText("");
-            void activateSkill(skill.id);
-          }
-        },
+        onSelect: () => pickSkill(skill),
       });
     }
     return entries.sort((a, b) => a.display.localeCompare(b.display));
-  }, [slashActions, commands, skills, commandNames]);
+  }, [slashActions, commands, skills, commandNames, modelHasVariants]);
 
   const filteredSlash = useMemo(
     () => filterSlashEntries(slashEntries, slashQuery),
@@ -375,7 +549,6 @@ export function Composer({ sessionID }: { sessionID: string }) {
 
   // Context readout, TUI-style: usage of the last assistant message against
   // the current model's context limit, plus session cost.
-  const currentModel = detail?.model;
   const lastAssistant = useMemo(() => {
     const list = messages ?? [];
     for (let i = list.length - 1; i >= 0; i--) {
@@ -406,9 +579,34 @@ export function Composer({ sessionID }: { sessionID: string }) {
     void switchAgent(sessionID, next.id).then(() => void loadSessionDetail(sessionID));
   }
 
+  /** Stage an image attachment from raw workspace-file bytes. */
+  function attachImageBytes(path: string, buf: ArrayBuffer) {
+    const mime = mimeFromName(path) ?? "application/octet-stream";
+    setAttachments((prev) => [
+      ...prev,
+      {
+        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: path.split("/").pop() || path,
+        mime,
+        uri: `data:${mime};base64,${bytesToBase64(buf)}`,
+      },
+    ]);
+  }
+
   function handleFilePick(entry: FsEntry) {
     const idx = text.lastIndexOf("@");
     if (idx === -1) return;
+    if (entry.type === "file" && looksLikeImagePath(entry.path)) {
+      // Images can't ride the @file text-content flow — attach them as real
+      // image attachments and remove the "@query" token from the buffer.
+      setText(text.slice(0, idx) + text.slice(idx + 1 + (mentionQuery?.length ?? 0)));
+      textareaRef.current?.focus();
+      api
+        .fsReadBytes(entry.path, sessionLocation)
+        .then((buf) => attachImageBytes(entry.path, buf))
+        .catch(() => undefined);
+      return;
+    }
     const token = `@${entry.path}`;
     setText(text.slice(0, idx) + token + " ");
     setPickedFiles((prev) => [...prev, { path: entry.path }]);
@@ -423,20 +621,54 @@ export function Composer({ sessionID }: { sessionID: string }) {
     textareaRef.current?.focus();
   }
 
-  function selectActiveSlashItem() {
-    // The vendored Command marks the active row with data-selected; clicking
-    // it runs its onSelect (same path as ArrowUp/Down + Enter).
-    const el = popRef.current?.querySelector<HTMLElement>(
-      '[data-slot="command-item"][data-selected="true"]',
-    );
-    el?.click();
+  /**
+   * Every send kind routes through here so the draft session is materialized
+   * exactly once per submission: sends against "__draft__" would otherwise
+   * hit api.prompt("__draft__") and fail. Returns the real target id, or
+   * null when there is nothing to send to / another submit is already
+   * materializing the draft ("draft already materializing" — double-Enter
+   * guard; drop silently, same contract as the busy flag).
+   */
+  async function resolveSendTarget(): Promise<string | null> {
+    if (isDraftSession(sessionID)) {
+      try {
+        return await materializeDraft(text);
+      } catch {
+        return null;
+      }
+    }
+    return sessionID || null;
   }
 
   async function submit() {
     const value = text.trim();
-    if (!value || busy) return;
+    // Image-only sends (empty text) are allowed — the engine takes {text,
+    // files} and a bare attachment prompt is meaningful.
+    if ((!value && attachments.length === 0) || busy) return;
     setBusy(true);
+    setHistIdx(null);
     try {
+      // Built-in slash actions are pure UI operations — they must run WITHOUT
+      // materializing the draft ("/new" on a draft would otherwise create an
+      // orphan session before opening the next one).
+      if (!shellMode && value.startsWith("/")) {
+        const parts = value.slice(1).split(" ");
+        const name = parts[0]!;
+        const action = slashActions.find((a) => a.name === name);
+        if (action) {
+          // Built-ins are UI actions; the engine's command route would
+          // reject them, so dispatch locally with the typed arguments.
+          action.run(parts.slice(1).join(" "));
+          setText("");
+          setPickedFiles([]);
+          setAttachments([]);
+          return;
+        }
+      }
+      // Resolve the target FIRST: a draft must become a real session before
+      // any of the send kinds below may run.
+      const sid = await resolveSendTarget();
+      if (!sid) return;
       if (shellMode) {
         await sendShell(value.startsWith("!") ? value.slice(1) : value);
       } else if (value.startsWith("!")) {
@@ -445,36 +677,45 @@ export function Composer({ sessionID }: { sessionID: string }) {
         const parts = value.slice(1).split(" ");
         const name = parts[0]!;
         const args = parts.slice(1).join(" ");
-        const action = slashActions.find((a) => a.name === name);
-        if (action) {
-          // Built-ins are UI actions; the engine's command route would
-          // reject them, so dispatch locally with the typed arguments.
-          action.run(args);
-        } else {
-          await sendCommand(name, args || undefined);
-        }
-      } else if (pickedFiles.length > 0) {
+        await sendCommand(name, args || undefined);
+      } else if (pickedFiles.length > 0 || attachments.length > 0) {
+        // A draft has no server-side location yet — its workspace only lives
+        // in the store, so fall back to it for @file URI resolution.
+        const draftWorkspace = getState().draftWorkspace;
+        const fileBase = sessionLocation ?? draftWorkspace ?? undefined;
         const files: PromptFile[] = [];
         for (const picked of pickedFiles) {
-          if (!sessionLocation) continue;
+          if (!fileBase) continue;
           const token = `@${picked.path}`;
           const idx = value.indexOf(token);
           files.push({
-            uri: `file://${encodeURI(`${sessionLocation.replace(/\/+$/, "")}/${picked.path}`)}`,
+            uri: `file://${encodeURI(`${fileBase.replace(/\/+$/, "")}/${picked.path}`)}`,
             name: picked.path,
             mention: idx !== -1 ? { start: idx, end: idx + token.length, text: token } : undefined,
           });
         }
+        // Pasted/dropped images go out as data: URIs in the same uri-only
+        // files field — the engine resolves data: URLs like the TUI's pastes.
+        for (const att of attachments) {
+          files.push(attachmentPromptFile(att));
+        }
         if (files.length > 0) {
           await sendPromptWithFiles(value, files);
         } else {
-          await sendPrompt(value);
+          await sendPromptTo(sid, value);
         }
       } else {
-        await sendPrompt(value);
+        await sendPromptTo(sid, value);
       }
       setText("");
       setPickedFiles([]);
+      setAttachments([]);
+    } catch {
+      // Send failed (SendErrorStrip shows the reason) — put the text back so
+      // the user can retry without retyping. Attachments are deliberately
+      // KEPT (cleared only after a successful send) so they're never lost
+      // silently; the strip above the input shows they're still staged.
+      setText(value);
     } finally {
       setBusy(false);
       textareaRef.current?.focus();
@@ -492,6 +733,11 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const hint = shellMode ? (
     <p>
       <span className="font-medium text-[color:var(--surface-brand-base)]">Shell</span> · esc to exit
+    </p>
+  ) : running && interruptArmed ? (
+    // First Esc armed the abort — ask for confirmation until it times out.
+    <p className="font-medium text-[color:var(--surface-warning-strong)]">
+      Press esc again to interrupt
     </p>
   ) : running || queued ? (
     <p className="flex items-center gap-1.5">
@@ -512,13 +758,89 @@ export function Composer({ sessionID }: { sessionID: string }) {
   return (
     <div className="border-t border-[color:var(--border-weak-base)] px-3 pb-2.5 pt-2">
       <div className="mx-auto max-w-3xl">
+        <div className="relative">
+          {skillsMenu && (
+            <div
+              ref={skillsMenuRef}
+              className="absolute bottom-full left-0 z-40 mb-2 max-h-80 w-[min(26rem,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] p-1 shadow-xl"
+            >
+              {skills.length === 0 && (
+                <p className="px-2.5 py-1.5 text-xs text-[color:var(--text-weaker)]">No skills available</p>
+              )}
+              {skills.map((skill) => (
+                <button
+                  key={skill.id}
+                  type="button"
+                  onClick={() => {
+                    setSkillsMenu(false);
+                    pickSkill(skill);
+                  }}
+                  className="flex w-full items-baseline gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--surface-base-hover)]"
+                >
+                  <span className="shrink-0 font-mono text-xs text-[color:var(--text-strong)]">
+                    /{skill.name}
+                  </span>
+                  {skill.description && (
+                    <span className="min-w-0 flex-1 truncate text-xs text-[color:var(--text-weaker)]">
+                      {skill.description}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <Popover open={isSlash}>
           <PopoverAnchor asChild>
             <div
+              onDragEnter={(e) => {
+                if (Array.from(e.dataTransfer.types).includes("Files")) setDragDepth((d) => d + 1);
+              }}
+              onDragOver={(e) => {
+                if (Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault();
+              }}
+              onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
+              onDrop={(e) => {
+                setDragDepth(0);
+                if (e.dataTransfer.files.length === 0) return;
+                // Dropping images stages them; non-image files keep the
+                // @-mention text flow, so plain file drops do nothing here.
+                e.preventDefault();
+                void imagesToAttachments(e.dataTransfer.files).then((atts) => {
+                  if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
+                });
+              }}
               className={`rounded-lg border bg-[color:var(--input-base)] p-2 transition-colors focus-within:border-[color:var(--border-selected)] ${
-                shellMode ? "border-[color:var(--surface-brand-base)]" : "border-[color:var(--border-base)]"
+                dragDepth > 0 || shellMode
+                  ? "border-[color:var(--surface-brand-base)]"
+                  : "border-[color:var(--border-base)]"
               }`}
             >
+              {attachments.length > 0 && (
+                <div className="mb-1.5 flex flex-wrap items-start gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5">
+                  {attachments.map((att) => (
+                    <span key={att.id} className="relative inline-block" title={`${att.name} (${att.mime})`}>
+                      <img
+                        src={att.uri}
+                        alt={att.name}
+                        draggable={false}
+                        className="size-12 rounded-md border border-[color:var(--border-weak-base)] object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setAttachments((prev) => prev.filter((a) => a.id !== att.id))}
+                        title="Remove attachment"
+                        className="absolute -right-1.5 -top-1.5 flex size-4 cursor-pointer items-center justify-center rounded-full border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] text-[color:var(--text-weak)] transition-colors hover:text-[color:var(--text-strong)]"
+                      >
+                        <X className="size-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                  <span className="self-center text-[11px] text-[color:var(--text-weaker)]">
+                    image{attachments.length === 1 ? "" : "s"} attached
+                  </span>
+                </div>
+              )}
               <FilePicker
                 open={mentionQuery !== undefined && !mentionDismissed}
                 query={mentionQuery ?? ""}
@@ -534,7 +856,27 @@ export function Composer({ sessionID }: { sessionID: string }) {
                     placeholder={placeholder}
                     className={`max-h-40 min-h-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-1 text-sm placeholder:text-[color:var(--text-weaker)] focus-visible:ring-0 ${shellMode ? "font-mono" : ""}`}
                     onChange={(e) => {
+                      setHistIdx(null);
                       setText(e.target.value);
+                    }}
+                    onPaste={(e) => {
+                      // Image paste (screenshots): stage as attachments.
+                      // Only intercept when an image is actually present so
+                      // normal text/file pastes keep working untouched.
+                      const files: File[] = [];
+                      for (const item of Array.from(e.clipboardData?.items ?? [])) {
+                        if (item.kind !== "file") continue;
+                        const file = item.getAsFile();
+                        if (file) files.push(file);
+                      }
+                      const hasImage = files.some(
+                        (f) => f.type.startsWith("image/") || looksLikeImagePath(f.name),
+                      );
+                      if (!hasImage) return;
+                      e.preventDefault();
+                      void imagesToAttachments(files).then((atts) => {
+                        if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
+                      });
                     }}
                     onKeyDown={(e) => {
                       if (isSlash) {
@@ -551,13 +893,102 @@ export function Composer({ sessionID }: { sessionID: string }) {
                           }
                           return;
                         }
-                        if (e.key === "Enter") {
+                        if (e.key === "ArrowDown") {
                           e.preventDefault();
+                          commandMove(1);
+                          return;
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          commandMove(-1);
+                          return;
+                        }
+                        if (e.key === "Enter") {
+                          // Any Enter flavor belongs to the menu while it is
+                          // visible — never a newline, never a submit.
+                          e.preventDefault();
+                          commandSelectActive();
                           return;
                         }
                         if (e.key === "Tab") {
                           e.preventDefault();
-                          selectActiveSlashItem();
+                          commandSelectActive();
+                          return;
+                        }
+                      }
+                      if (mentionQuery !== undefined && !mentionDismissed && !isSlash) {
+                        // The @-file menu hosts its own Command instance;
+                        // route its keys from the textarea so arrows navigate,
+                        // Enter/Tab pick, and no newline is ever inserted.
+                        // With ZERO matching rows (e.g. an email address after
+                        // "@") the menu is inert — fall through so Enter still
+                        // submits the literal text.
+                        const hasRows = !!document.querySelector('[data-slot="command-item"]');
+                        if (hasRows) {
+                          if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            commandMove(1);
+                            return;
+                          }
+                          if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            commandMove(-1);
+                            return;
+                          }
+                          if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                            e.preventDefault();
+                            commandSelectActive();
+                            return;
+                          }
+                        }
+                      }
+                      if (skillsMenu && e.key === "Escape") {
+                        e.preventDefault();
+                        setSkillsMenu(false);
+                        return;
+                      }
+                      if (!isSlash && mentionQuery === undefined && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                        // TUI prompt-history bindings against THIS session's
+                        // real messages: up navigates history only from the
+                        // very start of the buffer, down only from the very
+                        // end; otherwise the caret moves natively.
+                        if (e.key === "ArrowUp") {
+                          const el = e.currentTarget;
+                          if (el.selectionStart === 0 && el.selectionEnd === 0 && historyTexts.length > 0) {
+                            e.preventDefault();
+                            if (histIdx === null) histDraftRef.current = text;
+                            const next = histIdx === null ? 0 : Math.min(histIdx + 1, historyTexts.length - 1);
+                            setHistIdx(next);
+                            const entry = historyTexts[next] ?? "";
+                            setText(entry);
+                            requestAnimationFrame(() => el.setSelectionRange(0, 0));
+                          }
+                          return;
+                        }
+                        if (e.key === "ArrowDown") {
+                          const el = e.currentTarget;
+                          if (el.selectionStart === text.length && el.selectionEnd === text.length) {
+                            if (histIdx === null) {
+                              e.preventDefault();
+                              openRunsPanel();
+                            } else if (histIdx <= 0) {
+                              // Past the newest entry: restore the draft that
+                              // was captured when the walk began.
+                              e.preventDefault();
+                              setHistIdx(null);
+                              setText(histDraftRef.current);
+                              requestAnimationFrame(() =>
+                                el.setSelectionRange(histDraftRef.current.length, histDraftRef.current.length),
+                              );
+                            } else {
+                              e.preventDefault();
+                              const next = Math.min(histIdx - 1, historyTexts.length - 1);
+                              setHistIdx(next);
+                              const entry = historyTexts[Math.max(next, 0)] ?? "";
+                              setText(entry);
+                              requestAnimationFrame(() => el.setSelectionRange(entry.length, entry.length));
+                            }
+                          }
                           return;
                         }
                       }
@@ -580,7 +1011,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                           return;
                         }
                         if (running) {
-                          void interrupt();
+                          requestInterrupt();
                           return;
                         }
                         return;
@@ -588,6 +1019,14 @@ export function Composer({ sessionID }: { sessionID: string }) {
                       if (e.key === "Tab") {
                         e.preventDefault();
                         cycleAgent(e.shiftKey ? -1 : 1);
+                        return;
+                      }
+                      // Subagent page: Backspace on an empty buffer goes back
+                      // to the parent — the site-wide binding can't fire while
+                      // this textarea owns focus, so it is mirrored here.
+                      if (e.key === "Backspace" && !text && parentID) {
+                        e.preventDefault();
+                        void selectSession(parentID);
                         return;
                       }
                       if (e.key === "Enter" && !e.shiftKey) {
@@ -602,7 +1041,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                     <Button
                       variant="default"
                       size="sm"
-                      disabled={!text.trim()}
+                      disabled={!text.trim() && attachments.length === 0}
                       onClick={() => void submit()}
                       title={running ? "Queue (Enter)" : "Send (Enter)"}
                     >
@@ -757,6 +1196,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                 </button>
                 <AgentPicker sessionID={sessionID} openUp align="left" />
                 <ModelPicker sessionID={sessionID} openUp align="left" />
+                <VariantPicker sessionID={sessionID} openUp align="left" />
                 {contextParts.length > 0 && (
                   <span
                     className="ml-auto font-mono text-[11px] text-[color:var(--text-weaker)]"
@@ -769,7 +1209,6 @@ export function Composer({ sessionID }: { sessionID: string }) {
             </div>
           </PopoverAnchor>
           <PopoverContent
-            ref={popRef}
             side="top"
             align="start"
             sideOffset={8}

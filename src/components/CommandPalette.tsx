@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette } from "lucide-react";
 import {
+  commandMove,
+  commandSelectActive,
   CommandDialog,
   CommandEmpty,
   CommandGroup,
@@ -78,7 +80,24 @@ export function CommandPalette() {
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
-      <CommandInput placeholder="Type a command or search…" />
+      <CommandInput
+        placeholder="Type a command or search…"
+        onKeyDown={(e) => {
+          // The vendored Command no longer listens on document; the palette
+          // drives its own menu from the input's keydown (arrows move,
+          // Enter selects — Tab intentionally closes via the dialog).
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            commandMove(1);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            commandMove(-1);
+          } else if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            commandSelectActive();
+          }
+        }}
+      />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
         <CommandGroup heading="Actions">

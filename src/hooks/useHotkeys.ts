@@ -47,6 +47,10 @@ function matches(combo: string, e: KeyboardEvent): boolean {
  * focus is in an input/textarea/contenteditable; unregistered keys are
  * left untouched so typing is never blocked. Handlers receive the raw
  * KeyboardEvent so they can opt out per context.
+ *
+ * Exception: MODIFIER-FREE combos (arrows, escape…) never fire while the
+ * target is editable — plain keys belong to the text surface (caret moves,
+ * prompt history) unless the surface opts into global handling itself.
  */
 export function useHotkeys(map: Record<string, (e?: KeyboardEvent) => void>): void {
   const mapRef = useRef(map);
@@ -56,12 +60,21 @@ export function useHotkeys(map: Record<string, (e?: KeyboardEvent) => void>): vo
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
       const combo = Object.keys(mapRef.current).find((c) => matches(c, e));
-      const handler = combo ? mapRef.current[combo] : undefined;
+      if (!combo) return;
+      const handler = mapRef.current[combo];
       if (!handler) return;
+      const { mods } = parseCombo(combo);
+      if (mods.size === 0 && isEditableTarget(e.target)) return;
       e.preventDefault();
       handler(e);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
 }

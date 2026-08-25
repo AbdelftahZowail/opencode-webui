@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Palette } from "lucide-react";
 import { THEMES, applyTheme, getTheme } from "../theme/themes";
+import { useStore } from "../store";
 import { Button } from "./ui/button";
 import {
   DropdownMenu,
@@ -11,10 +12,18 @@ import {
 
 export function ThemePicker() {
   const [current, setCurrent] = useState(getTheme().id);
+  const signal = useStore((s) => s.uiSignals.themes);
+  const [open, setOpen] = useState(false);
+
+  // /themes requests this picker to open.
+  useEffect(() => {
+    if (signal) setOpen(true);
+  }, [signal]);
+
   const label = THEMES.find((t) => t.id === current)?.label ?? THEMES[0]!.label;
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="sm" className="text-xs text-muted-foreground">
           <Palette />

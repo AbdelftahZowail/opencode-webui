@@ -21,6 +21,13 @@ interface FilePickerProps {
   children: ReactNode;
 }
 
+/**
+ * @-mention file autocomplete. The popover hosts a <Command> instance whose
+ * selection is driven IMPERATIVELY from the wrapped textarea's onKeyDown
+ * (Composer routes ArrowUp/Down to commandMove and Enter/Tab to
+ * commandSelectActive) — there is no document-level key listener; keys are
+ * handled exactly where they originate.
+ */
 export function FilePicker({ open, query, location, onOpenChange, onPick, children }: FilePickerProps) {
   const [results, setResults] = useState<FsEntry[]>([]);
   const [resolvedLocation, setResolvedLocation] = useState<string | undefined>(location);

@@ -40,7 +40,14 @@ function MessageScrollerViewport({
     <MessageScrollerPrimitive.Viewport
       data-slot="message-scroller-viewport"
       className={cn(
-        "size-full min-h-0 min-w-0 scroll-fade-b scrollbar-thin scrollbar-gutter-stable overflow-y-auto overscroll-contain contain-content data-autoscrolling:scrollbar-thumb-transparent data-autoscrolling:scrollbar-track-transparent",
+        // [overflow-anchor:none]: the headless scroller owns scroll position
+        // (spacer + follow-bottom writes); native scroll anchoring adjusting
+        // scrollTop alongside it made the two fight — up/down jitter.
+        // scrollbar-gutter:stable keeps width constant so the scrollbar never
+        // appears/disappears; the data-autoscrolling transparency variants are
+        // omitted on purpose — pulsing the thumb color every stick-scroll read
+        // as flicker during polling/streaming.
+        "size-full min-h-0 min-w-0 scroll-fade-b scrollbar-thin scrollbar-gutter-stable overflow-y-auto overscroll-contain contain-content [overflow-anchor:none]",
         className
       )}
       {...props}

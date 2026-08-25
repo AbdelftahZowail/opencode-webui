@@ -1,6 +1,6 @@
-export type Prefs = { showReasoning: boolean; showToolDetails: boolean };
+export type Prefs = { showReasoning: boolean; showToolDetails: boolean; showTimestamps: boolean };
 
-const DEFAULTS: Prefs = { showReasoning: true, showToolDetails: true };
+const DEFAULTS: Prefs = { showReasoning: true, showToolDetails: true, showTimestamps: false };
 const STORAGE_KEY = "webui.prefs";
 
 function load(): Prefs {

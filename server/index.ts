@@ -97,6 +97,10 @@ const server: Server<Record<string, unknown>> = Bun.serve({
         const headers = Service.headers(ep);
         const upstream: Response = await fetch(`${ep.url}${path}${url.search}`, {
           method,
+          // Abort the upstream request when the browser client goes away,
+          // otherwise streamed responses (SSE) leak one connection per
+          // client reconnect until the pool wedges and requests hang.
+          signal: req.signal,
           headers: {
             ...headers,
             ...Object.fromEntries(

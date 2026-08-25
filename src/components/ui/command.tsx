@@ -10,7 +10,7 @@ import { SearchIcon } from "lucide-react"
 type CommandContextValue = {
   query: string
   setQuery: (v: string) => void
-  register: (el: HTMLElement | null, value: string) => number
+  rootRef: React.RefObject<HTMLDivElement | null>
   activeIndex: number
   setActiveIndex: (i: number) => void
   selectActive: () => void
@@ -24,66 +24,111 @@ function useCommandContext(): CommandContextValue {
   return ctx
 }
 
+// ---- imperative control -----------------------------------------------------
+//
+// Menus built on <Command> are driven from the text surface that owns them
+// (composer textarea, file-picker mention query, palette input): their keydown
+// handlers call commandMove()/commandSelectActive(), so arrow/enter keys are
+// handled deterministically where they originate instead of through a global
+// document listener (which double-fired with composer handling). Exactly one
+// Command is live per open menu.
+
+interface CommandHandle {
+  move: (delta: 1 | -1) => void
+  selectActive: () => void
+}
+
+let lastCommand: CommandHandle | null = null
+
+/** Move the highlight of the live Command menu (wraps at both ends). */
+export function commandMove(delta: 1 | -1) {
+  lastCommand?.move(delta)
+}
+
+/** Run the active row of the live Command menu (first row when untouched). */
+export function commandSelectActive() {
+  lastCommand?.selectActive()
+}
+
+/**
+ * Visible, enabled command items in document order — the same order the user
+ * sees. Queried from the DOM at call time, so filtering, mount/unmount and
+ * even StrictMode's double-mounted effects can never desync the highlight
+ * from the rendered rows (the old index-registration approach accumulated
+ * stale entries on remount, which is why the highlight only appeared after
+ * a full loop through the menu).
+ */
+function visibleItems(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-slot="command-item"]')).filter(
+    (el) => el.dataset.disabled !== "true",
+  )
+}
+
 function Command({
   className,
   children,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) {
   const [query, setQuery] = React.useState("")
-  const itemsRef = React.useRef<{ el: HTMLElement | null; value: string }[]>([])
   const [activeIndex, setActiveIndex] = React.useState(-1)
-
-  const register = React.useCallback((el: HTMLElement | null, value: string) => {
-    const index = itemsRef.current.length
-    itemsRef.current.push({ el, value })
-    return index
-  }, [])
-
-  const visibleItems = React.useCallback(() => {
-    const q = query.trim().toLowerCase()
-    return itemsRef.current.filter((i) => !q || i.value.toLowerCase().includes(q))
-  }, [query])
+  const rootRef = React.useRef<HTMLDivElement>(null)
 
   const selectActive = React.useCallback(() => {
-    const items = visibleItems()
-    const active = items[activeIndex]
-    if (active?.el) {
-      active.el.click()
-    }
-  }, [activeIndex, visibleItems])
+    const items = visibleItems(rootRef.current)
+    if (items.length === 0) return
+    // Nothing highlighted yet (menu just opened): select the first row,
+    // matching upstream's autocomplete where submit takes the top hit.
+    const active = activeIndex >= 0 && activeIndex < items.length ? items[activeIndex] : items[0]
+    active?.click()
+  }, [activeIndex])
 
   const ctx = React.useMemo<CommandContextValue>(
-    () => ({ query, setQuery, register, activeIndex, setActiveIndex, selectActive }),
-    [query, register, activeIndex, selectActive],
+    () => ({ query, setQuery, rootRef, activeIndex, setActiveIndex, selectActive }),
+    [query, activeIndex, selectActive],
+  )
+
+  // The handle is created ONCE and always reads live state through a ref —
+  // key-repeat (≈33ms apart) can fire before the passive effect that swaps
+  // lastCommand runs, so closures must never carry stale activeIndex.
+  const stateRef = React.useRef({ activeIndex, setActiveIndex, selectActive })
+  stateRef.current = { activeIndex, setActiveIndex, selectActive }
+
+  const handle = React.useMemo<CommandHandle>(
+    () => ({
+      move(delta) {
+        const s = stateRef.current
+        const items = visibleItems(rootRef.current)
+        if (items.length === 0) return
+        const len = items.length
+        // A stale index (the list shrank since the last move) counts as
+        // "nothing selected": ↓ takes the first row, ↑ the last.
+        const i = s.activeIndex >= 0 && s.activeIndex < len ? s.activeIndex : -1
+        s.setActiveIndex(delta === 1 ? (i + 1) % len : i <= 0 ? len - 1 : i - 1)
+      },
+      selectActive() {
+        stateRef.current.selectActive()
+      },
+    }),
+    [],
   )
 
   React.useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return
-      const items = visibleItems()
-      if (items.length === 0) return
-      e.preventDefault()
-      if (e.key === "ArrowDown") {
-        setActiveIndex((i) => (i + 1) % items.length)
-      } else if (e.key === "ArrowUp") {
-        setActiveIndex((i) => (i <= 0 ? items.length - 1 : i - 1))
-      } else {
-        selectActive()
-      }
+    lastCommand = handle
+    return () => {
+      if (lastCommand === handle) lastCommand = null
     }
-    document.addEventListener("keydown", onKeyDown)
-    return () => document.removeEventListener("keydown", onKeyDown)
-  }, [visibleItems, selectActive])
+  }, [handle])
 
   React.useEffect(() => {
-    const items = visibleItems()
-    const active = items[activeIndex]
-    active?.el?.scrollIntoView({ block: "nearest" })
-  }, [activeIndex, visibleItems])
+    const active = visibleItems(rootRef.current)[activeIndex]
+    active?.scrollIntoView({ block: "nearest" })
+  }, [activeIndex])
 
   return (
     <CommandContext.Provider value={ctx}>
       <div
+        ref={rootRef}
         data-slot="command"
         className={cn(
           "flex size-full flex-col overflow-hidden rounded-xl! bg-popover p-1 text-popover-foreground",
@@ -279,14 +324,23 @@ function CommandItem({
 }) {
   const ctx = useCommandContext()
   const ref = React.useRef<HTMLDivElement>(null)
+  // Position among the RENDERED items, derived from the live DOM after every
+  // commit (no registration lifecycle, so remounts/StrictMode can't desync it).
   const [index, setIndex] = React.useState(-1)
 
-  React.useEffect(() => {
-    if (disabled) return
-    setIndex(ctx.register(ref.current, value ?? ref.current?.textContent ?? ""))
-  }, [ctx.register, value, disabled])
+  React.useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || !ctx.rootRef.current) {
+      setIndex(-1)
+      return
+    }
+    const items = ctx.rootRef.current.querySelectorAll(
+      '[data-slot="command-item"]:not([data-disabled="true"])',
+    )
+    setIndex(Array.prototype.indexOf.call(items, el))
+  })
 
-  const isActive = index >= 0 && index === ctx.activeIndex
+  const isActive = !disabled && index >= 0 && index === ctx.activeIndex
   const itemValue = value ?? ref.current?.textContent ?? ""
 
   React.useEffect(() => {
@@ -320,7 +374,9 @@ function CommandItem({
         onSelect?.()
       }}
       className={cn(
-        "relative flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-hidden data-[disabled=true]:pointer-events-none data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground",
+        // Keyboard-selected rows use the raised-active token — --accent maps
+        // to a near-background gray here, which read as "no highlight at all".
+        "relative flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-hidden data-[disabled=true]:pointer-events-none data-[selected=true]:bg-[color:var(--surface-raised-base-active)] data-[selected=true]:text-[color:var(--text-strong)] data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground",
         className,
       )}
       {...props}

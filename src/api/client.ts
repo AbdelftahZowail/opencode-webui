@@ -369,9 +369,10 @@ export const api = {
   health: () => request<{ ok: boolean; service?: string; error?: string }>("/api/webui/status"),
 
   // sessions
-  listSessions: (opts: { limit?: number; cursor?: string | null } = {}) => {
+  listSessions: (opts: { limit?: number; cursor?: string | null; search?: string } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 50), order: "desc" });
     if (opts.cursor) params.set("cursor", opts.cursor);
+    if (opts.search) params.set("search", opts.search);
     return request<SessionsResponse>(`/api/session?${params.toString()}`);
   },
   activeSessions: () =>
@@ -422,6 +423,19 @@ export const api = {
     }),
   interrupt: (sessionID: string) =>
     request<unknown>(`/api/session/${sessionID}/interrupt`, { method: "POST" }),
+  /** Stage a revert at a message (undo messages + file changes up to it). */
+  revertStage: (sessionID: string, messageID: string) =>
+    request<unknown>(`/api/session/${sessionID}/revert/stage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageID }),
+    }),
+  /** Clear the staged/current revert (redo past the revert point). */
+  revertClear: (sessionID: string) =>
+    request<unknown>(`/api/session/${sessionID}/revert/clear`, { method: "POST" }),
+  /** Commit the staged revert. */
+  revertCommit: (sessionID: string) =>
+    request<unknown>(`/api/session/${sessionID}/revert/commit`, { method: "POST" }),
   /** Background the session's synchronous (task-tool) subagents. */
   sessionBackground: (sessionID: string) =>
     request<unknown>(`/api/session/${sessionID}/background`, { method: "POST" }),
@@ -547,6 +561,16 @@ export const api = {
       throw new Error(message);
     }
     return res.text();
+  },
+  /** Byte-exact /api/fs/read — fsRead's res.text() corrupts binary files. */
+  fsReadBytes: async (path: string, location?: string): Promise<ArrayBuffer> => {
+    const encoded = path.split("/").map(encodeURIComponent).join("/");
+    const params = new URLSearchParams();
+    if (location) params.set("location[directory]", location);
+    const qs = params.toString();
+    const res = await fetch(`/api/fs/read/${encoded}${qs ? `?${qs}` : ""}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.arrayBuffer();
   },
 
   // catalog

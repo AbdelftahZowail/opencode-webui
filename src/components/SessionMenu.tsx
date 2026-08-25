@@ -188,7 +188,7 @@ export async function downloadTranscript(sessionID: string) {
   }
 }
 
-function formatTranscript(data: SessionExportData): string {
+export function formatTranscript(data: SessionExportData): string {
   const { info, messages } = data;
   const lines: string[] = [`# ${info.title || "Untitled session"}`, ""];
   lines.push(`Session \`${info.id}\` · exported ${new Date(info.time.created).toISOString()}`, "");

@@ -173,7 +173,7 @@ export type ToolState =
   | { status: "completed"; input: Record<string, unknown>; content: ToolContent[]; metadata?: Record<string, unknown> }
   | { status: "error"; input: Record<string, unknown>; error: StructuredError; content?: ToolContent[] };
 
-export type ToolContent = { type: "text"; text: string } | { type: "file"; data: string; mime: string; name?: string };
+export type ToolContent = { type: "text"; text: string } | { type: "file"; uri?: string; data?: string; mime: string; name?: string };
 
 // ---- permissions --------------------------------------------------------
 
@@ -228,6 +228,8 @@ export interface ModelInfo {
   status: "alpha" | "beta" | "deprecated" | "active";
   enabled: boolean;
   limit: { context: number; input?: number; output: number };
+  /** Server-side reasoning-effort variants (Model.Variant[].id). */
+  variants?: { id: string }[];
 }
 
 export interface AgentInfo {
@@ -257,13 +259,14 @@ export interface SkillInfo {
   content: string;
 }
 
+/** Prompt.FileAttachment — the shape history returns for user message files. */
 export interface FileAttachment {
   data: string;
   mime: string;
-  source: string;
+  source: { type: "inline" } | { type: "uri"; uri: string };
   name?: string;
   description?: string;
-  mention?: string;
+  mention?: { start: number; end: number; text: string };
 }
 
 // ---- questions ----------------------------------------------------------
