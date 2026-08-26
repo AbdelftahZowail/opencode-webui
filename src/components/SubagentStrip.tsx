@@ -9,11 +9,20 @@ import { Button } from "./ui/button";
  * session's child sessions with running/idle state. Rows open the child
  * (sessions are uniform) or message it inline via sendPromptTo.
  */
-export function SubagentStrip({ sessionID }: { sessionID: string }) {
+export function SubagentStrip({
+  sessionID,
+  onNavigate,
+}: {
+  sessionID: string;
+  /** In-pane navigation; defaults to global selectSession for safety. */
+  onNavigate?: (sessionID: string) => void;
+}) {
   const children = useStore((s) => childSessionsOf(s.sessions, sessionID));
   const runningMap = useStore((s) => s.running);
   const activeIDs = useStore((s) => s.activeIDs);
   const [open, setOpen] = useState(false);
+  // Opening a child must swap the pane it was opened FROM, not the whole app.
+  const go = (sid: string) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
 
   if (children.length === 0) return null;
   const runningCount = children.filter((c) => runningMap[c.id] || activeIDs.includes(c.id)).length;
@@ -51,6 +60,7 @@ export function SubagentStrip({ sessionID }: { sessionID: string }) {
               title={child.title}
               agent={child.agent}
               running={!!runningMap[child.id] || activeIDs.includes(child.id)}
+              onOpen={() => go(child.id)}
             />
           ))}
         </div>
@@ -64,11 +74,13 @@ function SubagentRow({
   title,
   agent,
   running,
+  onOpen,
 }: {
   id: string;
   title?: string;
   agent?: string;
   running: boolean;
+  onOpen: () => void;
 }) {
   const [messaging, setMessaging] = useState(false);
   const [draft, setDraft] = useState("");
@@ -92,7 +104,7 @@ function SubagentRow({
         />
         <button
           type="button"
-          onClick={() => void selectSession(id)}
+          onClick={onOpen}
           className="min-w-0 flex-1 cursor-pointer truncate text-left text-xs text-[color:var(--text-weak)] hover:text-[color:var(--text-strong)]"
           title={`Open ${title ?? id}`}
         >
@@ -113,7 +125,7 @@ function SubagentRow({
           <MessageSquare />
           Message
         </Button>
-        <Button variant="ghost" size="xs" onClick={() => void selectSession(id)} title="Open session">
+        <Button variant="ghost" size="xs" onClick={onOpen} title="Open session">
           Open
         </Button>
       </div>

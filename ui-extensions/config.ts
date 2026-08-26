@@ -3,4 +3,4 @@
  * Add or remove an id here; the change applies instantly via HMR,
  * no code edits and no reload needed.
  */
-export const enabled: string[] = ["runtime-status"];
+export const enabled: string[] = ["runtime-status", "dev-sandbox"];

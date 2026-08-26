@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, Fragment, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Brain, ChevronRight, Paperclip, User } from "lucide-react";
@@ -13,10 +13,12 @@ import type {
 import { api } from "../api/client";
 import { useStore } from "../store";
 import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachments";
+import { formatModelRef } from "../lib/modelLabel";
 import { ToolCard } from "./ToolCard";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
 import { getPrefs, subscribePrefs } from "../prefs";
+import { getMessageDecorations, subscribeRegistry, Slot } from "../extensions/registry";
 
 function useTimestamps(): boolean {
   const [show, setShow] = useState(getPrefs().showTimestamps);
@@ -24,11 +26,54 @@ function useTimestamps(): boolean {
   return show;
 }
 
+/**
+ * Freshness for late/hot-swapped extension registrations (same pattern as
+ * useTimestamps): a local counter bumped by the registry's subscribe — the
+ * registry has no exported version snapshot to read via useSyncExternalStore.
+ */
+function useRegistryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
 function formatClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 export function MessageItem({ message, compact = false }: { message: MessageInfo; compact?: boolean }) {
+  // Extension freshness — read before the body so hooks order is stable.
+  const registryVersion = useRegistryVersion();
+  // Memoized on the registry version only: decorations are a static list
+  // per registration state; per-message work happens in the render calls.
+  const decorations = useMemo(() => getMessageDecorations(), [registryVersion]);
+  return (
+    <>
+      {renderMessageBody(message, compact)}
+      {/* Message decorations: a tiny inline row under the body. Guarded by
+          a length check so zero registrations cost nothing; individual
+          renderers are crash-isolated like slot items. */}
+      {decorations.length > 0 && (
+        <div className="mt-1 flex flex-wrap items-center gap-1">
+          {decorations.map((decoration, i) => {
+            let node: ReactNode = null;
+            try {
+              node = decoration.render({ messageID: message.id, message });
+            } catch (err) {
+              console.error(`[extensions] message decoration "${decoration.id ?? i}" crashed:`, err);
+            }
+            if (node == null) return null;
+            return <Fragment key={decoration.id ?? i}>{node}</Fragment>;
+          })}
+        </div>
+      )}
+      <Slot region="message.after" messageID={message.id} />
+    </>
+  );
+}
+
+/** The per-type body exactly as MessageItem always rendered it. */
+function renderMessageBody(message: MessageInfo, compact: boolean): ReactNode {
   switch (message.type) {
     case "user":
       return (
@@ -298,8 +343,7 @@ function AssistantView({ message, compact }: { message: AssistantMessage; compac
             <span className="font-medium text-[var(--text-strong)]">{message.agent ?? "assistant"}</span>
             {message.model && (
               <span className="font-mono text-[var(--text-weaker)]">
-                {message.model.providerID}/{message.model.id}
-                {message.model.variant && message.model.variant !== "default" ? `@${message.model.variant}` : ""}
+                {formatModelRef(message.model)}
               </span>
             )}
             {showTimestamps && (

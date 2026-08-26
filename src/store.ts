@@ -4,11 +4,18 @@
  */
 
 import { useRef, useSyncExternalStore } from "react";
-import { api, type CompactDelivery, type ForkBoundary, type PromptFile } from "./api/client";
+import {
+  api,
+  type CompactDelivery,
+  type ForkBoundary,
+  type PromptDelivery,
+  type PromptFile,
+} from "./api/client";
 import { connectEvents, type V2Event } from "./api/events";
 import { log } from "./lib/log";
 import type {
   AssistantMessage,
+  InboxInfo,
   MessageInfo,
   ModelRef,
   PermissionRequest,
@@ -37,8 +44,15 @@ export interface QueuedPermission extends PermissionRequest {
 export interface QueuedForm extends FormInfo {
   seq: number;
 }
+/**
+ * Native questions come from `question.asked` events (newer engines). On the
+ * current engine they arrive as FORMS with metadata.kind === "question" —
+ * those are projected into this shape by pendingRequests() with
+ * channel:"form", so reply/reject route through the form endpoints.
+ */
 export interface QueuedQuestion extends QuestionRequest {
   seq: number;
+  channel?: "native" | "form";
 }
 
 export type PendingRequest =
@@ -49,20 +63,100 @@ export type PendingRequest =
 let requestSeq = 0;
 const nextRequestSeq = () => ++requestSeq;
 
-/** Stamp incoming requests, reusing the seq of ids we already track. */
+/**
+ * When each form id was first seen — protects NEWBORN requests from the
+ * create-race: the engine broadcasts `form.created` before its REST state
+ * commits, so an immediate GET …/form/{id}/state can 404 transiently.
+ * Treating that 404 as "resolved" killed freshly created panels within one
+ * frame (seen live: show/hide in the same millisecond).
+ */
+const formFirstSeen = new Map<string, number>();
+const NEWBORN_GRACE_MS = 60_000;
+
+function noteFormSeen(ids: Iterable<string>) {
+  const now = Date.now();
+  for (const id of ids) if (!formFirstSeen.has(id)) formFirstSeen.set(id, now);
+  // prune: only live ids matter
+  if (formFirstSeen.size > 500) {
+    for (const [id, t] of formFirstSeen) if (now - t > 10 * NEWBORN_GRACE_MS) formFirstSeen.delete(id);
+  }
+}
+
+/** Stamp incoming requests, reusing the seq — and the exact OBJECT — of ids
+ * we already track. Engine payloads for a pending id are immutable, so
+ * identity reuse keeps pendingCache valid (no per-tick invalidation churn). */
 function stampSeq<T extends { id: string }>(current: { id: string; seq: number }[], incoming: T[]): (T & { seq: number })[] {
-  const known = new Map(current.map((r) => [r.id, r.seq]));
-  return incoming.map((r) => ({ ...r, seq: known.get(r.id) ?? nextRequestSeq() }));
+  const known = new Map(current.map((r) => [r.id, r]));
+  return incoming.map((r) => {
+    const prev = known.get(r.id);
+    return prev ? (prev as T & { seq: number }) : { ...r, seq: nextRequestSeq() };
+  });
+}
+
+/** Engine encoding of one mid-task question, when delivered as a form. */
+function isQuestionForm(form: FormInfo): boolean {
+  return (form.metadata as { kind?: string } | undefined)?.kind === "question";
+}
+
+function questionFromForm(form: QueuedForm): QueuedQuestion {
+  const meta = form.metadata as { tool?: QuestionRequest["tool"] } | undefined;
+  return {
+    id: form.id,
+    sessionID: form.sessionID,
+    seq: form.seq,
+    channel: "form",
+    tool: meta?.tool,
+    questions: form.fields.map((f) => {
+      const extra = f as { custom?: boolean };
+      return {
+        header: ("title" in f ? f.title : undefined) ?? f.key,
+        question: ("description" in f ? f.description : undefined) ?? "",
+        options: ("options" in f ? (f.options ?? []) : []).map((o) => ({
+          label: o.label,
+          value: o.value,
+          description: o.description ?? "",
+        })),
+        // The engine encodes multiplicity as the FIELD TYPE (verified:
+        // multi-choice questions are `multiselect` fields, single-choice and
+        // free-text are `string`) — there is no `multiple` flag.
+        multiple: "type" in f && f.type === "multiselect",
+        custom: extra.custom === true,
+      };
+    }),
+  };
 }
 
 /** Every unanswered permission/form/question across ALL sessions, FIFO. */
+// Snapshot-stable: useStore selectors must not return fresh object graphs
+// per call, or useSyncExternalStore re-render-loops (and the panel/chip
+// die silently). Cached on the three source array identities — any change
+// to any queue invalidates once.
+let pendingCache: {
+  permissions: QueuedPermission[];
+  forms: QueuedForm[];
+  questions: QueuedQuestion[];
+  out: PendingRequest[];
+} | null = null;
+
 export function pendingRequests(s: State): PendingRequest[] {
-  const all: PendingRequest[] = [
-    ...s.permissions.map((req) => ({ kind: "permission" as const, req })),
-    ...s.forms.map((req) => ({ kind: "form" as const, req })),
-    ...s.questions.map((req) => ({ kind: "question" as const, req })),
-  ];
-  return all.sort((a, b) => a.req.seq - b.req.seq);
+  if (
+    pendingCache &&
+    pendingCache.permissions === s.permissions &&
+    pendingCache.forms === s.forms &&
+    pendingCache.questions === s.questions
+  ) {
+    return pendingCache.out;
+  }
+  const all: PendingRequest[] = [];
+  for (const req of s.permissions) all.push({ kind: "permission", req });
+  for (const req of s.questions) all.push({ kind: "question", req });
+  for (const req of s.forms) {
+    if (isQuestionForm(req)) all.push({ kind: "question", req: questionFromForm(req) });
+    else all.push({ kind: "form", req });
+  }
+  const out = all.sort((a, b) => a.req.seq - b.req.seq);
+  pendingCache = { permissions: s.permissions, forms: s.forms, questions: s.questions, out };
+  return out;
 }
 
 /** Best human-readable name for any session (sidebar list or detail cache). */
@@ -98,6 +192,8 @@ export type LiveContentPart =
   | { type: "tool"; tool: LiveTool };
 
 export interface LiveAssistant {
+  /** Which session's pane owns this entry — every helper scopes by it. */
+  sessionID: string;
   id: string;
   agent?: string;
   model?: ModelRef;
@@ -123,6 +219,36 @@ export interface RunNotice {
   at: number;
 }
 
+/**
+ * One message sent while its session was BUSY: admitted engine-side as a
+ * durable inbox item but not yet delivered — shown in the QueueStrip above
+ * the composer, never optimistically in the transcript. Rows resolve when
+ * the engine delivers/cancels them (event + poll reconciliation below).
+ */
+export interface PendingSend {
+  key: string;
+  text: string;
+  /** "sending" = POST in flight; "tracked" = admitted, inboxID known. */
+  state: "sending" | "tracked";
+  /** Engine inbox item id (`^msg_`) once admitted. */
+  inboxID?: string;
+  /** steer = joins the active run at the next step; queue = after this turn. */
+  delivery?: PromptDelivery;
+}
+
+/**
+ * Split-view pane identity. Pane id "main" is the routed surface (its
+ * session follows selectSession / the URL); every other pane pins ONE
+ * session and stays interactive regardless of focus.
+ */
+export const MAIN_PANE = "main";
+export const MAX_SPLITS = 3;
+
+export interface SplitPane {
+  id: string;
+  sessionID: string | null;
+}
+
 export interface State {
   connected: boolean;
   serviceOK: boolean;
@@ -131,6 +257,11 @@ export interface State {
   activeIDs: string[];
   messages: Record<string, MessageInfo[]>;
   sessionDetails: Record<string, SessionInfo>;
+  /**
+   * Live streaming projections — one entry-set PER mounted session (each
+   * carries `sessionID`). Every pane renders only its own entries; entries
+   * for unmounted sessions are pruned/ignored.
+   */
   live: LiveAssistant[];
   running: Record<string, boolean>;
   queued: Record<string, boolean>;
@@ -138,6 +269,17 @@ export interface State {
   forms: QueuedForm[];
   questions: QueuedQuestion[];
   currentSessionID: string | null;
+  /**
+   * Split view: panes[0] is ALWAYS the routed main surface; entries 1..n are
+   * sessions pinned beside it (VS Code "split editor"). Every pane renders a
+   * fully interactive Conversation+Composer; sends and SSE are per-session,
+   * so background panes keep running.
+   */
+  panes: SplitPane[];
+  /** Which pane owns global chrome (Esc interrupt, type-anywhere, runs panel). */
+  focusedPane: string;
+  /** The "pick a session for a new split" dialog. */
+  splitPickerOpen: boolean;
   /**
    * Incremented whenever any surface asks to open/focus the shell panel;
    * lets distant components (e.g. composer chips) trigger it without
@@ -153,6 +295,12 @@ export interface State {
   /** Text restored by /undo — the composer consumes it once and clears it. */
   revertPrompt: string | null;
   runsPanelOpen: boolean;
+  /**
+   * Last RunsPanel cursor (tab + highlighted rows) — written through by the
+   * panel on every change and restored on reopen when it still points at
+   * reality (subagent exists / index within bounds). Null until first open.
+   */
+  runsSelection: RunsSelection | null;
   /**
    * Subagent pages open read-only: the composer stays hidden behind an
    * "Enter to message" hint until Enter reveals it. Reset on every session
@@ -175,6 +323,12 @@ export interface State {
   pendingModel: ModelRef | null;
   /** Last send failure per session — rendered above the composer. */
   sendErrors: Record<string, StructuredError>;
+  /**
+   * Undelivered busy-sends per session (STEER vs QUEUE strip). Entries are
+   * admitted engine-side inbox items awaiting delivery; reconciled by the
+   * session.inbox.* events and the poll fallback.
+   */
+  pending: Record<string, PendingSend[]>;
   /**
    * Transient run-problem notes per session (provider retries, failures,
    * interrupts), newest last, capped — rendered above the composer.
@@ -226,15 +380,20 @@ const initialState: State = {
   forms: [],
   questions: [],
   currentSessionID: null,
+  panes: [{ id: MAIN_PANE, sessionID: null }],
+  focusedPane: MAIN_PANE,
+  splitPickerOpen: false,
   shellPanelTick: 0,
   uiSignals: { models: 0, agents: 0, themes: 0, explorer: 0, runsDialog: 0, help: 0, variants: 0 },
   revertPrompt: null,
   runsPanelOpen: false,
+  runsSelection: null,
   subagentComposerOpen: false,
   draftWorkspace: null,
   pendingAgent: null,
   pendingModel: null,
   sendErrors: {},
+  pending: {},
   runNotices: {},
   pendingWorkspace: null,
   interruptArmed: false,
@@ -379,20 +538,94 @@ export async function loadMoreSessions() {
 }
 
 async function refreshQueues() {
-  try {
-    const [perms, forms, questions] = await Promise.all([
-      api.pendingPermissions(),
-      api.pendingForms(),
-      api.questionRequestGet(),
-    ]);
-    setState({
-      permissions: stampSeq(state.permissions, perms.data),
-      forms: stampSeq(state.forms, forms.data),
-      questions: stampSeq(state.questions, questions.data),
-    });
-  } catch (err) {
-    console.warn("refreshQueues failed:", err);
+  // Independent fetches: one failing endpoint must never blank the others
+  // (a single rejected Promise.all here used to silently kill ALL queue
+  // loads — the "request popup never shows" bug).
+  const mounted = new Set(
+    state.panes.map((p) => p.sessionID).filter((sid): sid is string => !!sid),
+  );
+  const [perms, forms, ...perSession] = await Promise.allSettled([
+    api.pendingPermissions(),
+    api.pendingForms(),
+    ...[...mounted].map((sid) => api.sessionForms(sid)),
+  ]);
+
+  /**
+   * Merge a listing into a queue WITHOUT clobbering concurrent event writes.
+   * refreshQueues awaits the network; `form.created` can land mid-flight.
+   * Building the next array from a pre-await snapshot and setState-ing it
+   * later ERASED those events — a freshly created panel mounted and unmounted
+   * within one frame (seen live: show/hide in the same millisecond). So the
+   * merge runs at APPLY time against live state, and only two facts cross
+   * the async gap: raw listing data + settled ids. No awaits may sit between
+   * reading `state` and calling setState inside here.
+   */
+  function unionById<T extends { id: string }>(current: (T & { seq: number })[], listed: T[]): (T & { seq: number })[] {
+    const merged = new Map(stampSeq(current, listed).map((r) => [r.id, r]));
+    for (const r of current) if (!merged.has(r.id)) merged.set(r.id, r);
+    return [...merged.values()];
   }
+
+  if (perms.status === "fulfilled") {
+    // Listings lag behind events on BOTH sides (verified against the live
+    // service). Union by id — removal is event-driven (permission.replied).
+    const listed = perms.value.data;
+    setState({ permissions: unionById(state.permissions, listed) });
+  } else console.warn("refreshQueues permissions failed:", perms.reason);
+
+  if (forms.status === "fulfilled") {
+    // The GLOBAL form listing is an unreliable hint for question-kind forms:
+    // it can omit a pending one indefinitely under load (measured: absent for
+    // 45s straight while the panel was on screen). Per-session listings are
+    // fresh — so every MOUNTED session is also polled directly and the views
+    // are unioned by id. Global still covers unmounted sessions' chips.
+    const byId = new Map<string, FormInfo>();
+    const push = (f: FormInfo) => {
+      if (!byId.has(f.id)) byId.set(f.id, f);
+    };
+    forms.value.data.forEach(push);
+    for (const r of perSession) {
+      if (r.status === "fulfilled") r.value.data.forEach(push);
+      else console.warn("refreshQueues session forms failed:", r.reason);
+    }
+    const listed = [...byId.values()];
+
+    // The listing(s) are only hints — /state is authoritative per form. Settle
+    // verdicts cross the await gap as an id set and are applied synchronously
+    // below (no awaits between reading state and setState).
+    const current = state.forms;
+    noteFormSeen([...current.map((f) => f.id), ...listed.map((f) => f.id)]);
+    const knownIds = new Set(current.map((f) => f.id));
+    for (const f of listed) knownIds.add(f.id);
+    const settled = new Set<string>();
+    await Promise.all(
+      [...knownIds].map(async (id) => {
+        const f =
+          state.forms.find((x) => x.id === id) ?? byId.get(id);
+        if (!f) return;
+        try {
+          const st = await api.formState(f.sessionID, id);
+          // Affirmative answered/cancelled → gone, regardless of age.
+          if ((st.data?.status ?? "pending") !== "pending") settled.add(id);
+        } catch (err) {
+          // 404 usually means resolved-and-reaped server-side — but right
+          // after creation it can also be the engine's commit lag. Only
+          // trust it once the request has been around a while.
+          const msg = err instanceof Error ? err.message : String(err);
+          const first = formFirstSeen.get(id) ?? Date.now();
+          if (msg.includes("404") && Date.now() - first > NEWBORN_GRACE_MS) settled.add(id);
+        }
+      }),
+    );
+    log("queue", `refresh forms=${current.length} listed=${listed.length} settled=${settled.size}`);
+    setState({
+      forms: unionById(state.forms, listed).filter((f) => !settled.has(f.id)),
+    });
+  } else console.warn("refreshQueues forms failed:", forms.reason);
+  // NOTE: questions are NOT fetched here — this engine version exposes no
+  // question REST routes; they arrive as `form.created` events whose
+  // metadata.kind is "question" (projected in pendingRequests() below), and
+  // native `question.asked` events feed state.questions directly.
 }
 
 export async function loadMessages(sessionID: string) {
@@ -421,6 +654,195 @@ function beginMessageRequest(sessionID: string): number {
 
 function isUnfinishedAssistant(message: MessageInfo | undefined): boolean {
   return message?.type === "assistant" && message.time.completed === undefined;
+}
+
+// ---- per-pane live scoping ----------------------------------------------
+//
+// Live projections are PER SESSION: every session mounted in a pane (main
+// plus splits) streams simultaneously and renders ONLY its own entries.
+// Helpers below filter `state.live` by LiveAssistant.sessionID; events for
+// unmounted sessions are ignored outright (bounded memory).
+
+/** Is this session mounted in ANY pane (main included)? */
+function isPaneSession(sid: string): boolean {
+  return state.panes.some((p) => p.sessionID === sid);
+}
+
+/** This session's live projection entries. */
+function liveForSession(sessionID: string): LiveAssistant[] {
+  return state.live.filter((a) => a.sessionID === sessionID);
+}
+
+/**
+ * Whether to track live-stream events for this session. Pane membership is
+ * not sufficient on initial load: state.panes[0] is {id:"main",sessionID:null}
+ * until selectSession's sync setState runs, and SSE may connect in the same
+ * microtask window. Treating currentSessionID (and any already-tracked live)
+ * as live ensures the first text deltas are not dropped (streaming ASAP fix).
+ */
+function shouldTrackLive(sid: string): boolean {
+  if (!sid) return false;
+  if (isPaneSession(sid)) return true;
+  if (sid === state.currentSessionID) return true;
+  if (liveForSession(sid).length > 0) return true;
+  if (!!state.running[sid]) return true;
+  if (!!state.queued[sid]) return true;
+  if (state.activeIDs.includes(sid)) return true;
+  return false;
+}
+
+/**
+ * Drop live entries whose session is not in the GIVEN pane layout. Callers
+ * rebind panes in the same setState that prunes — compute against the NEXT
+ * layout, never the current one, or the outgoing main session's stream
+ * would survive as a ghost.
+ */
+function pruneLiveForPanes(panes: SplitPane[]): LiveAssistant[] {
+  const mounted = new Set(panes.map((p) => p.sessionID));
+  return state.live.filter(
+    (a) => mounted.has(a.sessionID) || !!state.running[a.sessionID] || !!state.queued[a.sessionID] || state.activeIDs.includes(a.sessionID),
+  );
+}
+
+// ---- live persistence across reloads ------------------------------------
+//
+// History's assistant.text stays "" for the entire stream (verified: 0 until
+// execution.succeeded), so a hard refresh mid-stream loses the first half.
+// SSE is volatile with no replay. The only fix is client-side persistence:
+// every live mutation snapshots the session's projection to localStorage, and
+// a reload restores it before history seeding. Subsequent deltas append via
+// appendStreamDelta's overlap handling.
+
+const LIVE_STORAGE_PREFIX = "webui.live.";
+
+function liveStorageKey(sessionID: string): string {
+  return `${LIVE_STORAGE_PREFIX}${sessionID}`;
+}
+
+function persistLiveForSession(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  try {
+    if (typeof localStorage === "undefined") return;
+    const entries = liveForSession(sessionID);
+    if (entries.length === 0) {
+      localStorage.removeItem(liveStorageKey(sessionID));
+      return;
+    }
+    const serialized = entries.map((a) => ({
+      id: a.id,
+      sessionID: a.sessionID,
+      agent: a.agent,
+      model: a.model,
+      started: a.started,
+      completed: a.completed,
+      finish: a.finish,
+      cost: a.cost,
+      error: a.error,
+      content: a.content.map((p) =>
+        p.type === "tool"
+          ? {
+              type: "tool" as const,
+              tool: {
+                id: p.tool.id,
+                name: p.tool.name,
+                inputText: p.tool.inputText,
+                input: p.tool.input,
+                status: p.tool.status,
+                content: p.tool.content,
+                metadata: p.tool.metadata,
+                error: p.tool.error,
+                executed: p.tool.executed,
+                created: p.tool.created,
+                ran: p.tool.ran,
+                completed: p.tool.completed,
+              },
+            }
+          : { type: p.type as "text" | "reasoning", ordinal: p.ordinal, text: p.text },
+      ),
+    }));
+    localStorage.setItem(liveStorageKey(sessionID), JSON.stringify(serialized));
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+function clearPersistedLive(sessionID: string) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.removeItem(liveStorageKey(sessionID));
+  } catch {
+    /* ignore */
+  }
+}
+
+function tryRestoreLiveFromStorage(sessionID: string): boolean {
+  if (!sessionID || isDraftSession(sessionID)) return false;
+  if (liveForSession(sessionID).length > 0) return false;
+  try {
+    if (typeof localStorage === "undefined") return false;
+    const raw = localStorage.getItem(liveStorageKey(sessionID));
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as unknown[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return false;
+    const restored: LiveAssistant[] = [];
+    for (const entry of parsed as Record<string, unknown>[]) {
+      if (!entry || typeof entry.id !== "string" || typeof entry.sessionID !== "string") continue;
+      if (entry.sessionID !== sessionID) continue;
+      const rawContent = Array.isArray(entry.content) ? (entry.content as unknown[]) : [];
+      const content: LiveContentPart[] = [];
+      const tools = new Map<string, LiveTool>();
+      for (const p of rawContent as Record<string, unknown>[]) {
+        if (!p || typeof p.type !== "string") continue;
+        if (p.type === "tool" && p.tool && typeof (p.tool as Record<string, unknown>).id === "string") {
+          const t = p.tool as Record<string, unknown>;
+          const tool: LiveTool = {
+            id: t.id as string,
+            name: (t.name as string) ?? "tool",
+            inputText: (t.inputText as string) ?? "",
+            input: t.input,
+            status: (t.status as LiveTool["status"]) ?? "streaming",
+            content: t.content as ToolContent[] | undefined,
+            metadata: t.metadata as Record<string, unknown> | undefined,
+            error: t.error as StructuredError | undefined,
+            executed: t.executed as boolean | undefined,
+            created: t.created as number | undefined,
+            ran: t.ran as number | undefined,
+            completed: t.completed as number | undefined,
+          };
+          tools.set(tool.id, tool);
+          content.push({ type: "tool", tool });
+        } else if (
+          (p.type === "text" || p.type === "reasoning") &&
+          typeof p.ordinal === "number" &&
+          typeof p.text === "string"
+        ) {
+          content.push({ type: p.type as "text" | "reasoning", ordinal: p.ordinal as number, text: p.text as string });
+        }
+      }
+      const base: LiveAssistant = {
+        sessionID: entry.sessionID as string,
+        id: entry.id as string,
+        agent: entry.agent as string | undefined,
+        model: entry.model as ModelRef | undefined,
+        content,
+        text: "",
+        reasoning: "",
+        tools,
+        finish: entry.finish as string | undefined,
+        cost: entry.cost as number | undefined,
+        error: entry.error as StructuredError | undefined,
+        started: typeof entry.started === "number" ? (entry.started as number) : Date.now(),
+        completed: entry.completed as number | undefined,
+      };
+      restored.push(withLiveContent(base, content));
+    }
+    if (restored.length === 0) return false;
+    setState({ live: [...state.live, ...restored] });
+    log("load", `restored ${restored.length} live assistant(s) for ${sessionID} from localStorage`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function liveContentSummary(content: LiveContentPart[]) {
@@ -465,7 +887,7 @@ function persistedToolToLive(tool: ToolPart): LiveTool {
   };
 }
 
-function liveAssistantFromPersisted(message: AssistantMessage): LiveAssistant {
+function liveAssistantFromPersisted(sessionID: string, message: AssistantMessage): LiveAssistant {
   const ordinal = { text: 0, reasoning: 0 };
   const content = message.content.map((part): LiveContentPart => {
     if (part.type === "tool") return { type: "tool", tool: persistedToolToLive(part) };
@@ -473,6 +895,7 @@ function liveAssistantFromPersisted(message: AssistantMessage): LiveAssistant {
     return { type: part.type, ordinal: currentOrdinal, text: part.text };
   });
   const assistant: LiveAssistant = {
+    sessionID,
     id: message.id,
     agent: message.agent,
     model: message.model,
@@ -497,13 +920,38 @@ function mergeStreamText(base: string, current: string): string {
   return `${base}${current}`;
 }
 
+/**
+ * Append one streaming delta onto a buffered part, tolerating REPLAYED
+ * deltas. Measured on engine 1.18.23 a FRESH /api/event subscription
+ * receives only future events, so a page load's seeded parts normally meet
+ * zero duplicates; this guard covers engines/modes that resend a tail on
+ * (re)connect, where seenEventIDs cannot help across a reload. A chunk
+ * already contained in the buffer's tail contributes nothing; a chunk
+ * straddling the tail appends only its non-overlapping remainder.
+ * Pathological overlaps self-heal at the next part boundary —
+ * text/reasoning/input `.ended` events REPLACE the buffer authoritatively,
+ * and the 2s poll re-merges the persisted snapshot over the live parts.
+ */
+function appendStreamDelta(base: string, chunk: string): string {
+  if (!chunk) return base;
+  if (!base) return chunk;
+  if (base.endsWith(chunk)) return base;
+  const maxOverlap = Math.min(base.length, chunk.length - 1);
+  for (let k = maxOverlap; k > 0; k--) {
+    if (base.endsWith(chunk.slice(0, k))) return base + chunk.slice(k);
+  }
+  return base + chunk;
+}
+
 function livePartKey(part: LiveContentPart): string {
   return part.type === "tool" ? `tool:${part.tool.id}` : `${part.type}:${part.ordinal}`;
 }
 
 function mergePersistedIntoLive(live: LiveAssistant, message: AssistantMessage): LiveAssistant {
-  const persisted = liveAssistantFromPersisted(message);
-  if (live.content.length === 0) return { ...persisted, id: live.id, started: live.started };
+  const persisted = liveAssistantFromPersisted(live.sessionID, message);
+  if (live.content.length === 0) {
+    return { ...persisted, id: live.id, started: live.started, sessionID: live.sessionID };
+  }
 
   const currentByKey = new Map(live.content.map((part) => [livePartKey(part), part]));
   const content = persisted.content.map((part) => {
@@ -554,28 +1002,79 @@ function mergePersistedIntoLive(live: LiveAssistant, message: AssistantMessage):
   );
 }
 
+/**
+ * Reconcile this session's live projections with fetched history — and,
+ * crucially, SEED them from it. History mid-run includes the trailing
+ * assistant message(s) still being written (time.completed unset, content
+ * persisted incrementally), so a page load / pane mount / navigation while a
+ * run is in flight can reconstruct the stream FROM ITS BEGINNING instead of
+ * showing an empty live block that only grows from the next arriving delta.
+ *
+ * Seeding is gated on live signals (running/queued/engine-active, or the
+ * session already projecting): an idle session's unfinished rows are a dead
+ * run's debris, not a stream to resurrect. Existing entries merge with their
+ * persisted twins by id (mergePersistedIntoLive); missing ones are created.
+ */
 function hydrateLiveFromHistory(sessionID: string, history: MessageInfo[]) {
-  if (state.currentSessionID !== sessionID) return;
+  // CLIENT-SIDE persistence: if we have a buffered live stream from before a
+  // hard refresh, restore it immediately — history's assistant.text stays ""
+  // until execution.succeeded so seeding from history is useless for text.
+  // Do this before any gating so a mid-stream refresh rebuilds from the start.
+  if (liveForSession(sessionID).length === 0) {
+    tryRestoreLiveFromStorage(sessionID);
+  }
+  // Use shouldTrackLive (pane + currentSession + already-live) instead of
+  // isPaneSession alone: on initial load panes[0] is {id:"main",sessionID:null}
+  // until selectSession runs, and early SSE deltas would otherwise be dropped.
+  if (!shouldTrackLive(sessionID) && !isPaneSession(sessionID)) return;
+  const hasRestoredLive = liveForSession(sessionID).length > 0;
+  const isCurrent = sessionID === state.currentSessionID;
+  const runInFlight =
+    !!state.running[sessionID] ||
+    !!state.queued[sessionID] ||
+    state.activeIDs.includes(sessionID) ||
+    hasRestoredLive;
+  // With localStorage restore we can rebuild even if the engine hasn't flagged
+  // the session active yet (refreshSessions is async). History seeding alone
+  // would still yield empty text, but the restored buffer gives us the start.
+  if (!runInFlight && !(isCurrent && hasRestoredLive)) return;
+
   const persisted = new Map(
     history
       .filter((message): message is AssistantMessage => message.type === "assistant" && isUnfinishedAssistant(message))
       .map((message) => [message.id, message]),
   );
+  const knownIDs = new Set(liveForSession(sessionID).map((a) => a.id));
+  // Seed in history order so multiple reconstructed steps keep their
+  // transcript order inside the live block.
+  const seeded: LiveAssistant[] = [];
+  for (const message of history) {
+    if (message.type !== "assistant" || !isUnfinishedAssistant(message) || knownIDs.has(message.id)) continue;
+    knownIDs.add(message.id);
+    seeded.push(liveAssistantFromPersisted(sessionID, message));
+  }
+
   let changed = false;
-  const live = state.live.map((assistant) => {
+  let live = state.live.map((assistant) => {
+    if (assistant.sessionID !== sessionID) return assistant;
     const message = persisted.get(assistant.id);
     if (!message) return assistant;
     const next = mergePersistedIntoLive(assistant, message);
     changed ||= next !== assistant;
     return next;
   });
+  if (seeded.length > 0) {
+    log("load", `seeded ${seeded.length} in-flight assistant(s) for ${sessionID}`);
+    live = [...live, ...seeded];
+    changed = true;
+  }
   if (changed) setState({ live });
 }
 
-function liveOverlayIDs(history: MessageInfo[]): Set<string> {
+function liveOverlayIDs(sessionID: string, history: MessageInfo[]): Set<string> {
   const fetched = new Map(history.map((message) => [message.id, message]));
   return new Set(
-    state.live
+    liveForSession(sessionID)
       .filter((live) => {
         const persisted = fetched.get(live.id);
         return live.id !== "pending" && (!persisted || isUnfinishedAssistant(persisted));
@@ -586,7 +1085,7 @@ function liveOverlayIDs(history: MessageInfo[]): Set<string> {
 
 function mergeFetchedMessages(sessionID: string, history: MessageInfo[]): MessageInfo[] {
   const existing = state.messages[sessionID] ?? [];
-  const overlayIDs = liveOverlayIDs(history);
+  const overlayIDs = liveOverlayIDs(sessionID, history);
   const existingUserCounts = new Map<string, number>();
   const fetchedUserCounts = new Map<string, number>();
   for (const message of existing) {
@@ -629,13 +1128,16 @@ function mergeFetchedMessages(sessionID: string, history: MessageInfo[]): Messag
 function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
   hydrateLiveFromHistory(sessionID, history);
   const merged = mergeFetchedMessages(sessionID, history);
-  if (state.currentSessionID !== sessionID) {
+  if (!isPaneSession(sessionID)) {
     setState({ messages: { ...state.messages, [sessionID]: merged } });
     return;
   }
 
   const fetchedByID = new Map(history.map((message) => [message.id, message]));
-  const pending = state.live.find((live) => live.id === "pending");
+  // Strictly THIS session's live entries — another pane's pending placeholder
+  // or ghost must never be settled/collected by this session's fetch.
+  const own = liveForSession(sessionID);
+  const pending = own.find((live) => live.id === "pending");
   const pendingSettled = !!pending && history.some(
     (message) =>
       message.type === "assistant" &&
@@ -643,7 +1145,7 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
       message.time.created >= pending.started - 5_000,
   );
   const settled = new Set(
-    state.live
+    own
       .filter((live) => {
         const persisted = fetchedByID.get(live.id);
         return persisted?.type === "assistant" && persisted.time.completed !== undefined;
@@ -659,7 +1161,7 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
   const idle = !state.running[sessionID] && !state.queued[sessionID];
   const ghosts = new Set(
     idle
-      ? state.live
+      ? own
           .filter((live) => live.id !== "pending" && !fetchedByID.has(live.id) && Date.now() - live.started > 30_000)
           .map((live) => live.id)
       : [],
@@ -669,26 +1171,47 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
     delete running[sessionID];
     seenExecution.delete(sessionID);
   }
+  const nextLive = state.live.filter(
+    (live) =>
+      live.sessionID !== sessionID ||
+      (live.id === "pending" ? !pendingSettled : !(settled.has(live.id) || ghosts.has(live.id))),
+  );
+  const hadLive = state.live.some((a) => a.sessionID === sessionID);
+  const hasLive = nextLive.some((a) => a.sessionID === sessionID);
   setState({
     messages: { ...state.messages, [sessionID]: merged },
-    live: state.live.filter(
-      (live) => (live.id === "pending" ? !pendingSettled : !(settled.has(live.id) || ghosts.has(live.id))),
-    ),
+    live: nextLive,
     running,
   });
+  // Clear client-side persistence once the session's live projection is fully
+  // retired (completed in history or ghost-collected). Without this a later
+  // refresh would resurrect stale deltas on top of completed history.
+  if (hadLive && !hasLive && (settled.size > 0 || ghosts.size > 0 || pendingSettled)) {
+    clearPersistedLive(sessionID);
+  } else if (hadLive && !hasLive) {
+    // Also clear if history now contains a completed assistant for this
+    // session (covers localStorage ids that just completed).
+    const hasCompleted = history.some(
+      (m) => m.type === "assistant" && (m as AssistantMessage).time.completed !== undefined,
+    );
+    if (hasCompleted) clearPersistedLive(sessionID);
+  }
 }
 
-function ensureLiveAssistant(id: string, started = Date.now()): LiveAssistant {
-  const existing = state.live.find((m) => m.id === id);
+function ensureLiveAssistant(sessionID: string, id: string, started = Date.now()): LiveAssistant {
+  // Match session too: "pending" placeholders exist one PER session while two
+  // panes stream simultaneously; real message ids are globally unique anyway.
+  const existing = state.live.find((m) => m.sessionID === sessionID && m.id === id);
   if (existing) return existing;
-  const currentMessages = state.currentSessionID ? state.messages[state.currentSessionID] : undefined;
+  const currentMessages = state.messages[sessionID];
   const persisted = currentMessages?.find(
     (message): message is AssistantMessage =>
       message.id === id && message.type === "assistant" && isUnfinishedAssistant(message),
   );
   const fresh = persisted
-    ? liveAssistantFromPersisted(persisted)
+    ? liveAssistantFromPersisted(sessionID, persisted)
     : {
+        sessionID,
         id,
         content: [],
         text: "",
@@ -698,21 +1221,20 @@ function ensureLiveAssistant(id: string, started = Date.now()): LiveAssistant {
       };
   setState({
     live: [...state.live, fresh],
-    ...(persisted && state.currentSessionID
+    ...(persisted
       ? {
           messages: {
             ...state.messages,
-            [state.currentSessionID]: currentMessages!.filter((message) => message.id !== id),
+            [sessionID]: currentMessages!.filter((message) => message.id !== id),
           },
         }
       : {}),
   });
+  if (fresh.id !== "pending") persistLiveForSession(sessionID);
   return fresh;
 }
 
-function hideUnfinishedHistory(id: string) {
-  const sessionID = state.currentSessionID;
-  if (!sessionID) return;
+function hideUnfinishedHistory(sessionID: string, id: string) {
   const messages = state.messages[sessionID];
   if (!messages?.some((message) => message.id === id && isUnfinishedAssistant(message))) return;
   setState({
@@ -724,6 +1246,7 @@ function hideUnfinishedHistory(id: string) {
 }
 
 function patchLiveAssistant(id: string, patch: Partial<LiveAssistant>) {
+  const sid = state.live.find((m) => m.id === id)?.sessionID;
   setState({
     live: state.live.map((m) => {
       if (m.id !== id) return m;
@@ -731,14 +1254,16 @@ function patchLiveAssistant(id: string, patch: Partial<LiveAssistant>) {
       return patch.content ? withLiveContent(next, patch.content) : next;
     }),
   });
+  if (sid) persistLiveForSession(sid);
 }
 
 function ensureLiveContentPart(
+  sessionID: string,
   assistantID: string,
   type: "text" | "reasoning",
   ordinal: number,
 ): LiveContentPart | undefined {
-  const assistant = ensureLiveAssistant(assistantID);
+  const assistant = ensureLiveAssistant(sessionID, assistantID);
   const existing = assistant.content.find((part) => part.type === type && part.ordinal === ordinal);
   if (existing) return existing;
   const part: LiveContentPart = { type, ordinal, text: "" };
@@ -757,13 +1282,15 @@ function patchLiveContentPart(
   if (!assistant) return;
   const content = assistant.content.map((part) => {
     if (part.type !== type || part.ordinal !== ordinal) return part;
-    return { ...part, text: mode === "append" ? part.text + text : text };
+    // Append goes through the replay-safe merge: seeded parts (mid-run page
+    // load) and post-reconnect duplicate deltas must not double-append.
+    return { ...part, text: mode === "append" ? appendStreamDelta(part.text, text) : text };
   });
   patchLiveAssistant(assistantID, { content });
 }
 
-function ensureLiveTool(assistantID: string, toolID: string, name?: string): LiveTool {
-  const assistant = ensureLiveAssistant(assistantID);
+function ensureLiveTool(sessionID: string, assistantID: string, toolID: string, name?: string): LiveTool {
+  const assistant = ensureLiveAssistant(sessionID, assistantID);
   const existing = assistant.tools.get(toolID);
   if (existing) return existing;
   const tool: LiveTool = {
@@ -830,24 +1357,45 @@ export function liveToolPart(t: LiveTool): ToolPart {
 
 /**
  * `session.execution.started` has no assistantMessageID, so the store creates
- * a "pending" placeholder. Once the first `session.step.started` reveals the
- * real assistant message id, re-key the placeholder to it so we never render
- * a duplicated "thinking…" block plus the real stream.
+ * a "pending" placeholder (one PER session — the sessionID field scopes it).
+ * Once the first `session.step.started` reveals the real assistant message
+ * id, re-key that session's placeholder to it so we never render a duplicated
+ * "thinking…" block plus the real stream.
  */
-function adoptPendingAssistant(id: string, patch: Pick<LiveAssistant, "agent" | "model">) {
+function adoptPendingAssistant(sessionID: string, id: string, patch: Pick<LiveAssistant, "agent" | "model">) {
   const pending = state.live.find(
-    (m) => m.id === "pending" && m.text === "" && m.reasoning === "" && m.tools.size === 0,
+    (m) =>
+      m.sessionID === sessionID && m.id === "pending" && m.text === "" && m.reasoning === "" && m.tools.size === 0,
   );
-  if (pending) {
-    setState({
-      live: state.live
-        .map((m) => (m.id === "pending" ? { ...m, ...patch, id } : m.id === id ? null : m))
-        .filter((m): m is LiveAssistant => m !== null),
-    });
+  if (!pending) {
+    ensureLiveAssistant(sessionID, id);
+    patchLiveAssistant(id, patch);
     return;
   }
-  ensureLiveAssistant(id);
-  patchLiveAssistant(id, patch);
+  // A live entry with the real id may ALREADY exist and carry content —
+  // seeded from persisted history after a mid-run page load. The empty
+  // placeholder must then simply go away: re-keying it over the seeded
+  // entry would erase the reconstructed stream.
+  const existing = state.live.find((m) => m.sessionID === sessionID && m.id === id);
+  if (existing && (existing.content.length > 0 || existing.tools.size > 0)) {
+    setState({
+      live: state.live
+        .filter((m) => m !== pending)
+        .map((m) =>
+          m === existing ? { ...m, ...patch, tools: new Map(m.tools) } : m,
+        ),
+    });
+    persistLiveForSession(sessionID);
+    return;
+  }
+  setState({
+    live: state.live
+      .map((m) =>
+        m === pending ? { ...m, ...patch, id } : m.sessionID === sessionID && m.id === id ? null : m,
+      )
+      .filter((m): m is LiveAssistant => m !== null),
+  });
+  if (id !== "pending") persistLiveForSession(sessionID);
 }
 
 // ---- authoritative session detail & model pinning -----------------------
@@ -946,7 +1494,9 @@ async function ensureSessionModel(sessionID: string) {
 
 async function settleLiveMessages(sessionID: string) {
   await loadMessages(sessionID);
-  const liveIDs = state.live.filter((m) => m.id !== "pending").map((m) => m.id);
+  const liveIDs = liveForSession(sessionID)
+    .filter((m) => m.id !== "pending")
+    .map((m) => m.id);
   if (liveIDs.length === 0) return;
   const history = state.messages[sessionID] ?? [];
   const missing = liveIDs.filter((id) => !history.some((h) => h.id === id));
@@ -1019,23 +1569,27 @@ const LIVE_TYPES = new Set([
   "session.retry.scheduled",
 ]);
 
-function lastLiveAssistant(): LiveAssistant | undefined {
-  return [...state.live].reverse().find((assistant) => assistant.id !== "pending");
+function lastLiveAssistant(sessionID: string): LiveAssistant | undefined {
+  return [...state.live]
+    .reverse()
+    .find((assistant) => assistant.sessionID === sessionID && assistant.id !== "pending");
 }
 
 function settleRun(sessionID: string) {
-  // The run is over: scheduled-but-unfired retries can no longer happen.
   expireRetryNotices(sessionID);
   const running = { ...state.running };
   delete running[sessionID];
   seenExecution.delete(sessionID);
   setState({ running, queued: { ...state.queued, [sessionID]: false } });
-  if (state.currentSessionID === sessionID) {
-    if (state.live.some((assistant) => assistant.id === "pending")) {
-      setState({ live: state.live.filter((assistant) => assistant.id !== "pending") });
-    }
-    void settleLiveMessages(sessionID);
+  if (state.live.some((assistant) => assistant.sessionID === sessionID && assistant.id === "pending")) {
+    setState({
+      live: state.live.filter(
+        (assistant) => !(assistant.sessionID === sessionID && assistant.id === "pending"),
+      ),
+    });
   }
+  void settleLiveMessages(sessionID);
+  scheduleQueueDrain(sessionID);
   debouncedRefreshSessions();
 }
 
@@ -1045,43 +1599,56 @@ function finishRun(sessionID: string, type: string, error?: StructuredError) {
   seenExecution.delete(sessionID);
   setState({ running, queued: { ...state.queued, [sessionID]: false } });
 
-  if (state.currentSessionID === sessionID) {
-    if (state.live.some((assistant) => assistant.id === "pending")) {
-      setState({ live: state.live.filter((assistant) => assistant.id !== "pending") });
-    }
-    const active = lastLiveAssistant();
-    if (active) {
-      patchLiveAssistant(active.id, {
-        finish:
-          type === "session.execution.succeeded"
-            ? "stop"
-            : type === "session.execution.failed"
-              ? "error"
-              : "interrupted",
-        error: error ?? (type === "session.execution.succeeded" ? undefined : active.error),
-      });
-    }
-    void settleLiveMessages(sessionID);
+  if (state.live.some((assistant) => assistant.sessionID === sessionID && assistant.id === "pending")) {
+    setState({
+      live: state.live.filter(
+        (assistant) => !(assistant.sessionID === sessionID && assistant.id === "pending"),
+      ),
+    });
   }
+  const active = lastLiveAssistant(sessionID);
+  if (active) {
+    patchLiveAssistant(active.id, {
+      finish:
+        type === "session.execution.succeeded"
+          ? "stop"
+          : type === "session.execution.failed"
+            ? "error"
+            : "interrupted",
+      error: error ?? (type === "session.execution.succeeded" ? undefined : active.error),
+    });
+  }
+  void settleLiveMessages(sessionID);
+  }
+  // Live persistence is cleared in applyFetchedMessages when the completed
+  // history arrives; do not clear here or mid-stream deltas would be lost
+  // before the poll reconciles.
+  scheduleQueueDrain(sessionID);
   debouncedRefreshSessions();
 }
 
 export function handleEvent(event: V2Event) {
   const { type, data } = event;
-  const current = state.currentSessionID;
   const eventSessionID = (data as { sessionID?: string }).sessionID;
-  if (event.id && eventSessionID === current && seenEventIDs.has(event.id)) return;
-  if (event.id && eventSessionID === current) {
+  // Replay protection covers EVERY session we track live for (pane + current +
+  // already-live) — two sessions interleave on one SSE stream, so a reconnect
+  // replay must not double-append either pane's text deltas.
+  const shouldTrackForReplay = eventSessionID ? shouldTrackLive(eventSessionID) || isPaneSession(eventSessionID) : false;
+  if (event.id && eventSessionID && shouldTrackForReplay && seenEventIDs.has(event.id)) return;
+  if (event.id && eventSessionID && shouldTrackForReplay) {
     seenEventIDs.add(event.id);
   }
 
-  const forCurrent = (sid?: string) => !!sid && sid === current;
+  const forPane = (sid?: string) => !!sid && isPaneSession(sid);
+  const forLive = (sid?: string) => !!sid && shouldTrackLive(sid);
 
   log("evt", type, `sid=${(data as { sessionID?: string }).sessionID ?? "-"}`,
-    `current=${current ?? "-"}`, `mid=${(data as { assistantMessageID?: string }).assistantMessageID ?? "-"}`);
+    `current=${state.currentSessionID ?? "-"}`, `mid=${(data as { assistantMessageID?: string }).assistantMessageID ?? "-"}`);
 
-  if (current && LIVE_TYPES.has(type) && (data as { sessionID?: string }).sessionID !== current) {
-    log("gate", `${type} for non-current session ${(data as { sessionID?: string }).sessionID} — skipped`);
+  if (eventSessionID && LIVE_TYPES.has(type) && !isPaneSession(eventSessionID) && !shouldTrackLive(eventSessionID)) {
+    log("gate", `${type} for non-pane session ${eventSessionID} — skipped`);
+  } else if (eventSessionID && LIVE_TYPES.has(type) && !isPaneSession(eventSessionID)) {
+    log("gate", `${type} for non-pane session ${eventSessionID} — tracked via shouldTrackLive`);
   }
 
   switch (type) {
@@ -1109,15 +1676,57 @@ export function handleEvent(event: V2Event) {
       void loadSessionDetail(data.sessionID);
       break;
 
-    case "session.inbox.enqueued":
-      if (forCurrent(data.sessionID)) {
+    case "session.inbox.enqueued": {
+      // Hydrate a tracked row straight from the event when its shape allows
+      // (defensive parse — the payload isn't in the spec). This is what makes
+      // items admitted from InboxPanel/another tab visible even in sessions
+      // no poll would otherwise reach.
+      const ev = data as {
+        id?: unknown;
+        inboxID?: unknown;
+        sessionID?: string;
+        payload?: { text?: unknown };
+        delivery?: PromptDelivery;
+      };
+      const evInboxID =
+        typeof ev.id === "string" && ev.id
+          ? ev.id
+          : typeof ev.inboxID === "string" && ev.inboxID
+            ? ev.inboxID
+            : undefined;
+      if (
+        ev.sessionID &&
+        !isDraftSession(ev.sessionID) &&
+        evInboxID &&
+        typeof ev.payload?.text === "string"
+      ) {
+        hydrateServerInboxItem(ev.sessionID, {
+          id: evInboxID,
+          text: ev.payload.text,
+          delivery: ev.delivery,
+        });
+      }
+      if (forPane(data.sessionID)) {
         log("run", `queued ${data.sessionID}`);
         setState({ queued: { ...state.queued, [data.sessionID]: true } });
       }
       break;
+    }
 
-    case "session.inbox.delivered":
+    case "session.inbox.delivered": {
+      // The item left the inbox: resolve its strip row. Payload shape isn't in
+      // the spec — parse defensively; anything unmatched falls through to the
+      // poll reconciler, which drops rows whose id vanished.
+      const d = data as { id?: unknown; inboxID?: unknown };
+      const deliveredID =
+        typeof d.id === "string" && d.id
+          ? d.id
+          : typeof d.inboxID === "string" && d.inboxID
+            ? d.inboxID
+            : undefined;
+      if (deliveredID) dropPendingByInboxID(deliveredID);
       break;
+    }
 
     case "session.error":
       // Run-level failure the step/execution events don't carry (e.g.
@@ -1145,7 +1754,7 @@ export function handleEvent(event: V2Event) {
         running: { ...state.running, [data.sessionID]: true },
         queued: { ...state.queued, [data.sessionID]: false },
       });
-      if (forCurrent(data.sessionID)) ensureLiveAssistant(data.assistantMessageID ?? "pending", event.created);
+      if (forLive(data.sessionID)) ensureLiveAssistant(data.sessionID, data.assistantMessageID ?? "pending", event.created);
       break;
 
     case "session.retry.scheduled": {
@@ -1158,7 +1767,7 @@ export function handleEvent(event: V2Event) {
           event.created,
         );
       }
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.error) {
+      if (forLive(data.sessionID) && data.assistantMessageID && data.error) {
         patchLiveAssistant(data.assistantMessageID, {
           error: {
             type: data.error.type,
@@ -1203,10 +1812,10 @@ export function handleEvent(event: V2Event) {
     }
 
     case "session.step.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        adoptPendingAssistant(data.assistantMessageID, { agent: data.agent, model: data.model });
-        ensureLiveAssistant(data.assistantMessageID, event.created);
-        hideUnfinishedHistory(data.assistantMessageID);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        adoptPendingAssistant(data.sessionID, data.assistantMessageID, { agent: data.agent, model: data.model });
+        ensureLiveAssistant(data.sessionID, data.assistantMessageID, event.created);
+        hideUnfinishedHistory(data.sessionID, data.assistantMessageID);
         patchLiveAssistant(data.assistantMessageID, {
           agent: data.agent,
           model: data.model,
@@ -1225,7 +1834,7 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "session.step.ended":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
+      if (forLive(data.sessionID) && data.assistantMessageID) {
         patchLiveAssistant(data.assistantMessageID, {
           finish: data.finish,
           cost: data.cost,
@@ -1243,7 +1852,7 @@ export function handleEvent(event: V2Event) {
       if (data.sessionID && data.error) {
         pushRunNotice(data.sessionID, "failed", `${data.error.type}: ${data.error.message}`, event.created);
       }
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
+      if (forLive(data.sessionID) && data.assistantMessageID) {
         patchLiveAssistant(data.assistantMessageID, {
           finish: "error",
           error: data.error,
@@ -1259,57 +1868,61 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "session.text.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "text", data.ordinal ?? 0);
         if (state.queued[data.sessionID]) setState({ queued: { ...state.queued, [data.sessionID]: false } });
       }
       break;
     case "session.text.delta":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "text", data.ordinal ?? 0);
         patchLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0, data.delta ?? "", "append");
       }
       break;
     case "session.text.ended":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "text", data.ordinal ?? 0);
         patchLiveContentPart(data.assistantMessageID, "text", data.ordinal ?? 0, data.text ?? "", "replace");
       }
       break;
 
     case "session.reasoning.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "reasoning", data.ordinal ?? 0);
       }
       break;
     case "session.reasoning.delta":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "reasoning", data.ordinal ?? 0);
         patchLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0, data.delta ?? "", "append");
       }
       break;
     case "session.reasoning.ended":
-      if (forCurrent(data.sessionID) && data.assistantMessageID) {
-        ensureLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0);
+      if (forLive(data.sessionID) && data.assistantMessageID) {
+        ensureLiveContentPart(data.sessionID, data.assistantMessageID, "reasoning", data.ordinal ?? 0);
         patchLiveContentPart(data.assistantMessageID, "reasoning", data.ordinal ?? 0, data.text ?? "", "replace");
       }
       break;
 
     case "session.tool.input.started":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        ensureLiveTool(data.assistantMessageID, data.id, data.name);
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        ensureLiveTool(data.sessionID, data.assistantMessageID, data.id, data.name);
       }
       break;
     case "session.tool.input.delta":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        ensureLiveTool(data.assistantMessageID, data.id);
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        ensureLiveTool(data.sessionID, data.assistantMessageID, data.id);
         const tool = state.live.find((m) => m.id === data.assistantMessageID)?.tools.get(data.id);
-        patchLiveTool(data.assistantMessageID, data.id, { inputText: (tool?.inputText ?? "") + (data.delta ?? "") });
+        patchLiveTool(data.assistantMessageID, data.id, {
+          // Replay-safe append (see appendStreamDelta): seeded tools from a
+          // mid-run page load must not double-accumulate replayed JSON.
+          inputText: appendStreamDelta(tool?.inputText ?? "", data.delta ?? ""),
+        });
       }
       break;
     case "session.tool.input.ended":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        const tool = ensureLiveTool(data.assistantMessageID, data.id);
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        const tool = ensureLiveTool(data.sessionID, data.assistantMessageID, data.id);
         let parsed: unknown;
         try {
           parsed = JSON.parse(data.text ?? "");
@@ -1324,8 +1937,8 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.called":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        const tool = ensureLiveTool(data.assistantMessageID, data.id);
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        const tool = ensureLiveTool(data.sessionID, data.assistantMessageID, data.id);
         patchLiveTool(data.assistantMessageID, data.id, {
           input: data.input,
           inputText: data.input === undefined ? tool.inputText : JSON.stringify(data.input),
@@ -1336,13 +1949,13 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.progress":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
-        ensureLiveTool(data.assistantMessageID, data.id);
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        ensureLiveTool(data.sessionID, data.assistantMessageID, data.id);
         patchLiveTool(data.assistantMessageID, data.id, { metadata: data.metadata });
       }
       break;
     case "session.tool.success":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         patchLiveTool(data.assistantMessageID, data.id, {
           status: "completed",
           content: (data.content as ToolContent[]) ?? undefined,
@@ -1353,7 +1966,7 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.failed":
-      if (forCurrent(data.sessionID) && data.assistantMessageID && data.id) {
+      if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         patchLiveTool(data.assistantMessageID, data.id, {
           status: "error",
           error: data.error,
@@ -1393,6 +2006,21 @@ export function handleEvent(event: V2Event) {
           ],
         });
       }
+      break;
+
+    // Questions-as-forms (this engine's mid-task questions) must appear the
+    // instant the event lands — don't wait for the refreshQueues round-trip.
+    case "form.created": {
+      const form = (data as { form?: FormInfo }).form;
+      if (form?.id && !state.forms.some((f) => f.id === form.id)) {
+        setState({ forms: [...state.forms, { ...form, seq: nextRequestSeq() }] });
+      }
+      break;
+    }
+    case "form.replied":
+    case "form.cancelled":
+    case "form.deleted":
+      setState({ forms: state.forms.filter((f) => f.id !== (data as { id?: string }).id) });
       break;
     case "permission.replied":
       setState({ permissions: state.permissions.filter((p) => p.id !== data.id) });
@@ -1450,6 +2078,7 @@ export function startStore() {
   if (started) return;
   started = true;
   log("boot", "start");
+  log("boot", `build pending-panel-v6`);
   if (typeof window !== "undefined") {
     const syncLocation = () => {
       const sessionID = sessionIDFromLocation();
@@ -1466,9 +2095,12 @@ export function startStore() {
       }
     };
     window.addEventListener("popstate", syncLocation);
+    // Restore pinned splits immediately (validated after sessions load).
+    const restored = loadSplits();
+    if (restored.length > 0) setState({ panes: [{ id: MAIN_PANE, sessionID: null }, ...restored] });
     syncLocation();
   }
-  void refreshSessions();
+  void refreshSessions().then(pruneSplits).catch(() => undefined);
   void refreshQueues();
   void api
     .health()
@@ -1493,17 +2125,30 @@ export function startStore() {
 // SSE hiccup.
 
 const POLL_MS = 2000;
+/** Pending-request queues re-fetch every Nth poll tick (~10s): a missed or
+ * renamed SSE event must never leave an agent blocked unnoticed. */
+const QUEUE_POLL_EVERY = 5;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let pollInFlight = false;
 
 function startPolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(() => void pollOnce(), POLL_MS);
+  let tick = 0;
+  pollTimer = setInterval(() => {
+    // First two ticks queue-refresh too: boot-time REST discovery must
+    // converge fast (a hard refresh on a pending question has to repaint
+    // the panel within seconds, not wait for tick #5).
+    ++tick;
+    if (tick <= 2 || tick % QUEUE_POLL_EVERY === 0) void refreshQueues();
+    void pollOnce();
+  }, POLL_MS);
 }
 
 async function reconcileSession(sid: string, historyDesc: MessageInfo[]) {
-  if (state.currentSessionID !== sid) return;
+  // Reconcile every MOUNTED pane (main + splits) — each pane's live projection
+  // settles through its own fetch; unmounted sessions are skipped.
+  if (!state.panes.some((p) => p.sessionID === sid)) return;
   const history = [...historyDesc].reverse();
   applyFetchedMessages(sid, history);
 }
@@ -1512,12 +2157,16 @@ async function pollOnce() {
   if (pollInFlight) return;
   const sids = new Set<string>();
   for (const [sid, on] of Object.entries(state.running)) if (on) sids.add(sid);
-  if (
-    state.currentSessionID &&
-    !isDraftSession(state.currentSessionID) &&
-    (state.live.length > 0 || state.queued[state.currentSessionID])
-  ) {
-    sids.add(state.currentSessionID);
+  // Sessions with undelivered busy-sends reconcile too — attach/drop/hydrate
+  // their QueueStrip rows even when nothing else marks them live.
+  for (const sid of Object.keys(state.pending)) {
+    if ((state.pending[sid]?.length ?? 0) > 0 && !isDraftSession(sid)) sids.add(sid);
+  }
+  // ANY mounted pane with live content or a queued flag reconciles: streams
+  // run in parallel across panes, so the poll safety net must cover them all.
+  for (const pane of state.panes) {
+    const sid = pane.sessionID;
+    if (sid && !isDraftSession(sid) && (liveForSession(sid).length > 0 || state.queued[sid])) sids.add(sid);
   }
   if (sids.size === 0) return;
 
@@ -1532,6 +2181,13 @@ async function pollOnce() {
         await reconcileSession(sid, res.data);
         const after = state.messages[sid]?.length ?? 0;
         if (after !== before) log("poll", `reconcile ${sid}: ${before} -> ${after} messages`);
+        // Inbox reconciliation rides the same tick as the transcript fetch:
+        // attach ids to "sending" rows, drop delivered/cancelled ones, and
+        // hydrate items queued from elsewhere. The queued flag also covers
+        // sessions that only have the header badge so far.
+        if ((state.pending[sid]?.length ?? 0) > 0 || state.queued[sid]) {
+          await reconcileInbox(sid);
+        }
       } catch {
         /* transient; try again next tick */
       }
@@ -1566,6 +2222,20 @@ export function closeRunsPanel() {
   setState({ runsPanelOpen: false });
 }
 
+/** Persisted RunsPanel cursor — see State.runsSelection. */
+export interface RunsSelection {
+  section: "subagents" | "shells";
+  /** Highlighted subagent, tracked by ID (indexes shift with sort order). */
+  subID: string | null;
+  /** Highlighted shell/PTY row. */
+  shellIndex: number;
+}
+
+/** RunsPanel writes its cursor through on every selection change. */
+export function setRunsSelection(sel: RunsSelection) {
+  setState({ runsSelection: sel });
+}
+
 /** Subagent pages gate the composer behind an "Enter to message" hint. */
 export function revealSubagentComposer() {
   if (state.subagentComposerOpen) return;
@@ -1584,6 +2254,22 @@ export function childSessionsOf(sessions: SessionInfo[], parentID: string): Sess
   return sessions
     .filter((s) => s.parentID === parentID)
     .sort((a, b) => b.time.updated - a.time.updated);
+}
+
+/**
+ * Tab-title liveness (mirrors Sidebar's subagent pulse and the "live =
+ * running OR queued" idiom everywhere else): true when the session itself
+ * OR any of its child/subagent sessions is running or queued. Deliberately
+ * a cheap scan over the session list + two record lookups per child — safe
+ * to run from a selector on every store change.
+ */
+export function sessionOrSubagentsLive(s: State, id: string | null | undefined): boolean {
+  if (!id) return false;
+  if (s.running[id] || s.queued[id]) return true;
+  for (const child of s.sessions) {
+    if (child.parentID === id && (s.running[child.id] || s.queued[child.id])) return true;
+  }
+  return false;
 }
 
 /**
@@ -1606,17 +2292,39 @@ export async function selectSession(
   // the newly selected session must be allowed to hydrate from that replay.
   seenEventIDs.clear();
   if (sessionID === DRAFT_SESSION_ID) {
-    setState({ currentSessionID: DRAFT_SESSION_ID, live: [], subagentComposerOpen: false });
+    const nextPanes = withMainPaneSession(DRAFT_SESSION_ID);
+    setState({
+      currentSessionID: DRAFT_SESSION_ID,
+      // Keep streams of sessions still mounted in other panes; drop the rest.
+      live: pruneLiveForPanes(nextPanes),
+      subagentComposerOpen: false,
+      panes: nextPanes,
+      focusedPane: MAIN_PANE,
+    });
     return;
   }
+  const nextPanes = withMainPaneSession(sessionID);
   setState({
     currentSessionID: sessionID,
-    live: [],
+    // Prune instead of clearing: split panes' live streams survive focus
+    // switches; only unmounted sessions' entries go.
+    live: pruneLiveForPanes(nextPanes),
     subagentComposerOpen: false,
+    // Explicit navigation always lands on the routed surface and re-points
+    // the main pane — splits keep their pinned sessions untouched.
+    panes: nextPanes,
+    focusedPane: MAIN_PANE,
+    // Stale-hygiene only, and pane-isolated by construction: a session lives
+    // in exactly ONE pane, so this touches the incoming session's own flag
+    // alone (a genuinely queued run re-sets it from the next engine event).
     queued: sessionID ? { ...state.queued, [sessionID]: false } : state.queued,
   });
   if (sessionID) {
     rememberLastSession(sessionID);
+    // Restore any buffered live stream from before a hard refresh
+    // before the history fetch returns, so the transcript appears
+    // immediately from the start rather than after the next delta.
+    tryRestoreLiveFromStorage(sessionID);
     // Navigating to a real session discards the pending draft — the draft
     // only exists while it IS the current surface.
     if (state.draftWorkspace !== null) setState({ draftWorkspace: null });
@@ -1624,9 +2332,192 @@ export async function selectSession(
       void loadSessionDetail(sessionID);
     }
     await loadMessages(sessionID);
+    // Surface undelivered busy-sends immediately (items queued from
+    // InboxPanel/another tab) instead of waiting for the next poll tick.
+    void reconcileInbox(sessionID).catch(() => undefined);
   } else if (state.draftWorkspace !== null) {
     setState({ draftWorkspace: null });
   }
+}
+
+// ---- split view -----------------------------------------------------------
+//
+// VS Code-style panes. The main pane stays bound to routing/history
+// (selectSession writes it); additional panes pin OTHER sessions beside it
+// and stay fully interactive — sends are fire-and-forget per session and
+// the SSE stream is global, so a background pane keeps running.
+//
+// Focus model: exactly one pane owns the global single-session machinery
+// (Esc interrupt, dirty agent/model picks, runs panel, type-anywhere). The
+// live streaming projection is PER PANE — every mounted session streams and
+// renders its own entries regardless of focus, so NOTHING happening in one
+// pane (stream start, deltas, step ends, run end, queue changes) can render
+// in or gate another: event handlers scope by the event's sessionID, every
+// component selects by its own sessionID prop, and a session can never sit
+// in two panes at once. Focusing a pane points currentSessionID at its
+// session WITHOUT touching history, drafts or pane bindings — cached
+// transcripts paint instantly and the refresh only reconciles.
+
+const SPLITS_KEY = "webui.splits";
+let paneSeq = 0;
+
+function withMainPaneSession(sessionID: string | null): SplitPane[] {
+  const panes = state.panes.length > 0 ? state.panes.slice() : [{ id: MAIN_PANE, sessionID: null as string | null }];
+  panes[0] = { id: MAIN_PANE, sessionID };
+  return panes;
+}
+
+function saveSplits() {
+  try {
+    localStorage.setItem(SPLITS_KEY, JSON.stringify(state.panes.slice(1)));
+  } catch {
+    /* private mode */
+  }
+}
+
+function loadSplits(): SplitPane[] {
+  try {
+    const raw = localStorage.getItem(SPLITS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SplitPane[];
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (p): p is SplitPane =>
+            !!p && typeof p.id === "string" && typeof p.sessionID === "string" && p.id !== MAIN_PANE,
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Drop restored panes whose session no longer exists (boot-time prune). */
+function pruneSplits() {
+  const known = (sid: string) => state.sessions.some((s) => s.id === sid) || !!state.sessionDetails[sid];
+  const kept = state.panes.filter((p, i) => i === 0 || known(p.sessionID!));
+  if (kept.length !== state.panes.length) {
+    const focusedGone = !kept.some((p) => p.id === state.focusedPane);
+    setState({
+      panes: kept,
+      ...(focusedGone ? { focusedPane: MAIN_PANE } : {}),
+    });
+  }
+}
+
+/**
+ * Point the global single-session machinery at a session, minus every side
+ * effect of real navigation: no history push, no draft discard, no pane
+ * re-binding. This is what makes pane focus feel instant.
+ */
+async function adoptFocusedSession(sessionID: string | null) {
+  if (state.currentSessionID === sessionID) return;
+  setState({
+    currentSessionID: sessionID,
+    // Focus switches must NOT drop other panes' streams — prune only entries
+    // whose session is no longer mounted anywhere.
+    live: pruneLiveForPanes(state.panes),
+    subagentComposerOpen: false,
+    // Uncommitted agent/model picks belong to the pane being left — they
+    // were never sent anywhere, so drop them instead of leaking over.
+    pendingAgent: null,
+    pendingModel: null,
+    // Same stale-hygiene as selectSession, same isolation argument: the
+    // flag belongs to the newly focused session's single pane only. Live
+    // projections and other panes' run state are untouched.
+    ...(sessionID ? { queued: { ...state.queued, [sessionID]: false } } : {}),
+  });
+  if (sessionID && !isDraftSession(sessionID)) {
+    tryRestoreLiveFromStorage(sessionID);
+    await loadMessages(sessionID);
+    void reconcileInbox(sessionID).catch(() => undefined);
+  }
+}
+
+/** Move focus to a pane; its session becomes the globally-active one. */
+export async function focusPane(paneID: string) {
+  const pane = state.panes.find((p) => p.id === paneID);
+  if (!pane) return;
+  if (state.focusedPane === paneID) return;
+  log("pane", `focus ${paneID}`);
+  setState({ focusedPane: paneID });
+  await adoptFocusedSession(pane.sessionID);
+}
+
+export function openSplitPicker() {
+  setState({ splitPickerOpen: true });
+}
+
+export function closeSplitPicker() {
+  if (state.splitPickerOpen) setState({ splitPickerOpen: false });
+}
+
+export async function addSplitPane(sessionID: string): Promise<boolean> {
+  if (!sessionID || isDraftSession(sessionID)) return false;
+  if (state.panes.length - 1 >= MAX_SPLITS) return false;
+  if (state.panes.some((p) => p.sessionID === sessionID)) return false;
+  const pane: SplitPane = { id: `${MAIN_PANE}-${Date.now().toString(36)}-${++paneSeq}`, sessionID };
+  log("pane", `split open ${sessionID} (${pane.id})`);
+  setState({
+    panes: [...state.panes, pane],
+    focusedPane: pane.id,
+    splitPickerOpen: false,
+  });
+  saveSplits();
+  if (!state.sessions.some((s) => s.id === sessionID) && !state.sessionDetails[sessionID]) {
+    void loadSessionDetail(sessionID);
+  }
+  await adoptFocusedSession(sessionID);
+  return true;
+}
+
+export async function removeSplitPane(paneID: string) {
+  if (paneID === MAIN_PANE) return;
+  const panes = state.panes.filter((p) => p.id !== paneID);
+  if (panes.length === state.panes.length) return;
+  log("pane", `close ${paneID}`);
+  const focusedGone = state.focusedPane === paneID;
+  setState({ panes, ...(focusedGone ? { focusedPane: MAIN_PANE } : {}) });
+  saveSplits();
+  if (focusedGone) {
+    await adoptFocusedSession(state.panes[0]!.sessionID);
+  }
+}
+
+/** Swap which session a pinned pane shows (subagent navigation inside it). */
+export async function setPaneSession(paneID: string, sessionID: string | null) {
+  const idx = state.panes.findIndex((p) => p.id === paneID);
+  if (idx <= 0 || !sessionID || isDraftSession(sessionID)) return;
+  const panes = state.panes.slice();
+  panes[idx] = { ...panes[idx]!, sessionID };
+  setState({ panes });
+  saveSplits();
+  if (state.focusedPane === paneID) await adoptFocusedSession(sessionID);
+  else void loadMessages(sessionID);
+}
+
+/**
+ * Navigate the FOCUSED pane to a session: main pane → real navigation
+ * (URL/history), a split pane → swap that pane's content in place.
+ * All in-pane chrome (parent buttons, subagent chips, arrows) uses this.
+ */
+export async function navigateFocused(sessionID: string | null) {
+  if (state.focusedPane === MAIN_PANE || state.panes.length <= 1) {
+    await selectSession(sessionID);
+    return;
+  }
+  await setPaneSession(state.focusedPane, sessionID);
+}
+
+/** Which pane currently owns global chrome ("main" | pane id). */
+export function focusedPaneKey(s: State = getState()): string {
+  return s.focusedPane;
+}
+
+/** Warm the transcript cache without touching any UI state (hover prefetch). */
+export function prefetchSession(sessionID: string) {
+  if (isDraftSession(sessionID)) return;
+  if ((state.messages[sessionID]?.length ?? 0) > 0) return; // cached already
+  void loadMessages(sessionID);
 }
 
 // ---- last-open session persistence ---------------------------------------
@@ -1643,6 +2534,9 @@ function rememberLastSession(sessionID: string) {
 
 /** Reopen the last active session on startup (TUI resume feel). */
 async function reopenLastSession() {
+  // Deep links into extension pages (/ext/…) are deliberate destinations —
+  // never hijack them back into the last-open session.
+  if (/^\/ext\//.test(window.location.pathname)) return;
   let last: string | null = null;
   try {
     last = localStorage.getItem(LAST_SESSION_KEY);
@@ -1664,14 +2558,39 @@ export async function sendPrompt(text: string) {
   await sendPromptTo(sid, text);
 }
 
+export interface SendPromptOptions {
+  /**
+   * Delivery for BUSY sessions only: omitted/"steer" joins the active run at
+   * the next LLM-call boundary (engine default), "queue" parks the message
+   * until the current turn ends. Idle sessions ignore it — the prompt starts
+   * a run immediately, exactly as before this option existed.
+   */
+  delivery?: PromptDelivery;
+}
+
 /**
  * Send a prompt to an explicit session — child/subagent sessions included.
  * Sessions are uniform, so messaging a child is a normal prompt against its
  * id; optimistic copies and the pending flag are keyed by that id.
+ *
+ * Busy sessions take the STEER vs QUEUE path instead: no optimistic
+ * transcript turn — the message becomes a durable inbox item tracked in the
+ * QueueStrip (see admitWhileBusy + reconcileInbox).
  */
-export async function sendPromptTo(sessionID: string, text: string) {
-  log("send", `prompt ${sessionID}: ${text.slice(0, 80)}`);
+export async function sendPromptTo(
+  sessionID: string,
+  text: string,
+  opts?: SendPromptOptions,
+) {
+  log(
+    "send",
+    `prompt ${sessionID}: ${text.slice(0, 80)}${opts?.delivery ? ` (${opts.delivery})` : ""}`,
+  );
   await ensureSessionModel(sessionID);
+  if (!isDraftSession(sessionID) && sessionBusy(sessionID)) {
+    await admitWhileBusy(sessionID, text, opts?.delivery);
+    return;
+  }
   appendOptimisticUserMessage(sessionID, text);
   markPending(sessionID);
   try {
@@ -1681,6 +2600,214 @@ export async function sendPromptTo(sessionID: string, text: string) {
     recordSendError(sessionID, err);
     throw err;
   }
+}
+
+/**
+ * A session is "busy" when it is streaming (running), waiting to start
+ * (queued — provider cold-start gap or messages parked behind an active
+ * step), the engine reports it active, or a live projection exists for it.
+ * Every mounted pane session carries its own live projection; unmounted
+ * sessions rely on running/queued/activeIDs. Mirrors how Conversation
+ * derives its badges.
+ */
+function sessionBusy(sessionID: string): boolean {
+  if (state.running[sessionID] || state.queued[sessionID]) return true;
+  if (state.activeIDs.includes(sessionID)) return true;
+  return isPaneSession(sessionID) && liveForSession(sessionID).length > 0;
+}
+
+// ---- busy-send steering/queueing (QueueStrip) -----------------------------
+//
+// Sending while busy never fakes a transcript turn: the prompt is admitted as
+// an engine-side inbox item and rendered in the QueueStrip until delivered.
+// Lifecycle: sending (POST in flight) → tracked (inboxID known) → dropped
+// when the item leaves the inbox (delivered or cancelled). The SSE events
+// give instant signals; reconcileInbox on the 2s poll is the source of truth.
+
+let pendingSendSeq = 0;
+
+function setPending(sessionID: string, list: PendingSend[] | null) {
+  const next = { ...state.pending };
+  if (list && list.length > 0) next[sessionID] = list;
+  else delete next[sessionID];
+  setState({ pending: next });
+}
+
+function pushPendingSend(sessionID: string, entry: PendingSend) {
+  setPending(sessionID, [...(state.pending[sessionID] ?? []), entry]);
+}
+
+function patchPendingSend(
+  sessionID: string,
+  key: string,
+  patch: (entry: PendingSend) => PendingSend,
+) {
+  const list = state.pending[sessionID];
+  if (!list?.some((p) => p.key === key)) return;
+  let changed = false;
+  const next = list.map((p) => {
+    if (p.key !== key) return p;
+    const patched = patch(p);
+    if (patched !== p) changed = true;
+    return patched;
+  });
+  // Compare-before-set: poll reconciliation runs every 2s and must not churn
+  // subscribers with identical lists.
+  if (!changed) return;
+  setPending(sessionID, next);
+}
+
+/** Admit a busy-send: track it locally, POST it, stamp the returned item. */
+async function admitWhileBusy(sessionID: string, text: string, delivery?: PromptDelivery) {
+  const key = `pend_${Date.now().toString(36)}_${++pendingSendSeq}`;
+  pushPendingSend(sessionID, {
+    key,
+    text,
+    state: "sending",
+    ...(delivery ? { delivery } : {}),
+  });
+  try {
+    // Omitted delivery ⇒ engine default (busy ⇒ steer at next LLM call).
+    const info = await api.prompt(sessionID, text, delivery);
+    if (info?.id) {
+      patchPendingSend(sessionID, key, (p) => ({
+        ...p,
+        state: "tracked",
+        inboxID: info.id,
+        delivery: info.delivery ?? delivery,
+      }));
+    }
+    // No id in the response: stay "sending" — reconcileInbox pairs the row
+    // with the admitted item by text on the next poll tick.
+  } catch (err) {
+    removePendingSend(sessionID, key);
+    recordSendError(sessionID, err);
+    throw err;
+  }
+}
+
+function removePendingSend(sessionID: string, key: string) {
+  const list = state.pending[sessionID];
+  if (!list?.some((p) => p.key === key)) return;
+  setPending(sessionID, list.filter((p) => p.key !== key));
+}
+
+function inboxItemText(item: InboxInfo): string {
+  const payload = item.payload as { text?: unknown } | undefined;
+  return typeof payload?.text === "string" ? payload.text : "";
+}
+
+/**
+ * True when an inbox item mirrors an optimistic IDLE send of ours: the
+ * transcript already shows it as a msg_local_ turn and the engine delivers it
+ * immediately — such admissions must NOT be duplicated into the strip.
+ */
+function isOwnIdleAdmission(sessionID: string, text: string): boolean {
+  if (text === "" || sessionBusy(sessionID)) return false;
+  return (state.messages[sessionID] ?? []).some(
+    (m) => m.type === "user" && m.id.startsWith("msg_local_") && m.text === text,
+  );
+}
+
+function samePendingList(a: PendingSend[], b: PendingSend[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((p, i) => {
+    const q = b[i]!;
+    return (
+      p.key === q.key &&
+      p.text === q.text &&
+      p.state === q.state &&
+      p.inboxID === q.inboxID &&
+      p.delivery === q.delivery
+    );
+  });
+}
+
+/**
+ * Reconcile the strip against GET /api/session/{id}/inbox:
+ * 1. attach inboxIDs to still-"sending" rows by matching the admitted item's
+ *    text (newest match wins, one-to-one — tracked rows claim theirs first);
+ * 2. drop tracked rows whose id left the inbox (delivered or cancelled);
+ * 3. hydrate rows for items this client didn't create (InboxPanel, another
+ *    tab). Compare-before-set keeps repeat polls from churning state.
+ */
+async function reconcileInbox(sessionID: string) {
+  const res = await api.inboxList(sessionID);
+  const server = res.data.filter((i) => i.type === "user");
+  const serverIDs = new Set(server.map((i) => i.id));
+  const before = state.pending[sessionID] ?? [];
+  let list = [...before];
+
+  const claimed = new Set(list.filter((p) => p.inboxID).map((p) => p.inboxID!));
+  list = list.map((p) => {
+    if (p.state !== "sending") return p;
+    const candidates = server.filter((i) => !claimed.has(i.id) && inboxItemText(i) === p.text);
+    if (candidates.length === 0) return p;
+    const match = candidates.reduce((a, b) => (b.timeCreated >= a.timeCreated ? b : a));
+    claimed.add(match.id);
+    return { ...p, state: "tracked" as const, inboxID: match.id, delivery: match.delivery };
+  });
+
+  list = list.filter((p) => !(p.state === "tracked" && p.inboxID && !serverIDs.has(p.inboxID)));
+
+  for (const item of [...server].sort((a, b) => a.timeCreated - b.timeCreated)) {
+    if (list.some((p) => p.inboxID === item.id)) continue;
+    const text = inboxItemText(item);
+    if (isOwnIdleAdmission(sessionID, text)) continue;
+    list.push({
+      key: `inbox_${item.id}`,
+      text,
+      state: "tracked",
+      inboxID: item.id,
+      delivery: item.delivery,
+    });
+  }
+
+  // Merge in rows that appeared while the fetch was in flight (a fresh
+  // admitWhileBusy push) — the stale snapshot must never erase them.
+  const knownKeys = new Set(list.map((p) => p.key));
+  for (const row of state.pending[sessionID] ?? []) {
+    if (!knownKeys.has(row.key)) list.push(row);
+  }
+
+  if (samePendingList(before, list)) return;
+  setPending(sessionID, list);
+}
+
+/**
+ * Insert an engine-known inbox item as a tracked row (event hydration).
+ * Skipped when we already track the id, or when a "sending" row with the same
+ * text exists — that's our own POST in flight whose response will pair up.
+ */
+function hydrateServerInboxItem(
+  sessionID: string,
+  item: { id: string; text: string; delivery?: PromptDelivery },
+) {
+  const list = state.pending[sessionID];
+  if (list?.some((p) => p.inboxID === item.id)) return;
+  if (list?.some((p) => p.state === "sending" && p.text === item.text)) return;
+  if (isOwnIdleAdmission(sessionID, item.text)) return;
+  pushPendingSend(sessionID, {
+    key: `inbox_${item.id}`,
+    text: item.text,
+    state: "tracked",
+    inboxID: item.id,
+    delivery: item.delivery ?? "steer",
+  });
+}
+
+/** Remove whichever pending row carries an inbox id (delivery/cancel event). */
+function dropPendingByInboxID(inboxID: string) {
+  let changed = false;
+  const next = { ...state.pending };
+  for (const [sid, list] of Object.entries(next)) {
+    if (!list.some((p) => p.inboxID === inboxID)) continue;
+    const filtered = list.filter((p) => p.inboxID !== inboxID);
+    changed = true;
+    if (filtered.length > 0) next[sid] = filtered;
+    else delete next[sid];
+  }
+  if (changed) setState({ pending: next });
 }
 
 /**
@@ -1752,6 +2879,111 @@ export function clearSendError(sessionID: string) {
   const next = { ...state.sendErrors };
   delete next[sessionID];
   setState({ sendErrors: next });
+}
+
+// ---- QueueStrip row management --------------------------------------------
+
+/** Remove a pending busy-send row; cancels the engine-side item if tracked. */
+export function pendingDelete(sessionID: string, key: string) {
+  const entry = state.pending[sessionID]?.find((p) => p.key === key);
+  if (!entry) return;
+  removePendingSend(sessionID, key);
+  if (entry.state === "tracked" && entry.inboxID) {
+    void api.inboxDelete(sessionID, entry.inboxID).catch((err) => {
+      recordSendError(sessionID, err);
+      // Cancel failed (e.g. delivered meanwhile) — put the row back so it
+      // can't silently vanish; the poll drops it once it leaves the inbox.
+      pushPendingSend(sessionID, entry);
+    });
+  }
+}
+
+/**
+ * Flip a pending row between steer and queue. Optimistic locally, then
+ * engine-side (steer wakes execution); reverted on error.
+ */
+export function pendingSetDelivery(sessionID: string, key: string, delivery: PromptDelivery) {
+  const entry = state.pending[sessionID]?.find((p) => p.key === key);
+  if (!entry || (entry.delivery ?? "steer") === delivery) return;
+  const previous = entry.delivery ?? "steer";
+  patchPendingSend(sessionID, key, (p) => ({ ...p, delivery }));
+  const applied =
+    entry.state === "tracked" && entry.inboxID
+      ? delivery === "steer"
+        ? api.inboxSteer(sessionID, entry.inboxID)
+        : api.inboxQueue(sessionID, entry.inboxID)
+      : Promise.resolve(); // still sending — nothing engine-side to flip yet
+  void applied.catch((err) => {
+    patchPendingSend(sessionID, key, (p) => ({ ...p, delivery: previous }));
+    recordSendError(sessionID, err);
+  });
+}
+
+/** "Send now": a parked queue row joins the run immediately via steer. */
+export function pendingSendNow(sessionID: string, key: string) {
+  const entry = state.pending[sessionID]?.find((p) => p.key === key);
+  if (!entry || entry.state !== "tracked") return; // sending → nothing to wake yet
+  if ((entry.delivery ?? "steer") === "queue") pendingSetDelivery(sessionID, key, "steer");
+}
+
+/**
+ * Interrupt the current step AND resume with pending steering input while
+ * queued prompts stay parked (`interrupt?continue=true`). The QueueStrip's
+ * steer-group control — flushes steered rows without losing parked ones.
+ */
+export async function flushSteersNow(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  disarmInterrupt();
+  await api.interrupt(sessionID, true);
+  // Reflect the stop immediately; events/poll reconciliation confirms after
+  // (mirrors interrupt()).
+  setState({
+    running: { ...state.running, [sessionID]: false },
+    queued: { ...state.queued, [sessionID]: false },
+  });
+}
+
+// ---- queue progression failsafe -------------------------------------------
+//
+// Queued items should be delivered at the next turn boundary, but some paths
+// leave them parked across interrupts/idle without ever waking execution.
+// When a turn TRULY ends (finishRun/settleRun), re-check after a short
+// debounce and flip the FIRST still-present queue item to steer — steering
+// wakes the session, the engine delivers it, and later items advance the same
+// way on their own turn ends.
+
+const QUEUE_DRAIN_DEBOUNCE_MS = 1800;
+const queueDrainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleQueueDrain(sessionID: string) {
+  if (isDraftSession(sessionID)) return;
+  const existing = queueDrainTimers.get(sessionID);
+  if (existing) clearTimeout(existing); // rapid end/start flapping re-arms only
+  const timer = setTimeout(() => {
+    queueDrainTimers.delete(sessionID);
+    void drainQueuedPending(sessionID);
+  }, QUEUE_DRAIN_DEBOUNCE_MS);
+  queueDrainTimers.set(sessionID, timer);
+}
+
+async function drainQueuedPending(sessionID: string) {
+  const first = (state.pending[sessionID] ?? []).find(
+    (p) => p.delivery === "queue" && p.state === "tracked" && !!p.inboxID,
+  );
+  if (!first?.inboxID) return;
+  // Guard: a new run already started (another steer woke it) — the engine is
+  // delivering on its own schedule again, don't fight it.
+  if (state.running[sessionID] || state.queued[sessionID]) return;
+  try {
+    const res = await api.inboxList(sessionID);
+    if (!res.data.some((i) => i.id === first.inboxID)) return; // gone: delivered/cancelled
+    if (state.running[sessionID] || state.queued[sessionID]) return;
+    log("run", `drain ${sessionID}: steering parked queue item ${first.inboxID}`);
+    patchPendingSend(sessionID, first.key, (p) => ({ ...p, delivery: "steer" }));
+    await api.inboxSteer(sessionID, first.inboxID);
+  } catch (err) {
+    console.warn("queue drain failed:", err); // retried on the next turn end
+  }
 }
 
 function appendOptimisticUserMessage(sid: string, text: string) {
@@ -1898,24 +3130,57 @@ export async function cancelForm(formID: string) {
   }
 }
 
-export async function replyQuestion(requestID: string, answers: QuestionAnswer[]) {
+export async function replyQuestion(requestID: string, answers: QuestionAnswer[]): Promise<boolean> {
+  // Native question request (newer engines) …
   const req = state.questions.find((q) => q.id === requestID);
-  if (!req) return;
-  try {
-    await api.sessionQuestionReply(req.sessionID, requestID, answers);
-  } finally {
+  if (req) {
+    try {
+      await api.sessionQuestionReply(req.sessionID, requestID, answers);
+    } catch (err) {
+      log("panel", `question reply FAILED ${requestID}:`, err instanceof Error ? err.message : String(err));
+      return false; // keep pending so the user can retry
+    }
     setState({ questions: state.questions.filter((q) => q.id !== requestID) });
+    return true;
   }
+  // … or a question delivered as a form: answers map back to {"q0": value}.
+  const form = state.forms.find((f) => f.id === requestID && isQuestionForm(f));
+  if (!form) return false;
+  const answer: Record<string, string | string[]> = {};
+  form.fields.forEach((field, i) => {
+    const picked = answers[i] ?? [];
+    // The FIELD TYPE decides the wire shape (verified against the engine):
+    // multiselect fields demand an ARRAY of option values (+ custom strings),
+    // string fields demand ONE string. A wrong shape is rejected with
+    // FormInvalidAnswerError and the request stays pending.
+    const multi = field.type === "multiselect";
+    answer[field.key] = multi ? picked : (picked[0] ?? "");
+  });
+  try {
+    await api.replyForm(form.sessionID, form.id, answer);
+  } catch (err) {
+    // Keep the form pending so the user can retry — removing it here made a
+    // failed submit look like a silent no-op (and hid the request forever).
+    log("panel", `question reply FAILED ${form.id}:`, err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  setState({ forms: state.forms.filter((f) => f.id !== form.id) });
+  return true;
 }
 
 export async function rejectQuestion(requestID: string) {
   const req = state.questions.find((q) => q.id === requestID);
-  if (!req) return;
-  try {
-    await api.sessionQuestionReject(req.sessionID, requestID);
-  } finally {
-    setState({ questions: state.questions.filter((q) => q.id !== requestID) });
+  if (req) {
+    try {
+      await api.sessionQuestionReject(req.sessionID, requestID);
+    } finally {
+      setState({ questions: state.questions.filter((q) => q.id !== requestID) });
+    }
+    return;
   }
+  const form = state.forms.find((f) => f.id === requestID && isQuestionForm(f));
+  if (!form) return;
+  await cancelForm(form.id);
 }
 
 /**
@@ -1958,11 +3223,15 @@ export function startDraftSession(directory?: string | null) {
   const workspace = directory ?? state.pendingWorkspace ?? state.draftWorkspace ?? inherited ?? null;
   const retarget = isDraftSession(state.currentSessionID);
   log("session", `draft ${retarget ? "retarget" : "open"} (workspace=${workspace ?? "default"})`);
+  const nextPanes = withMainPaneSession(DRAFT_SESSION_ID);
   setState({
     currentSessionID: DRAFT_SESSION_ID,
+    panes: nextPanes,
+    focusedPane: MAIN_PANE,
     draftWorkspace: workspace,
     pendingWorkspace: null,
-    live: [],
+    // The previous main session just unmounted — keep only still-mounted streams.
+    live: pruneLiveForPanes(nextPanes),
     // A fresh surface must not inherit uncommitted picks from the previous
     // session — they were never sent anywhere.
     ...(retarget ? {} : { pendingAgent: null, pendingModel: null }),
@@ -1982,6 +3251,26 @@ export function setPendingWorkspace(directory: string | null) {
  */
 let materializing = false;
 
+/**
+ * Create a REAL server-side session bound to a workspace (model-pinned via
+ * the resolved default). Shared by draft materialization and the split
+ * picker's "start a new session" flow.
+ */
+export async function createRealSession(directory: string | null): Promise<string> {
+  const model = await resolveDefaultModel();
+  const res = await api.createSession({
+    title: null,
+    agent: null,
+    model: model ?? null,
+    location: directory ? { directory } : null,
+  });
+  const sid = res.data.id;
+  if (model) log("model", `new session ${sid} -> ${model.providerID}/${model.id}`);
+  await refreshSessions();
+  await loadSessionDetail(sid);
+  return sid;
+}
+
 export async function materializeDraft(text: string): Promise<string> {
   void text;
   if (!isDraftSession(state.currentSessionID) && state.draftWorkspace === null) {
@@ -1992,25 +3281,18 @@ export async function materializeDraft(text: string): Promise<string> {
   try {
     const directory = state.draftWorkspace;
     log("session", `draft -> create (workspace=${directory ?? "default"})`);
-    const model = await resolveDefaultModel();
-    const res = await api.createSession({
-      title: null,
-      agent: null,
-      model: model ?? null,
-      location: directory ? { directory } : null,
-    });
-    const sid = res.data.id;
-    if (model) log("model", `new session ${sid} -> ${model.providerID}/${model.id}`);
-    await refreshSessions();
-    await loadSessionDetail(sid);
+    const sid = await createRealSession(directory);
     // Carry any optimistic user copy across so the transcript never blanks
     // between the draft surface and the real session.
     const draftMessages = state.messages[DRAFT_SESSION_ID] ?? [];
     seenEventIDs.clear();
+    const nextPanes = withMainPaneSession(sid);
     setState({
       currentSessionID: sid,
+      panes: nextPanes,
+      focusedPane: MAIN_PANE,
       draftWorkspace: null,
-      live: [],
+      live: pruneLiveForPanes(nextPanes),
       messages: { ...state.messages, [sid]: draftMessages, [DRAFT_SESSION_ID]: [] },
     });
     rememberLastSession(sid);

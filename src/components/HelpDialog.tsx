@@ -14,6 +14,7 @@ const KEYBINDS: [string, string][] = [
   ["Ctrl+B", "Background synchronous subagents"],
   ["Ctrl+P", "Command palette"],
   ["Ctrl+N", "New session"],
+  ["⌘F / Ctrl+F", "Search sessions"],
   ["/", "Slash commands & skills"],
   ["@", "Reference files"],
   ["!", "Shell mode"],

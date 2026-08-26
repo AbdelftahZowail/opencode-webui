@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, type ReactNode } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, X } from "lucide-react";
 import {
   applyRevertView,
   childSessionsOf,
   isDraftSession,
   liveToolPart,
   loadMessages,
+  pendingRequests,
   revealSubagentComposer,
   selectSession,
   useStore,
@@ -13,7 +14,7 @@ import {
   type LiveContentPart,
 } from "../store";
 import type { MessageInfo } from "../api/types";
-import { SlotOutlet } from "../extensions/registry";
+import { Slot } from "../extensions/registry";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -26,6 +27,8 @@ import {
 import { Badge } from "./ui/badge";
 import { Composer } from "./Composer";
 import { MessageItem, MessagePart } from "./MessageItem";
+import { PendingRequestsPanel } from "./PendingRequestsPanel";
+import { QueueStrip } from "./QueueStrip";
 import { RunsPanel } from "./RunsPanel";
 import { SendErrorStrip } from "./SendErrorStrip";
 import { SessionMenu } from "./SessionMenu";
@@ -33,14 +36,43 @@ import { SubagentStrip } from "./SubagentStrip";
 import { ThemePicker } from "./ThemePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 
-export function Conversation({ sessionID }: { sessionID: string }) {
+/** In-pane navigation: goes through the focused pane's surface. */
+type NavigateFn = (sessionID: string | null) => void;
+
+export function Conversation({
+  sessionID,
+  paneKey = "main",
+  focused = true,
+  onClose,
+  onNavigate,
+}: {
+  sessionID: string;
+  /** Which split pane this instance renders — namespaces its DOM ids. */
+  paneKey?: string;
+  /** Only the focused pane owns global chrome (runs panel, gate swap). */
+  focused?: boolean;
+  /** Present only in split panes — renders the ✕ close affordance. */
+  onClose?: () => void;
+  /** In-pane navigation; defaults to global selectSession for safety. */
+  onNavigate?: NavigateFn;
+}) {
+  // Every in-pane navigation routes through onNavigate when provided so a
+  // split pane swaps ITS content instead of yanking the whole app.
+  const go: NavigateFn = (sid) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
   const session = useStore((s) => s.sessions.find((x) => x.id === sessionID) ?? s.sessionDetails[sessionID]);
   const allMessages = useStore((s) => s.messages[sessionID] ?? []);
-  const live = useStore((s) => s.live);
+  // Per-pane isolation: this pane renders ONLY its own session's live
+  // projection, never another pane's streaming entries.
+  const live = useStore((s) => s.live.filter((a) => a.sessionID === sessionID));
   const running = useStore((s) => s.running[sessionID] ?? false);
   const queued = useStore((s) => !!s.queued[sessionID]);
   const isPanelOpen = useStore((s) => s.runsPanelOpen);
   const composerOpen = useStore((s) => s.subagentComposerOpen);
+  // A pending permission/question/form for THIS session takes the composer
+  // slot over (focused pane only — background panes keep their composer).
+  const ownPending = useStore((s) =>
+    focused ? pendingRequests(s).some((r) => r.req.sessionID === sessionID) : false,
+  );
   // A staged revert rewrites the visible transcript (service keeps full history).
   const messages = useMemo(
     () => applyRevertView(allMessages, (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID),
@@ -52,15 +84,20 @@ export function Conversation({ sessionID }: { sessionID: string }) {
   }, [sessionID]);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
       <Header
         title={session?.title}
         sessionID={sessionID}
         running={running}
         queued={queued}
         parentID={session?.parentID}
+        go={go}
+        onClose={onClose}
       />
-      {!isDraftSession(sessionID) && <SubagentStrip sessionID={sessionID} />}
+      {!isDraftSession(sessionID) && <SubagentStrip sessionID={sessionID} onNavigate={onNavigate} />}
+      {/* Extension region: pinned strip at the very top of the transcript
+          area (above the scroller, so it stays visible while scrolled). */}
+      <Slot region="transcript.above" sessionID={sessionID} />
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
         <MessageScroller className="flex-1">
@@ -70,22 +107,51 @@ export function Conversation({ sessionID }: { sessionID: string }) {
                 re-renders the whole transcript, re-runs the scroller's stick
                 logic and toggles its data-autoscrolling attribute — the
                 flicker the user sees as data-autoscroll appearing/disappearing. */}
-            <TranscriptList messages={messages} live={live} running={running} />
+            <TranscriptList
+              sessionID={sessionID}
+              messages={messages}
+              live={live}
+              running={running}
+            />
           </MessageScrollerViewport>
           <MessageScrollerButton direction="end" />
           <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
         </MessageScroller>
       </MessageScrollerProvider>
 
+      {/* Extension region: right after the transcript (live block included),
+          before SendErrorStrip / QueueStrip / the composer slot. */}
+      <Slot region="transcript.below" sessionID={sessionID} />
       <SendErrorStrip sessionID={sessionID} />
-      {isPanelOpen ? (
-        <RunsPanel sessionID={sessionID} />
+      {/* Pending busy-sends (steer/queue) — above the whole composer slot so
+          it also shows while RunsPanel/gate replace the composer. */}
+      <QueueStrip sessionID={sessionID} />
+      {!focused ? (
+        // Unfocused panes stream their own live projection but carry none of
+        // the focused pane's global chrome — always the plain composer,
+        // never the runs-panel/gate swaps.
+        <Slot
+          region="composer.replace"
+          sessionID={sessionID}
+          fallback={<Composer sessionID={sessionID} paneKey={paneKey} />}
+        />
+      ) : ownPending ? (
+        // This session's pending permission/question/form REPLACES the
+        // composer until resolved — the agent is blocked on it (panel owns
+        // Esc). RunsPanel state survives underneath and returns after.
+        <PendingRequestsPanel sessionID={sessionID} />
+      ) : isPanelOpen ? (
+        <RunsPanel sessionID={sessionID} paneKey={paneKey} />
       ) : session?.parentID && !composerOpen ? (
         // Subagent pages open read-only — Enter reveals the composer
         // (site-wide binding in App), Backspace/↑ return to the parent.
-        <SubagentGate sessionID={sessionID} parentID={session.parentID} />
+        <SubagentGate sessionID={sessionID} parentID={session.parentID} go={go} />
       ) : (
-        <SlotOutlet slot="composer.replace" fallback={<Composer sessionID={sessionID} />} />
+        <Slot
+          region="composer.replace"
+          sessionID={sessionID}
+          fallback={<Composer sessionID={sessionID} paneKey={paneKey} />}
+        />
       )}
     </div>
   );
@@ -136,7 +202,15 @@ function ScrollToEndOnUserSend({
  * actions. Clicking a chip opens it; typing anywhere hands off to the
  * composer (lib/composerHandoff.ts).
  */
-function SubagentGate({ sessionID, parentID }: { sessionID: string; parentID: string }) {
+function SubagentGate({
+  sessionID,
+  parentID,
+  go,
+}: {
+  sessionID: string;
+  parentID: string;
+  go: (sessionID: string | null) => void;
+}) {
   const sessions = useStore((s) => s.sessions);
   const runningMap = useStore((s) => s.running);
   const activeIDs = useStore((s) => s.activeIDs);
@@ -162,6 +236,7 @@ function SubagentGate({ sessionID, parentID }: { sessionID: string; parentID: st
               label={c.title || c.agent || c.id}
               current={c.id === sessionID}
               running={isRunning(c.id)}
+              go={go}
             />
           ))}
         </div>
@@ -178,7 +253,7 @@ function SubagentGate({ sessionID, parentID }: { sessionID: string; parentID: st
           <span aria-hidden>·</span>
           <button
             type="button"
-            onClick={() => void selectSession(parentID)}
+            onClick={() => go(parentID)}
             title={`Back to parent${parentTitle ? `: ${parentTitle}` : ""}`}
             className="flex cursor-pointer items-center gap-1 rounded-md border border-[var(--border-weak-base)] px-1.5 py-0.5 transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
           >
@@ -198,11 +273,13 @@ function GateChip({
   label,
   current,
   running,
+  go,
 }: {
   id: string;
   label: string;
   current: boolean;
   running: boolean;
+  go: (sessionID: string | null) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   // With many siblings the strip wraps — keep "you are here" on screen.
@@ -214,7 +291,7 @@ function GateChip({
     <button
       ref={ref}
       type="button"
-      onClick={() => void selectSession(id)}
+      onClick={() => go(id)}
       title={current ? "Currently open — ←/→ to switch" : label}
       className={`flex cursor-pointer items-center gap-1 rounded-full px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
         current
@@ -295,6 +372,7 @@ function len(v: unknown): number {
 }
 
 interface TranscriptProps {
+  sessionID: string;
   messages: MessageInfo[];
   live: LiveAssistant[];
   running: boolean;
@@ -302,6 +380,7 @@ interface TranscriptProps {
 
 function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
   return (
+    a.sessionID === b.sessionID &&
     a.running === b.running &&
     transcriptFingerprint(a.messages, a.live) === transcriptFingerprint(b.messages, b.live)
   );
@@ -312,13 +391,17 @@ function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
  * polls must not touch the DOM at all, so the scroller's MutationObserver
  * never fires and its autoscroll/stick cycle stays quiescent.
  */
-const TranscriptList = React.memo(function TranscriptList({ messages, live, running }: TranscriptProps) {
+const TranscriptList = React.memo(function TranscriptList({ sessionID, messages, live, running }: TranscriptProps) {
   return (
     <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6">
       {messages.length === 0 && live.length === 0 && !running && (
-        <MessageScrollerItem>
-          <EmptyHint />
-        </MessageScrollerItem>
+        <>
+          <MessageScrollerItem>
+            <EmptyHint />
+          </MessageScrollerItem>
+          {/* Extension region: alongside the built-in empty state. */}
+          <Slot region="transcript.empty" sessionID={sessionID} />
+        </>
       )}
       {(() => {
         let prevAssistant = false;
@@ -385,12 +468,16 @@ function Header({
   running,
   queued,
   parentID,
+  go,
+  onClose,
 }: {
   title?: string;
   sessionID: string;
   running: boolean;
   queued: boolean;
   parentID?: string;
+  go: (sessionID: string | null) => void;
+  onClose?: () => void;
 }) {
   const parentTitle = useStore((s) => s.sessionDetails[parentID ?? ""]?.title);
   // The draft has no server-side session yet — show its target workspace
@@ -403,7 +490,7 @@ function Header({
         {parentID && (
           <button
             type="button"
-            onClick={() => void selectSession(parentID)}
+            onClick={() => go(parentID)}
             title={`Back to parent session${parentTitle ? `: ${parentTitle}` : ""}`}
             className="cursor-pointer rounded-md border border-[var(--border-weak-base)] px-1.5 py-0.5 text-xs text-[var(--text-weak)] transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
           >
@@ -413,7 +500,9 @@ function Header({
         <button
           type="button"
           className="mr-1 cursor-pointer text-[var(--text-weaker)] transition-colors hover:text-[var(--text-strong)] lg:hidden"
-          onClick={() => void selectSession(null)}
+          // In a split pane the mobile back arrow closes the pane instead
+          // of navigating away from its pinned session.
+          onClick={() => (onClose ? onClose() : go(null))}
         >
           ←
         </button>
@@ -446,6 +535,19 @@ function Header({
         )}
       </div>
       <div className="flex items-center gap-1.5">
+        {/* Extension region: first in the right-aligned action cluster, so
+            extension actions sit beside (left of) the built-in controls. */}
+        <Slot region="header.session.actions" sessionID={sessionID} />
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            title="Close split"
+            className="flex size-6 cursor-pointer items-center justify-center rounded-md text-[var(--text-weaker)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+          >
+            <X className="size-3.5" />
+          </button>
+        )}
         <WorkspacePicker sessionID={sessionID} />
         <ThemePicker />
         <SessionMenu sessionID={sessionID} />

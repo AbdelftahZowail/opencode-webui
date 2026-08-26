@@ -311,6 +311,7 @@ function ShellRow({
             variant="ghost"
             size="icon-xs"
             title="Kill"
+            aria-label="Kill"
             onClick={(e) => {
               e.stopPropagation();
               onKill();
@@ -578,14 +579,20 @@ function PtyRow({
           <Cable />
           Connect
         </Button>
+        {/* Single destructive slot: DELETE /api/pty/{id} both kills a live
+            process and removes the record, so while RUNNING the affordance
+            reads Kill (Square) and is the kill control; once finished the
+            kill affordance is gone and the same slot degrades to record
+            cleanup (Trash2). */}
         <Button
           variant="ghost"
           size="icon-xs"
-          title="Delete"
+          title={pty.status === "running" ? "Kill" : "Delete"}
+          aria-label={pty.status === "running" ? "Kill terminal" : "Delete terminal record"}
           onClick={onDelete}
           className="text-(color:--surface-critical-strong)"
         >
-          <Trash2 />
+          {pty.status === "running" ? <Square /> : <Trash2 />}
         </Button>
       </div>
       <div className="mt-1 flex items-center gap-2 pl-5">

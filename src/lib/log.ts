@@ -21,11 +21,15 @@ export type LogArea =
   | "gate"
   | "run"
   | "session"
+  | "pane"
   | "send"
   | "model"
   | "load"
   | "poll"
+  | "queue"
   | "render"
+  | "panel"
+  | "chip"
   | "debug";
 
 function fmt(rest: unknown[]): string {
@@ -34,6 +38,7 @@ function fmt(rest: unknown[]): string {
 }
 
 function safeJson(v: unknown): string {
+  if (v instanceof Error) return v.message; // JSON.stringify(Error) is "{}"
   try {
     return JSON.stringify(v);
   } catch {

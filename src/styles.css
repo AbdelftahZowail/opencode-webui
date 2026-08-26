@@ -280,3 +280,25 @@ pre {
     @apply font-sans;
   }
 }
+
+/* Pane entrance: switching/focusing a conversation pane cross-fades the new
+   transcript (opacity 0→1 + 4px rise, ~130ms ease-out) instead of hard-swapping
+   it — GPU-only props so it never blocks paint. Pane roots carry .pane-surface. */
+.pane-surface {
+  animation: pane-enter 130ms ease-out;
+}
+@keyframes pane-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pane-surface {
+    animation: none;
+  }
+}

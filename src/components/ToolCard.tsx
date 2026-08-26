@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
-import type { ToolPart, ToolState } from "../api/types";
+import type { MessageInfo, ToolPart, ToolState } from "../api/types";
 import { getToolRenderer } from "../extensions/registry";
-import { selectSession } from "../store";
+import { selectSession, useStore } from "../store";
 import { getPrefs, subscribePrefs } from "../prefs";
 import { DiffView } from "./DiffView";
 import { Spinner } from "./ui";
@@ -191,6 +191,8 @@ function InlineTool({
   onClick,
   children,
   state,
+  runningLabel,
+  runningIcon,
 }: ToolProps & {
   icon: string;
   label?: ReactNode;
@@ -198,11 +200,23 @@ function InlineTool({
   complete?: boolean;
   onClick?: () => void;
   children?: ReactNode;
+  /**
+   * In-flight body override (status "running"/"streaming"): lets a row show
+   * a LIVE label (subagent: what the child session is doing) instead of the
+   * generic spinner+"pending…" line — the caller moves the spinner to the
+   * gutter via runningIcon so it sits where the ✓ lands on completion.
+   */
+  runningLabel?: ReactNode;
+  /** In-flight gutter replacement — e.g. a Spinner in place of the "│". */
+  runningIcon?: ReactNode;
 }) {
   const [showError, setShowError] = useState(false);
   const failed = !!error;
   const running = state.status === "running";
-  const body = running ? (
+  const inFlight = running || state.status === "streaming";
+  const body = inFlight && runningLabel !== undefined ? (
+    <span className="text-[var(--text-base)]">{runningLabel}</span>
+  ) : running ? (
     <span className="flex items-center gap-2 text-[var(--text-base)]">
       <Spinner className="size-3" />
       {pending}
@@ -235,7 +249,7 @@ function InlineTool({
             failed ? "text-[color:var(--surface-critical-strong)]" : "text-[var(--text-weaker)]"
           }`}
         >
-          {icon}
+          {inFlight && runningIcon !== undefined ? runningIcon : icon}
         </span>
         <span className="min-w-0 flex-1 truncate">{body}</span>
       </div>
@@ -511,15 +525,67 @@ function ShellTool(props: ToolProps) {
   );
 }
 
+/**
+ * Newest meaningful text from a session's stored messages — the same "what
+ * is this run doing" cue the RunsPanel rows show, derived read-only from
+ * the store. Newest-first, so live assistant progress beats the opening
+ * task prompt once the child starts talking.
+ */
+function latestMessageSnippet(messages: MessageInfo[] | undefined): string | undefined {
+  const list = messages ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const message = list[i];
+    if (!message) continue;
+    if (message.type === "user") {
+      if (message.text.trim()) return message.text;
+    } else if (message.type === "assistant") {
+      const text = message.content
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join(" ")
+        .trim();
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Subagent delegation row. While the child session runs, the label goes
+ * live: agent + the child's current title (or its latest message text,
+ * mirroring how RunsPanel names subagent rows), with a gutter spinner where
+ * the ✓ lands on completion. Clicking still opens the child session.
+ */
 function SubagentTool(props: ToolProps) {
   const agent = str(props.input.agent) ?? "subagent";
   const description = str(props.input.description);
   const sessionID = str(props.meta.sessionID) ?? str(props.input.sessionID);
 
+  // Resolve the child session like RunsPanel does (read-only): the polled
+  // session list first, then the authoritative details cache.
+  const child = useStore((s) =>
+    sessionID ? s.sessions.find((x) => x.id === sessionID) ?? s.sessionDetails[sessionID] : undefined,
+  );
+  const childMessages = useStore((s) => (sessionID ? s.messages[sessionID] : undefined));
+
+  const inFlight = props.state.status === "running" || props.state.status === "streaming";
+  const liveText = str(child?.title) ?? latestMessageSnippet(childMessages);
+  // Live title/snippet wins; description is the parsed-input fallback.
+  const detail = liveText ?? description;
+
+  const rowLabel = (detailText: string | undefined) => (
+    <>
+      <span className="font-medium">{agent}</span>
+      {detailText && <span> — {detailText}</span>}
+      {sessionID && <span className="ml-1 text-[10px] text-[var(--text-weaker)]">↗ open</span>}
+    </>
+  );
+
   return (
     <InlineTool
       {...props}
       icon={props.state.status === "completed" ? "✓" : "│"}
+      runningIcon={inFlight ? <Spinner className="size-3" /> : undefined}
       pending="Delegating…"
       onClick={
         sessionID
@@ -528,13 +594,8 @@ function SubagentTool(props: ToolProps) {
             }
           : undefined
       }
-      label={
-        <>
-          <span className="font-medium">{agent}</span>
-          {description && <span> — {description}</span>}
-          {sessionID && <span className="ml-1 text-[10px] text-[var(--text-weaker)]">↗ open</span>}
-        </>
-      }
+      label={rowLabel(description)}
+      runningLabel={inFlight ? (detail ? rowLabel(detail) : <>Delegating…</>) : undefined}
     />
   );
 }

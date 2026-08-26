@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Square } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api/client";
 import { Button } from "./ui/button";
@@ -44,6 +45,31 @@ export function TerminalView({
   const fitRef = useRef<FitAddon | null>(null);
   const ptyIDRef = useRef(ptyID);
   ptyIDRef.current = ptyID;
+  // Brief in-flight flag so the kill button can't double-fire while the
+  // DELETE request is round-tripping.
+  const [killing, setKilling] = useState(false);
+
+  /**
+   * Kill the PTY process behind this view (DELETE /api/pty/{id}). TUI
+   * parity: immediate, no confirm — the only thing lost is the running
+   * command. Post-kill behavior: closing the websocket fires ws.onclose,
+   * which already routes to onClose(), so the view closes itself exactly
+   * like a process that died on its own and the parent list refreshes to
+   * show the record gone. Failures surface through onError (same channel
+   * as connection loss); a 404 for an already-dead pty is still an error
+   * worth showing rather than silently pretending success.
+   */
+  const kill = async () => {
+    if (killing) return;
+    setKilling(true);
+    try {
+      await api.ptyDelete(ptyID);
+      wsRef.current?.close();
+    } catch (err) {
+      setKilling(false);
+      onError?.(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -151,9 +177,23 @@ export function TerminalView({
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
         <span className="truncate font-mono text-xs text-[var(--text-weak)]">{ptyID}</span>
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Close
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void kill()}
+            disabled={killing}
+            title="Kill process"
+            aria-label="Kill terminal"
+            className="text-[color:var(--surface-critical-strong)]"
+          >
+            <Square />
+            Kill
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </div>
       </div>
       <div ref={containerRef} className="min-h-0 flex-1 bg-[var(--background-base)] p-2" />
     </div>

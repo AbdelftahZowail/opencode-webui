@@ -1,6 +1,9 @@
 import { register } from "../../src/extensions/registry";
 import { useStore } from "../../src/store";
 
+/** Harvested by ui-extensions/index.ts for hot add/remove pruning. */
+export const id = "runtime-status";
+
 function RuntimeStatus() {
   const connected = useStore((s) => s.connected);
   const serviceOK = useStore((s) => s.serviceOK);
@@ -31,3 +34,8 @@ register({
   slot: "footer",
   render: () => <RuntimeStatus />,
 });
+
+// Self-accept so editing this extension hot-swaps it live: the module
+// re-executes, re-registers with the same id (registry swaps it in), and
+// SlotOutlets repaint — no page reload.
+if (import.meta.hot) import.meta.hot.accept();

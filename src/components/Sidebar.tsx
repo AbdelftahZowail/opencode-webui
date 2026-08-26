@@ -2,19 +2,19 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEven
 import {
   ChevronDown,
   FolderTree,
-  Inbox,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Puzzle,
   Search,
   Settings as SettingsIcon,
-  Terminal,
   X,
 } from "lucide-react";
 import {
   DRAFT_SESSION_ID,
   NEW_SESSION_HREF,
   loadMoreSessions,
+  prefetchSession,
   refreshSessions,
   selectSession,
   sessionHref,
@@ -25,21 +25,26 @@ import {
 import { api } from "../api/client";
 import type { SessionInfo } from "../api/types";
 import { searchContent } from "../lib/searchIndex";
-import { SlotOutlet } from "../extensions/registry";
+import { SEARCH_KBD, IS_MAC } from "../lib/platform";
+import { Slot, getPages, subscribeRegistry } from "../extensions/registry";
 import { timeAgo } from "./ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileExplorer } from "./FileExplorer";
-import { ShellPanel } from "./ShellPanel";
-import { InboxPanel } from "./InboxPanel";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
 const SECTION_LIMIT = 3;
 const CONTENT_GROUP_LIMIT = 20;
 /** Content/server search kicks in from this query length. */
 const SEARCH_DEBOUNCE_MIN_LENGTH = 2;
+/**
+ * Fired after an in-app pushState to an extension page route so App's
+ * pathname listener repaints (pushState alone fires no event). Mirrors
+ * EXT_NAVIGATE_EVENT in App.tsx.
+ */
+const EXT_NAVIGATE_EVENT = "webui:navigate";
 const SIDEBAR_DEFAULT_WIDTH = 288;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 480;
@@ -89,6 +94,8 @@ export function Sidebar() {
   const current = useStore((s) => s.currentSessionID);
   const connected = useStore((s) => s.connected);
   const pending = useStore((s) => s.pendingWorkspace);
+  const running = useStore((s) => s.running);
+  const queued = useStore((s) => s.queued);
   const [query, setQuery] = useState("");
   // Layer B (server title search) + layer C (message content search).
   const [serverHits, setServerHits] = useState<SessionInfo[]>([]);
@@ -101,7 +108,6 @@ export function Sidebar() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [resizing, setResizing] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
-  const [inboxOpen, setInboxOpen] = useState(false);
   const explorerSignal = useStore((s) => s.uiSignals.explorer);
 
   // /diff (and any other surface) can request the file explorer open.
@@ -110,6 +116,20 @@ export function Sidebar() {
   }, [explorerSignal]);
 
   const home = useMemo(() => findHome(sessions.map((s) => s.location?.directory)), [sessions]);
+
+  /** Running or queued both read as live here — visibility and markers. */
+  const isLive = (id: string) => !!running[id] || !!queued[id];
+
+  // Parents with a currently running/queued subagent child, for the row
+  // marker. Children aren't listed top-level but stay present in `sessions`.
+  const subagentActiveParents = useMemo(() => {
+    const parents = new Set<string>();
+    for (const s of sessions) {
+      if (s.parentID && isLive(s.id)) parents.add(s.parentID);
+    }
+    return parents;
+  }, [sessions, running, queued]);
+
   const trimmedQuery = query.trim();
   const normalizedQuery = trimmedQuery.toLowerCase();
 
@@ -329,8 +349,15 @@ export function Sidebar() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search sessions"
-                className="h-7 pl-7"
+                className={`h-7 pl-7 ${IS_MAC ? "pr-8" : "pr-12"}`}
               />
+              <kbd
+                aria-hidden
+                title={`Focus session search (${IS_MAC ? "Cmd+F" : "Ctrl+F"})`}
+                className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-[var(--border-weak-base)] bg-[var(--surface-inset-base)] px-1 py-px font-mono text-[9px] leading-[1.4] text-[var(--text-weaker)]"
+              >
+                {SEARCH_KBD}
+              </kbd>
             </div>
             {trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH && (
               <p className="mt-1 px-1 text-[10px] text-[var(--text-weaker)]" aria-live="polite">
@@ -358,6 +385,7 @@ export function Sidebar() {
                       updated={s.time.updated}
                       active={activeIDs.includes(s.id)}
                       selected={s.id === current}
+                      subagentsActive={subagentActiveParents.has(s.id)}
                       onSelect={() => void selectSession(s.id)}
                     />
                   ))}
@@ -371,7 +399,14 @@ export function Sidebar() {
               {groups.map((group) => {
                 const isCollapsed = !!collapsedWorkspaces[group.name];
                 const isShowingMore = !!showMore[group.name];
-                const visible = isCollapsed ? [] : isShowingMore ? group.list : group.list.slice(0, SECTION_LIMIT);
+                // Default visibility: the newest SECTION_LIMIT sessions PLUS
+                // every running/queued one not already among them — live work
+                // is never buried behind "Show more".
+                const visible = isCollapsed
+                  ? []
+                  : isShowingMore
+                    ? group.list
+                    : group.list.filter((s, i) => i < SECTION_LIMIT || isLive(s.id));
                 const moreCount = group.list.length - visible.length;
                 // The highlight keys off the real directory, not its display
                 // name ("~/code" vs "/home/z/code"); "Other" (no directory)
@@ -431,6 +466,7 @@ export function Sidebar() {
                           updated={s.time.updated}
                           active={active}
                           selected={s.id === current}
+                          subagentsActive={subagentActiveParents.has(s.id)}
                           onSelect={() => void selectSession(s.id)}
                         />
                       );
@@ -441,7 +477,7 @@ export function Sidebar() {
                         onClick={() => toggleShowMore(group.name)}
                         className="mt-1 w-full cursor-pointer rounded-md px-2.5 py-1.5 text-left text-xs text-[var(--text-weaker)] transition-colors hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
                       >
-                        Show {moreCount} more…
+                        {isShowingMore ? "Show less" : `Show ${moreCount} more…`}
                       </button>
                     )}
                   </section>
@@ -459,7 +495,7 @@ export function Sidebar() {
             </div>
           </ScrollArea>
 
-          <SidebarFooter onFiles={() => setFilesOpen(true)} onInbox={() => setInboxOpen(true)} />
+          <SidebarFooter onFiles={() => setFilesOpen(true)} />
         </>
       )}
 
@@ -468,28 +504,13 @@ export function Sidebar() {
           <button type="button" onClick={() => setFilesOpen(true)} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Files">
             <FolderTree className="size-4" />
           </button>
-          <ShellPanel
-            trigger={
-              <button
-                type="button"
-                className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground"
-                title="Shell"
-              >
-                <Terminal className="size-4" />
-              </button>
-            }
-          />
           <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Settings">
             <SettingsIcon className="size-4" />
           </button>
-          <button type="button" onClick={() => setInboxOpen(true)} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Inbox">
-            <Inbox className="size-4" />
-          </button>
         </div>
       )}
-      <SlotOutlet slot="sidebar" />
+      <Slot region="sidebar" />
       <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} />
-      <InboxPanel open={inboxOpen} onOpenChange={setInboxOpen} />
       <SettingsDialog />
       {!sidebarCollapsed && (
         <div
@@ -597,10 +618,8 @@ function CollapsedSidebar({
 
 function SidebarFooter({
   onFiles,
-  onInbox,
 }: {
   onFiles: () => void;
-  onInbox: () => void;
 }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-xs text-[var(--text-weak)]">
@@ -609,24 +628,56 @@ function SidebarFooter({
           <FolderTree className="size-3" />
           Files
         </button>
-        <ShellPanel
-          trigger={
-            <button type="button" className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
-              <Terminal className="size-3" />
-              Shell
-            </button>
-          }
-        />
         <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
           <SettingsIcon className="size-3" />
           Settings
         </button>
-        <button type="button" onClick={onInbox} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
-          <Inbox className="size-3" />
-          Inbox
-        </button>
+        {/* Extension pages: native /ext/{id} anchors styled like the footer
+            links above; hidden entirely when no pages are registered. */}
+        <ExtensionPagesNav />
       </div>
     </div>
+  );
+}
+
+/**
+ * Freshness for late/hot-swapped extension registrations — a local counter
+ * bumped by the registry's subscribe callback (the registry exposes no
+ * version snapshot for useSyncExternalStore). Same pattern as MessageItem's.
+ */
+function useRegistryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
+/** One extension page as a footer link: "/ext/{id}", tooltip = title/description. */
+function ExtensionPagesNav() {
+  const registryVersion = useRegistryVersion();
+  const pages = useMemo(() => getPages(), [registryVersion]);
+  if (pages.length === 0) return null;
+  return (
+    <>
+      {pages.map((page) => (
+        <a
+          key={page.id}
+          href={`/ext/${page.id}`}
+          title={page.description ? `${page.title} — ${page.description}` : page.title}
+          onClick={(event) => {
+            // Unmodified left-clicks stay in-app (pushState, no reload);
+            // modified clicks / middle clicks keep the native anchor behavior.
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            window.history.pushState({}, "", `/ext/${page.id}`);
+            window.dispatchEvent(new Event(EXT_NAVIGATE_EVENT));
+          }}
+          className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground"
+        >
+          <Puzzle className="size-3" />
+          {page.title}
+        </a>
+      ))}
+    </>
   );
 }
 
@@ -650,6 +701,8 @@ function CollapsedSessionLink({
       aria-label={title}
       aria-current={selected ? "page" : undefined}
       onClick={(event) => handleSessionLinkClick(event, onSelect)}
+      onMouseEnter={() => prefetchSession(id)}
+      onFocus={() => prefetchSession(id)}
       className={`relative inline-flex size-8 items-center justify-center rounded-md text-xs font-medium transition-colors ${
         selected ? "bg-[var(--surface-raised-base)] text-foreground" : "text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground"
       }`}
@@ -672,6 +725,7 @@ function SessionRow({
   updated,
   active,
   selected,
+  subagentsActive,
   onSelect,
 }: {
   id: string;
@@ -679,22 +733,34 @@ function SessionRow({
   updated: number;
   active: boolean;
   selected: boolean;
+  /** A subagent child of this session is currently running/queued. */
+  subagentsActive: boolean;
   onSelect: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
     <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
+      {/* Hover/focus warms the transcript cache so the click paints instantly. */}
       <a
         href={sessionHref(id)}
         title={title}
         aria-current={selected ? "page" : undefined}
         onClick={(event) => handleSessionLinkClick(event, onSelect)}
+        onMouseEnter={() => prefetchSession(id)}
+        onFocus={() => prefetchSession(id)}
         className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 pr-12 transition-colors ${
           selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
         }`}
       >
         <div className="flex min-w-0 max-w-full items-center gap-2">
+          {subagentsActive && (
+            <span
+              title="Subagents running"
+              aria-label="Subagents running"
+              className="size-1.5 shrink-0 animate-pulse rounded-full bg-[var(--surface-success-strong)]"
+            />
+          )}
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
           {active && (
             <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">

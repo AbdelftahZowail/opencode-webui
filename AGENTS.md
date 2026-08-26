@@ -37,7 +37,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/api/client.ts` | Typed REST client (one function per endpoint) |
 | `src/api/events.ts` | SSE parser for `/api/event` + reconnection |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
-| `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `PendingRequestsModal` (permissions/questions/forms), `ui` (primitives) |
+| `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip` (pending steers/queue), `PendingRequestsPanel` (permissions/questions/forms), `ui` (primitives) |
 | `src/extensions/registry.tsx` | The slot registry — the stable contract for UI extensions (do not change lightly) |
 | `ui-extensions/` | Feature folders; `index.ts` wires them in. Authoring guide: `ui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
@@ -56,18 +56,37 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 - Permission requests arrive as `permission.asked` events and are answered
   via `POST /api/session/{id}/permission/{requestID}/reply`
   (`once` | `always` | `reject`).
-- **Pending-request popup** (`PendingRequestsModal`): permissions, questions
-  and forms share ONE dialog, FIFO across ALL sessions (each entry gets a
-  `seq` stamp in the store). It is never filtered by the open session — a
-  request from another session still pops up, labelled with its title and an
-  amber "another session" notice plus a Switch button. Esc / overlay click /
-  ✕ cancel the head request (reject/cancel); focus lands on the box itself so
-  a stray Enter can't fire Reject. The old per-kind modals and the corner
-  "waiting in other sessions" chip are gone.
+- **Pending requests** (`PendingRequestsPanel` + corner chip): permissions,
+  questions and forms share ONE FIFO queue in the store (each entry gets a
+  `seq` stamp at insertion). The FOCUSED session's head request REPLACES the
+  composer slot — RunsPanel idiom, not a dialog — until answered; Esc
+  rejects/cancels it via a capture-phase key owner (a stacked dialog gets
+  Esc first), focus parks on the box so a stray Enter can't Reject, and the
+  panel never dismisses on outside clicks. Requests from OTHER sessions pop
+  the amber corner chip ("N waiting in other sessions — switch"). Queues
+  re-fetch every ~10s on the poll cadence, so a missed SSE event can never
+  leave an agent blocked unnoticed; `refreshQueues` fetches each endpoint
+  independently. On this engine version mid-task questions arrive as
+  `form.created` events with `metadata.kind === "question"` (fields q0…qn,
+  field-level `custom`/`multiple` flags, replies shaped `{"q0": value}`) and
+  there are NO question REST routes — `pendingRequests()` projects those
+  forms into question entries and reply/reject route through the form
+  endpoints (multi-select fields must answer as arrays, singles as strings;
+  a failed submit keeps the form pending and retryable); native
+  `question.asked` events feed the same shape for future engines.
 - Forms arrive via `/api/form/request` and are answered with
   `POST /api/session/{id}/form/{formID}/reply`.
 - When the UI sends a prompt it is fire-and-forget: `POST .../prompt` only
-  queues the message; the events drive everything rendered.
+  queues the message; the events drive everything rendered. While the
+  session is BUSY, a send never touches the transcript: it becomes a
+  durable engine inbox entry rendered by `QueueStrip` above the composer —
+  ⚡ steer (delivered at the next LLM-call boundary, the engine default)
+  vs ⏳ queue (parked until the turn ends; a post-turn drain failsafe flips
+  the head item to steer if the engine doesn't advance it). Rows can be
+  flipped between the two, deleted, or sent now (`inbox/{id}/steer` wakes
+  execution); the steer group offers interrupt-and-flush via
+  `interrupt?continue=true`. Enter = steer, Ctrl/Cmd+Enter = queue. Idle
+  sends keep the optimistic transcript bubble exactly as before.
 - **Model pinning**: new sessions are created WITH the resolved default
   (`resolveDefaultModel()` passed into `POST /session`) — creating model-less
   and switching after made the engine persist a "Model switched…" message in
@@ -82,6 +101,21 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 - **Composer drafts** (`src/lib/drafts.ts`): unsent input is silently saved
   per session (localStorage) on every change and restored when the session
   returns; cleared on send. No UI, no labels.
+- **Split view** (`panes` in the store): VS Code-style panes — the routed
+  main surface plus up to 3 pinned sessions, each a fully interactive
+  Conversation+Composer (sends/SSE are per-session; unfocused panes have no
+  live projection and catch up on the 2s poll). Exactly ONE pane is focused
+  and owns the global single-session machinery (live streaming, Esc
+  interrupt, dirty agent/model picks, RunsPanel/pending-panel composer slot,
+  type-anywhere); focusing a pane repoints `currentSessionID` WITHOUT
+  touching history/drafts/pane bindings, so switches paint instantly from
+  cache. Open via the right-edge rail button or `ctrl+\`
+  (`SplitPicker`: type-to-filter over sessions, or "Start new session" in
+  any project workspace via `createRealSession`); close with the pane's ✕;
+  layout persists in localStorage and prunes dead sessions at boot.
+  In-pane navigation (parent buttons, subagent chips, arrows) routes through
+  `navigateFocused`. Subagents are excluded from the agent picker
+  (`mode === "primary"` only) and from the SplitPicker list (parentID set).
 - **Session navigation**: session rows are native `/session/{id}` anchors.
   Unmodified left-clicks switch sessions in place through `pushState`; browser
   back/forward uses `popstate`, and direct session URLs load the conversation.
@@ -115,9 +149,18 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
    for one-shot catalog data (`models`, `agents`, `commands`, `skills`).
 3. **Hot reload contract**: editing any file under `src/` applies
    immediately via Vite HMR. Adding a new file may trigger one full reload
-   (Vite limitation) — that is expected. Editing `server/index.ts` restarts
-   the proxy automatically (`bun run --watch`), which drops the SSE stream;
-   it reconnects by itself. Never restart the opencode service for UI work.
+   (Vite limitation) — that is expected. Full-page reloads are COALESCED by
+   `coalesceFullReload()` in `vite.config.ts`: they wait ~1s of filesystem
+   quiet (hard 10s cap), so agent/human save bursts cost one reload instead
+   of many; root-level non-module files (`.md`, `docs/**`, `.codegraph/`)
+   aren't watched at all — they used to force spurious full reloads through
+   @tailwindcss/vite. Component files must export COMPONENTS ONLY: any
+   runtime non-component export disables React Fast Refresh for the whole
+   file and turns each save into an invalidation cascade (see
+   `filterSlashEntries` history in Composer.tsx). Editing `server/index.ts`
+   restarts the proxy automatically (`bun run --watch`), which drops the
+   SSE stream; it reconnects by itself. Never restart the opencode service
+   for UI work.
 4. **Styling** is Tailwind v4 utility classes, dark-first. New components
    should not introduce new CSS; `styles.css` is only for global chrome.
 5. **Keep it dependency-light.** React, react-markdown, shadcn/ui (vendored
@@ -130,31 +173,36 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 ## Extensions (not plugins — read this before adding UI features)
 
 Frontend features are **plain React code** living in `ui-extensions/<name>/`,
-registered against a small set of **stable slots**:
+auto-discovered by `ui-extensions/index.ts` (drop the folder, that's the
+install). They register against a small vocabulary of **kinds**:
 
-| Slot | Where | Use for |
+| Kind | What it does | Surfaces via |
 | --- | --- | --- |
-| `sidebar` | bottom of sidebar | quick actions, workspace info |
-| `footer` | bottom of window | status bars, counters |
-| `composer.replace` | replaces the input composer | custom prompt UIs |
-| `tool.renderer` | custom card for a tool name | pretty tool output |
+| `region` | renders into any `<Slot region="…">` marker in core markup | generated table: `bun run regions` |
+| `command` | palette action (`Extension commands` group) | command palette (⌘/ctrl-K) |
+| `message.decoration` | per-message extras (`render({ messageID, message }) => node \| null`) | under every message row |
+| `page` | full surface at auto-route `/ext/{id}` | sidebar links + direct URL |
+| `tool.renderer` | custom card for a tool name | tool cards |
+| legacy slots (`sidebar`, `footer`, `composer.replace`) | normalized onto regions internally | unchanged |
 
-- **Add a feature**: create the folder, add one import to
-  `ui-extensions/index.ts`, call `register({ id, slot, render })` from
-  `src/extensions/registry.tsx`. It appears via HMR instantly.
+- **Add a feature**: create `ui-extensions/<name>/index.tsx`, call
+  `register({ kind, ... })`, export its `id`, keep the trailing
+  `import.meta.hot.accept()` line. Edits hot-swap live; adding a folder is
+  hot; DELETING a folder costs one coalesced reload.
 - **Disable**: remove its id from the `enabled` list in
-  `ui-extensions/config.ts` (one line, instant, no reload).
-- **Remove**: delete the import line (and folder).- **Full app access**: extensions are the same build — they can use
+  `ui-extensions/config.ts`.
+- **Full app access**: extensions are the same build — they can use
   `useStore`, `api`, and any component. No plugin API to learn.
-- **The slot list is the contract.** Adding a slot means editing
-  `registry.tsx` + the slot render point in the app + this table + the
-  `ui-extensions/README.md` table. Never make a slot for a one-off feature —
-  core files stay small so upstream updates stay mergeable and extensions
-  riding on slots survive them.
+- **The kinds + region list is the contract** (`src/extensions/registry.tsx`
+  owns it). Adding a REGION MARKER is a one-line, always-welcome change —
+  drop `<Slot region="area.thing" />` where needed and run
+  `bun run regions`. Adding a new KIND is a deliberate contract change:
+  edit registry.tsx + document here and in `ui-extensions/README.md`.
+  Never build speculative kinds.
 - No plugin framework is intentional: plugins cost type safety, hot reload,
   and freedom, and their benefits (runtime toggles, third-party isolation)
   are not needed for a single-author codebase. Sharing with others = npm
-  package + one import line. See `ui-extensions/README.md`.
+  package + one folder. See `ui-extensions/README.md`.
 
 ## Extending (roadmap, dsh-inspired)
 

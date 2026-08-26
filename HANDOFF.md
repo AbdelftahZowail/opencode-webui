@@ -496,7 +496,7 @@ src/components/ShellPanel.tsx      shell mgmt + terminals (TerminalView)
 src/components/TerminalView.tsx    xterm terminal emulator
 src/components/FileExplorer.tsx    fs tree + preview + diff (DiffView)
 src/components/settings/           settings hub sections
-src/components/PendingRequestsModal.tsx  unified permissions/questions/forms popup (all sessions, FIFO)
+src/components/PendingRequestsPanel.tsx  permissions/questions/forms — replaces composer (own session), corner chip (others)
 src/components/InboxPanel.tsx      inbox queue/steer
 src/theme/themes.ts                7 themes (applyTheme :root:root injection)
 src/prefs.ts                       showReasoning/showToolDetails/showTimestamps prefs

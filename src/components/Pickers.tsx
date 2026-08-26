@@ -10,6 +10,7 @@ import {
   useStore,
 } from "../store";
 import { Search } from "lucide-react";
+import { formatModelRef } from "../lib/modelLabel";
 import { Button } from "./ui";
 
 function useMenu(onClose: () => void) {
@@ -283,7 +284,7 @@ export function ModelPicker({
         className="h-7 max-w-48 gap-1 px-2 font-mono text-[11px]"
       >
         <span className="truncate">
-          {current ? `${current.providerID}/${current.id}${current.variant && current.variant !== "default" ? `@${current.variant}` : ""}` : "model"}
+          {current ? formatModelRef(current) : "model"}
         </span>
       </Button>
       {open && (
@@ -484,7 +485,12 @@ export function AgentPicker({
     if (signal) setOpen(true);
   }, [signal]);
 
-  const visibleAgents = useMemo(() => agents.filter((a) => !a.hidden), [agents]);
+  // Only PRIMARY (top-level) agents are switchable from the composer —
+  // subagent-mode entries are engine task personas, not session agents.
+  const visibleAgents = useMemo(
+    () => agents.filter((a) => a.mode === "primary" && !a.hidden),
+    [agents],
+  );
   const listId = "menu-agents";
 
   const current: string | undefined = pendingAgent ?? detail?.agent ?? session?.agent ?? fallback ?? undefined;

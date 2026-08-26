@@ -30,6 +30,9 @@ export type ForkBoundary =
 
 export type CompactDelivery = "steer" | "queue";
 
+/** Prompt/inbox delivery: steer joins the active run, queue waits for the next turn. */
+export type PromptDelivery = CompactDelivery;
+
 export interface SessionExportData {
   info: SessionInfo;
   messages: MessageInfo[];
@@ -421,8 +424,15 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model }),
     }),
-  interrupt: (sessionID: string) =>
-    request<unknown>(`/api/session/${sessionID}/interrupt`, { method: "POST" }),
+  interrupt: (sessionID: string, continueRun?: boolean) => {
+    // `?continue=true` interrupts the current step AND resumes with pending
+    // steering input while queued prompts stay parked; omitted = plain abort.
+    const query = continueRun === undefined ? "" : `?continue=${continueRun}`;
+    return request<{ interrupted?: boolean }>(
+      `/api/session/${sessionID}/interrupt${query}`,
+      { method: "POST" },
+    );
+  },
   /** Stage a revert at a message (undo messages + file changes up to it). */
   revertStage: (sessionID: string, messageID: string) =>
     request<unknown>(`/api/session/${sessionID}/revert/stage`, {
@@ -449,18 +459,30 @@ export const api = {
   // messaging
   messages: (sessionID: string, limit = 100) =>
     request<MessagesResponse>(`/api/session/${sessionID}/message?limit=${limit}&order=desc`),
-  prompt: (sessionID: string, text: string) =>
-    request<unknown>(`/api/session/${sessionID}/prompt`, {
+  /**
+   * Send a prompt. `delivery` only matters while the session is busy: omit it
+   * for the engine default (busy ⇒ steer: joins the active run at the next
+   * LLM-call boundary). Resolves with the durable inbox item the engine
+   * admitted (id `^msg_`, delivery, payload) — not the run itself; events
+   * drive everything rendered.
+   */
+  prompt: (sessionID: string, text: string, delivery?: PromptDelivery) =>
+    request<{ data: InboxInfo }>(`/api/session/${sessionID}/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
-    }),
-  promptWithFiles: (sessionID: string, text: string, files?: PromptFile[]) =>
-    request<unknown>(`/api/session/${sessionID}/prompt`, {
+      body: JSON.stringify(delivery ? { text, delivery } : { text }),
+    }).then((res) => res.data),
+  promptWithFiles: (
+    sessionID: string,
+    text: string,
+    files?: PromptFile[],
+    delivery?: PromptDelivery,
+  ) =>
+    request<{ data: InboxInfo }>(`/api/session/${sessionID}/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, files }),
-    }),
+      body: JSON.stringify(delivery ? { text, files, delivery } : { text, files }),
+    }).then((res) => res.data),
   runCommand: (sessionID: string, command: string, args?: string) =>
     request<unknown>(`/api/session/${sessionID}/command`, {
       method: "POST",
@@ -485,8 +507,14 @@ export const api = {
 
   // forms
   pendingForms: () => request<{ location: unknown; data: FormInfo[] }>("/api/form/request"),
+  /** Per-session form listing — fresher than the global one (which can omit
+   * freshly created question-forms for minutes under load). */
+  sessionForms: (sessionID: string) =>
+    request<{ location: unknown; data: FormInfo[] }>(`/api/session/${sessionID}/form`),
   formState: (sessionID: string, formID: string) =>
-    request<FormState>(`/api/session/${sessionID}/form/${formID}/state`),
+    request<{ location: unknown; data: FormState }>(
+      `/api/session/${sessionID}/form/${formID}/state`,
+    ),
   replyForm: (sessionID: string, formID: string, answer: Record<string, string | number | boolean | string[]>) =>
     request<unknown>(`/api/session/${sessionID}/form/${formID}/reply`, {
       method: "POST",
@@ -519,12 +547,8 @@ export const api = {
     request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}/steer`, { method: "POST" }),
   inboxDelete: (sessionID: string, inboxID: string) =>
     request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}`, { method: "DELETE" }),
-  inboxPrompt: (sessionID: string, text: string) =>
-    request<unknown>(`/api/session/${sessionID}/prompt`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, delivery: "queue" }),
-    }),
+  /** Queue-delivered prompt (durable inbox item; wakes nothing by itself). */
+  inboxPrompt: (sessionID: string, text: string) => api.prompt(sessionID, text, "queue"),
 
   // filesystem & location
   location: () => request<LocationInfo>("/api/location"),

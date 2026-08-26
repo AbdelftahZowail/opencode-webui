@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, XIcon } from "lucide-react";
+import { Blocks, Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { ScrollArea } from "../ui/scroll-area";
+import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { isDisabled, setDisabled, subscribeExtGate } from "../../lib/extGate";
+import { getSettings, subscribeRegistry } from "../../extensions/registry";
+import { enabled as builtinExtensions } from "../../../ui-extensions/config";
 import { ConfigSection } from "./ConfigSection";
 import { IntegrationsSection } from "./IntegrationsSection";
 import { McpSection } from "./McpSection";
@@ -12,6 +16,7 @@ import { PluginsSection } from "./PluginsSection";
 import { ProvidersSection } from "./ProvidersSection";
 import { ServerSection } from "./ServerSection";
 import { WebsearchSection } from "./WebsearchSection";
+import { Empty, SectionHeader } from "./shared";
 
 let openRequest: ((section?: string) => void) | null = null;
 
@@ -27,6 +32,7 @@ const TABS = [
   { id: "integrations", label: "Integrations", icon: Plug },
   { id: "mcp", label: "MCP", icon: Boxes },
   { id: "plugins", label: "Plugins", icon: Puzzle },
+  { id: "extensions", label: "Extensions", icon: Blocks },
   { id: "config", label: "Config", icon: FileJson2 },
   { id: "websearch", label: "Websearch", icon: Globe },
   { id: "server", label: "Server", icon: Server },
@@ -60,7 +66,7 @@ export function SettingsDialog() {
           <DialogHeader className="pr-8">
             <DialogTitle>Settings</DialogTitle>
             <p className="text-xs text-[var(--text-weaker)]">
-              Providers · integrations · MCP · plugins · config
+              Providers · integrations · MCP · plugins · extensions · config
             </p>
           </DialogHeader>
 
@@ -91,6 +97,9 @@ export function SettingsDialog() {
               <TabsContent value="plugins">
                 <PluginsSection />
               </TabsContent>
+              <TabsContent value="extensions">
+                <ExtensionsSection />
+              </TabsContent>
               <TabsContent value="config">
                 <ConfigSection />
               </TabsContent>
@@ -113,4 +122,177 @@ export function SettingsDialog() {
       </DialogPortal>
     </Dialog>
   );
+}
+
+/** One runtime (plugin-shipped) extension as served by GET /api/webui/extensions. */
+interface RuntimeExtensionInfo {
+  id: string;
+  url: string;
+  source: string;
+}
+
+/**
+ * Freshness for late/hot-swapped extension registrations — same local-counter
+ * pattern as MessageItem's useRegistryVersion: the registry has no exported
+ * version snapshot to read via useSyncExternalStore.
+ */
+function useRegistryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
+/** Re-render signal when any extGate toggle flips (keeps switch rows honest). */
+function useExtGateVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeExtGate(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
+/**
+ * Settings › Extensions: runtime plugin-UI toggles, the static built-in list,
+ * and every settings section contributed by enabled extensions ("settings"
+ * kind). Mounted only while its tab is active (Radix unmounts inactive tabs).
+ */
+function ExtensionsSection() {
+  const gateVersion = useExtGateVersion();
+  const registryVersion = useRegistryVersion();
+  // null = first load in flight; failures degrade to [] (endpoint may not
+  // exist yet) rather than an error box — a missing list must not nag.
+  const [runtime, setRuntime] = useState<RuntimeExtensionInfo[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/webui/extensions");
+        if (!res.ok) throw new Error(String(res.status));
+        const json = (await res.json()) as { data?: RuntimeExtensionInfo[] };
+        if (!cancelled) setRuntime(json.data ?? []);
+      } catch {
+        if (!cancelled) setRuntime([]);
+      }
+    };
+    void load();
+    const poll = setInterval(load, 10_000);
+    // Catch up immediately on returning to a visible tab instead of waiting
+    // out the current interval tick.
+    const onVisibility = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  // Extension-contributed settings sections; re-read when registrations change.
+  const extSettings = useMemo(() => getSettings(), [registryVersion]);
+  void gateVersion; // flips re-render this component so isDisabled() re-reads
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <SectionHeader title="Extensions" note="plugin-shipped UI — toggle off to disable" />
+        {runtime === null ? null : runtime.length === 0 ? (
+          <Empty>No plugin extensions installed.</Empty>
+        ) : (
+          <div className="space-y-1">
+            {runtime.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2.5 py-1.5"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs text-[var(--text-strong)]">{item.id}</p>
+                  <p className="truncate text-[11px] text-[var(--text-weaker)]">{item.source}</p>
+                </div>
+                <Switch
+                  size="sm"
+                  checked={!isDisabled(item.id)}
+                  onCheckedChange={(next) => setDisabled(item.id, next)}
+                  aria-label={`Toggle ${item.id}`}
+                  title={isDisabled(item.id) ? "Disabled" : "Enabled"}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <SectionHeader title="Built-in extensions" />
+        {builtinExtensions.length > 0 && (
+          <div className="mb-1 flex flex-wrap gap-1">
+            {builtinExtensions.map((id) => (
+              <span
+                key={id}
+                className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2 py-1 font-mono text-xs text-[var(--text-strong)]"
+              >
+                {id}
+              </span>
+            ))}
+          </div>
+        )}
+        <p className="text-[11px] text-[var(--text-weaker)]">
+          built-in — manage in ui-extensions/config.ts
+        </p>
+      </div>
+
+      {extSettings.length > 0 && (
+        <div>
+          <SectionHeader title="Extension settings" note="contributed by enabled extensions" />
+          <div className="space-y-2">
+            {extSettings.map((section) => (
+              // Key includes the registry version: a hot-swapped registration
+              // remounts with a FRESH error boundary instead of staying stuck
+              // on the crashed fallback from the previous closure.
+              <SettingsSectionBoundary
+                key={`${registryVersion}:${section.id}`}
+                id={section.id}
+              >
+                <section className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] p-2.5">
+                  <h4 className="text-xs font-medium text-[var(--text-strong)]">{section.title}</h4>
+                  {section.description && (
+                    <p className="mt-0.5 text-[11px] text-[var(--text-weaker)]">{section.description}</p>
+                  )}
+                  <div className="mt-2">{section.render()}</div>
+                </section>
+              </SettingsSectionBoundary>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Crash isolation per contributed settings block — one broken extension must
+ * not blank the whole Extensions tab (mirrors registry SlotErrorBoundary).
+ */
+class SettingsSectionBoundary extends Component<
+  { id: string; children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(err: unknown) {
+    console.error(`[extensions] settings section "${this.props.id}" crashed:`, err);
+  }
+  render() {
+    if (this.state.failed) {
+      return (
+        <p className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2.5 py-2 text-xs text-[var(--text-weaker)]">
+          This extension's settings crashed.
+        </p>
+      );
+    }
+    return this.props.children;
+  }
 }

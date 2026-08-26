@@ -10,7 +10,8 @@
     "preview": "bun run scripts/preview.ts",
     "build": "vite build",
     "start": "NODE_ENV=production bun run server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "regions": "bun run scripts/list-regions.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

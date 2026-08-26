@@ -1,4 +1,4 @@
-import { closeRunsPanel, revealSubagentComposer } from "../store";
+import { closeRunsPanel, getState, pendingRequests, revealSubagentComposer } from "../store";
 
 /**
  * "Type anywhere" handoff: a printable keystroke pressed while keyboard
@@ -12,23 +12,29 @@ import { closeRunsPanel, revealSubagentComposer } from "../store";
  * strip replaces the input), reveal it and inject the character after it
  * mounts via the native value setter + a bubbling input event.
  */
-export function handCharToComposer(ch: string) {
+export function handCharToComposer(ch: string, paneKey = "main") {
+  // A pending permission/question/form REPLACES this session's composer;
+  // typing must not fight the panel for the slot (or yank the gate around).
+  const s = getState();
+  if (s.currentSessionID && pendingRequests(s).some((r) => r.req.sessionID === s.currentSessionID)) {
+    return;
+  }
   // Any surface that REPLACES the composer in its slot (the runs panel)
   // has to make way first; a no-op when it is closed.
   closeRunsPanel();
-  const existing = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  const existing = document.getElementById(`composer-input-${paneKey}`) as HTMLTextAreaElement | null;
   if (existing) {
     existing.focus({ preventScroll: true });
     return;
   }
-  closeAndInject(ch);
+  closeAndInject(ch, paneKey);
 }
 
 /** Composer missing (gate up / panel slot swap): mount it, then inject. */
-function closeAndInject(ch: string) {
+function closeAndInject(ch: string, paneKey: string) {
   let frames = 0;
   const step = () => {
-    const el = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    const el = document.getElementById(`composer-input-${paneKey}`) as HTMLTextAreaElement | null;
     if (!el) {
       // Gated subagent page: the gate strip has to come down first.
       if (frames++ === 2) revealSubagentComposer();

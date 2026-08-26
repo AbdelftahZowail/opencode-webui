@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Send, Terminal, X } from "lucide-react";
+import { ListTree, Send, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
@@ -23,11 +23,11 @@ import {
   loadSessionDetail,
   materializeDraft,
   newSession,
+  closeRunsPanel,
   openRunsPanel,
   redoSession,
   renameSession,
   requestInterrupt,
-  requestShellPanel,
   selectSession,
   sendCommand,
   sendPromptTo,
@@ -38,9 +38,11 @@ import {
   undoSession,
   useStore,
   getState,
+  type SendPromptOptions,
 } from "../store";
 import { loadDraft, saveDraft } from "../lib/drafts";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
+import { Slot } from "../extensions/registry";
 import { openSettings } from "./settings/SettingsDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
@@ -118,7 +120,7 @@ function isSubsequence(needle: string, haystack: string): boolean {
  * start with the typed query: prefix > alias-prefix > substring >
  * subsequence > description. Deterministic and dependency-free.
  */
-export function filterSlashEntries(entries: SlashEntry[], query: string): SlashEntry[] {
+function filterSlashEntries(entries: SlashEntry[], query: string): SlashEntry[] {
   const q = query.trim().toLowerCase();
   if (!q) return entries.slice(0, SLASH_MENU_LIMIT);
   const hits: { entry: SlashEntry; score: number }[] = [];
@@ -208,7 +210,25 @@ function useDismiss(active: boolean, onClose: () => void) {
   return ref;
 }
 
-export function Composer({ sessionID }: { sessionID: string }) {
+/** Caret to the very end of a textarea — for programmatic-focus paths. */
+function placeCaretEnd(el: HTMLTextAreaElement) {
+  const len = el.value.length;
+  el.setSelectionRange(len, len);
+}
+
+export function Composer({
+  sessionID,
+  paneKey = "main",
+  onNavigate,
+}: {
+  sessionID: string;
+  /** DOM id suffix — every split pane mounts its own composer. */
+  paneKey?: string;
+  /** In-pane navigation (fork, /sessions, agents menu, Backspace-to-parent). */
+  onNavigate?: (sessionID: string | null) => void;
+}) {
+  // Navigation inside a split must swap THAT pane, not the whole app.
+  const go = (sid: string | null) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
   // The unsent message is a silent per-session draft: seeded from storage,
   // saved on every change (typing, history walk, /undo restore), cleared on
   // send. No labels, no UI — switching away and back just works.
@@ -217,8 +237,10 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const prefs = usePrefs();
-  // The text present when the menu was last dismissed; the menu stays closed
-  // for exactly this text (upstream closes on select and reopens on typing).
+  // The active-region string present when the menu was last dismissed; the
+  // menu stays closed for exactly that region (upstream closes on select and
+  // reopens on typing). Keyed on the caret-anchored region rather than the
+  // whole buffer so dismissal still lands while trailing text exists.
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   const [pickedFiles, setPickedFiles] = useState<{ path: string; content?: string }[]>([]);
   /** Images staged for the next send (paste / drop / @-pick), as data URIs. */
@@ -239,6 +261,15 @@ export function Composer({ sessionID }: { sessionID: string }) {
   );
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /**
+   * Caret offset in the textarea. The slash menu anchors on the text BEFORE
+   * the caret, so caret movement alone (arrows, click) must reach the render.
+   */
+  const [caret, setCaret] = useState(0);
+  /** Pull the live caret into state — wired to change/select/click/keyup. */
+  function syncCaret(el: HTMLTextAreaElement) {
+    setCaret(el.selectionStart ?? el.value.length);
+  }
 
   // Per-session prompt history, TUI-style: derived from THIS session's real
   // persisted user messages (newest first), replacing the old global
@@ -282,35 +313,30 @@ export function Composer({ sessionID }: { sessionID: string }) {
   const activeIDs = useStore((s) => s.activeIDs);
   const runs = useRunningRuns(sessionLocation);
   const isChildRunning = (id: string) => runningMap[id] || activeIDs.includes(id);
-  const sortedChildren = useMemo(
-    () => [...children].sort((a, b) => Number(isChildRunning(b.id)) - Number(isChildRunning(a.id))),
-    [children, runningMap, activeIDs],
-  );
   const runningChildrenCount = children.filter((c) => isChildRunning(c.id)).length;
   const runningShellCount =
     runs.shells.filter((s) => s.status === "running").length + runs.ptys.filter((p) => p.status === "running").length;
-  const [runMenu, setRunMenu] = useState<"agents" | "shells" | null>(null);
-  const runMenuRef = useDismiss(runMenu !== null, () => setRunMenu(null));
+  // One chip for both run kinds, opening the shared RunsPanel (same as ↓).
+  const shellTotal = runs.shells.length + runs.ptys.length;
+  const runsLabel =
+    [
+      children.length > 0
+        ? runningChildrenCount > 0
+          ? `${runningChildrenCount}/${children.length} agents`
+          : `${children.length} agents`
+        : null,
+      shellTotal > 0
+        ? runningShellCount > 0
+          ? `${runningShellCount}/${shellTotal} shells`
+          : `${shellTotal} shells`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "runs";
+  const anyRunning = runningChildrenCount > 0 || runningShellCount > 0;
+  const runsPanelOpen = useStore((s) => s.runsPanelOpen);
   const [skillsMenu, setSkillsMenu] = useState(false);
   const skillsMenuRef = useDismiss(skillsMenu, () => setSkillsMenu(false));
-  const [openShellId, setOpenShellId] = useState<string | null>(null);
-  const [shellOutput, setShellOutput] = useState<Record<string, string>>({});
-
-  async function toggleShellOutput(id: string) {
-    if (openShellId === id) {
-      setOpenShellId(null);
-      return;
-    }
-    setOpenShellId(id);
-    if (!shellOutput[id]) {
-      try {
-        const res = await api.shellOutput(id, { limit: 8000 });
-        setShellOutput((prev) => ({ ...prev, [id]: res.data.output || "(no output)" }));
-      } catch {
-        setShellOutput((prev) => ({ ...prev, [id]: "(output unavailable)" }));
-      }
-    }
-  }
 
   useEffect(() => {
     void api.commands().then(setCommands);
@@ -319,8 +345,23 @@ export function Composer({ sessionID }: { sessionID: string }) {
     void loadAgents().then(setAgents);
   }, []);
 
+  /** Programmatic refocus: focus plus caret at the buffer's end. */
+  function refocusComposer() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    placeCaretEnd(el);
+    setCaret(el.value.length);
+  }
+
   useEffect(() => {
-    textareaRef.current?.focus();
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    placeCaretEnd(el);
+    // Keep the caret STATE honest too — a restored draft ending in "/" must
+    // not flash the slash menu from a stale offset-0 region.
+    setCaret(el.value.length);
   }, [sessionID]);
 
   // /undo hands the reverted message's text back to the composer (TUI puts
@@ -330,18 +371,28 @@ export function Composer({ sessionID }: { sessionID: string }) {
     if (revertPrompt) {
       setText(revertPrompt);
       consumeRevertPrompt();
+      setCaret(0);
       requestAnimationFrame(() => textareaRef.current?.setSelectionRange(0, 0));
     }
   }, [revertPrompt]);
 
+  // The slash menu keys off the ACTIVE REGION — the buffer from index 0 up to
+  // the caret. Typing "/" at position 0 of a longer buffer ("/" into "explain
+  // this") opens it exactly like a bare "/expl…" would; text after the caret
+  // is invisible to the trigger and to the filter query. With the caret at
+  // the end the region IS the whole buffer, so the classic rule is unchanged.
+  const caretPos = Math.min(caret, text.length);
+  const slashRegion = text.slice(0, caretPos);
   const isSlash =
     !shellMode &&
-    text.startsWith("/") &&
+    slashRegion.startsWith("/") &&
     // Upstream hides once a command word is followed by argument text
     // ("/init extra"); a lone trailing space stays open with an empty filter.
-    !/^\S+\s+\S/.test(text) &&
-    dismissedAt !== text;
-  const slashQuery = text.slice(1);
+    // Both tests read the region only, so "/init" stays open even when the
+    // full buffer carries arguments beyond the caret.
+    !/^\S+\s+\S/.test(slashRegion) &&
+    dismissedAt !== slashRegion;
+  const slashQuery = slashRegion.slice(1);
 
   const slashActions = useMemo<SlashAction[]>(
     () => [
@@ -355,7 +406,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
         name: "sessions",
         aliases: ["resume", "continue"],
         description: "Switch session",
-        run: () => void selectSession(null),
+        run: () => go(null),
       },
       {
         name: "undo",
@@ -390,7 +441,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
       {
         name: "fork",
         description: "Fork session",
-        run: () => void forkSession(sessionID, { type: "through" }).then((id) => void selectSession(id)),
+        run: () => void forkSession(sessionID, { type: "through" }).then((id) => go(id)),
       },
       {
         name: "export",
@@ -471,7 +522,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
     if (commandNames.has(skill.name)) {
       setText(`/${skill.name} `);
       setDismissedAt(`/${skill.name} `);
-      textareaRef.current?.focus();
+      refocusComposer();
     } else {
       setText("");
       void activateSkill(skill.id);
@@ -513,7 +564,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
         onSelect: () => {
           setText(`/${command.name} `);
           setDismissedAt(`/${command.name} `);
-          textareaRef.current?.focus();
+          refocusComposer();
         },
       });
     }
@@ -600,7 +651,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
       // Images can't ride the @file text-content flow — attach them as real
       // image attachments and remove the "@query" token from the buffer.
       setText(text.slice(0, idx) + text.slice(idx + 1 + (mentionQuery?.length ?? 0)));
-      textareaRef.current?.focus();
+      refocusComposer();
       api
         .fsReadBytes(entry.path, sessionLocation)
         .then((buf) => attachImageBytes(entry.path, buf))
@@ -618,7 +669,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
         )
         .catch(() => undefined);
     }
-    textareaRef.current?.focus();
+    refocusComposer();
   }
 
   /**
@@ -640,7 +691,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
     return sessionID || null;
   }
 
-  async function submit() {
+  async function submit(opts?: SendPromptOptions) {
     const value = text.trim();
     // Image-only sends (empty text) are allowed — the engine takes {text,
     // files} and a bare attachment prompt is meaningful.
@@ -702,10 +753,10 @@ export function Composer({ sessionID }: { sessionID: string }) {
         if (files.length > 0) {
           await sendPromptWithFiles(value, files);
         } else {
-          await sendPromptTo(sid, value);
+          await sendPromptTo(sid, value, opts);
         }
       } else {
-        await sendPromptTo(sid, value);
+        await sendPromptTo(sid, value, opts);
       }
       setText("");
       setPickedFiles([]);
@@ -718,16 +769,16 @@ export function Composer({ sessionID }: { sessionID: string }) {
       setText(value);
     } finally {
       setBusy(false);
-      textareaRef.current?.focus();
+      refocusComposer();
     }
   }
 
   const placeholder = shellMode
     ? "bash — esc to exit"
     : running
-      ? "Agent is working… (press Enter to queue)"
+      ? "Agent is working… — ↵ steers · ctrl+↵ queues"
       : queued
-        ? "Waiting for the agent… (press Enter to queue more)"
+        ? "Waiting for the agent… — ↵ steers · ctrl+↵ queues"
         : "Message the agent…";
 
   const hint = shellMode ? (
@@ -743,6 +794,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
     <p className="flex items-center gap-1.5">
       <Spinner className="size-3" />
       {running ? "Working… · esc to interrupt" : "Waiting…"}
+      {text.trim() ? " · ↵ steer · ctrl+↵ queue" : ""}
     </p>
   ) : (
     <p>
@@ -816,6 +868,8 @@ export function Composer({ sessionID }: { sessionID: string }) {
                   : "border-[color:var(--border-base)]"
               }`}
             >
+              {/* Extension region: very top inside the composer card. */}
+              <Slot region="composer.above" sessionID={sessionID} />
               {attachments.length > 0 && (
                 <div className="mb-1.5 flex flex-wrap items-start gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5">
                   {attachments.map((att) => (
@@ -842,7 +896,10 @@ export function Composer({ sessionID }: { sessionID: string }) {
                 </div>
               )}
               <FilePicker
-                open={mentionQuery !== undefined && !mentionDismissed}
+                // One autocomplete at a time: anchoring "/" at index 0 lets a
+                // leading slash region and a later @-query coexist in the
+                // buffer, and the slash menu owns the keys while it is open.
+                open={mentionQuery !== undefined && !mentionDismissed && !isSlash}
                 query={mentionQuery ?? ""}
                 location={sessionLocation}
                 onOpenChange={setMentionDismissed}
@@ -850,7 +907,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
               >
                 <div className="flex items-end gap-2">
                   <Textarea
-                    id="composer-input"
+                    id={`composer-input-${paneKey}`}
                     ref={textareaRef}
                     value={text}
                     placeholder={placeholder}
@@ -858,7 +915,11 @@ export function Composer({ sessionID }: { sessionID: string }) {
                     onChange={(e) => {
                       setHistIdx(null);
                       setText(e.target.value);
+                      syncCaret(e.currentTarget);
                     }}
+                    onSelect={(e) => syncCaret(e.currentTarget)}
+                    onClick={(e) => syncCaret(e.currentTarget)}
+                    onKeyUp={(e) => syncCaret(e.currentTarget)}
                     onPaste={(e) => {
                       // Image paste (screenshots): stage as attachments.
                       // Only intercept when an image is actually present so
@@ -885,11 +946,14 @@ export function Composer({ sessionID }: { sessionID: string }) {
                         if (e.key === "Escape") {
                           e.preventDefault();
                           // Upstream hide(): wipe the partial "/query" unless
-                          // it ends with a space.
-                          if (!text.endsWith(" ")) {
+                          // it ends with a space. Text AFTER the caret is the
+                          // user's own words — never wiped; there the
+                          // dismissal just pins to the active region so
+                          // editing the token again reopens the menu.
+                          if (caretPos === text.length && !text.endsWith(" ")) {
                             setText("");
                           } else {
-                            setDismissedAt(text);
+                            setDismissedAt(slashRegion);
                           }
                           return;
                         }
@@ -961,6 +1025,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                             setHistIdx(next);
                             const entry = historyTexts[next] ?? "";
                             setText(entry);
+                            setCaret(0);
                             requestAnimationFrame(() => el.setSelectionRange(0, 0));
                           }
                           return;
@@ -977,6 +1042,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                               e.preventDefault();
                               setHistIdx(null);
                               setText(histDraftRef.current);
+                              setCaret(histDraftRef.current.length);
                               requestAnimationFrame(() =>
                                 el.setSelectionRange(histDraftRef.current.length, histDraftRef.current.length),
                               );
@@ -986,6 +1052,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                               setHistIdx(next);
                               const entry = historyTexts[Math.max(next, 0)] ?? "";
                               setText(entry);
+                              setCaret(entry.length);
                               requestAnimationFrame(() => el.setSelectionRange(entry.length, entry.length));
                             }
                           }
@@ -1026,7 +1093,22 @@ export function Composer({ sessionID }: { sessionID: string }) {
                       // this textarea owns focus, so it is mirrored here.
                       if (e.key === "Backspace" && !text && parentID) {
                         e.preventDefault();
-                        void selectSession(parentID);
+                        go(parentID);
+                        return;
+                      }
+                      if (
+                        e.key === "Enter" &&
+                        !e.shiftKey &&
+                        !e.altKey &&
+                        (e.ctrlKey || e.metaKey) &&
+                        !isSlash &&
+                        mentionQuery === undefined
+                      ) {
+                        // Explicit QUEUE: park after the current turn instead of
+                        // steering into the next LLM call. Shell mode keeps its
+                        // own meaning for Enter — ctrl+↵ there stays a plain run.
+                        e.preventDefault();
+                        void submit(shellMode ? undefined : { delivery: "queue" });
                         return;
                       }
                       if (e.key === "Enter" && !e.shiftKey) {
@@ -1043,7 +1125,7 @@ export function Composer({ sessionID }: { sessionID: string }) {
                       size="sm"
                       disabled={!text.trim() && attachments.length === 0}
                       onClick={() => void submit()}
-                      title={running ? "Queue (Enter)" : "Send (Enter)"}
+                      title={running ? "Send (↵ steer · ctrl+↵ queue)" : "Send (Enter)"}
                     >
                       <Send />
                       Send
@@ -1052,136 +1134,20 @@ export function Composer({ sessionID }: { sessionID: string }) {
                 </div>
               </FilePicker>
               <div className="mt-1 flex items-center gap-1 border-t border-[color:var(--border-weak-base)] px-1 pt-1">
-                {(children.length > 0 || runs.shells.length + runs.ptys.length > 0) && (
-                  <div ref={runMenuRef} className="relative flex items-center gap-1">
-                    {children.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setRunMenu(runMenu === "agents" ? null : "agents")}
-                        title="Subagent sessions — pick one to open"
-                        className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
-                          runMenu === "agents" || runningChildrenCount > 0
-                            ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
-                            : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                        }`}
-                      >
-                        <ChevronRight className="size-3" />
-                        {runningChildrenCount > 0
-                          ? `${runningChildrenCount}/${children.length} agents`
-                          : `${children.length} agents`}
-                      </button>
-                    )}
-                    {runs.shells.length + runs.ptys.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setRunMenu(runMenu === "shells" ? null : "shells")}
-                        title="Running & backgrounded shell commands, plus terminals"
-                        className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
-                          runMenu === "shells" || runningShellCount > 0
-                            ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
-                            : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                        }`}
-                      >
-                        <Terminal className="size-3" />
-                        {runningShellCount > 0
-                          ? `${runningShellCount}/${runs.shells.length + runs.ptys.length} shells`
-                          : `${runs.shells.length + runs.ptys.length} shells`}
-                      </button>
-                    )}
-                    {runMenu !== null && (
-                      <div className="absolute bottom-full left-0 z-50 mb-1 max-h-80 w-80 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl">
-                        {runMenu === "agents" &&
-                          sortedChildren.map((c) => {
-                            const active = isChildRunning(c.id);
-                            return (
-                              <button
-                                key={c.id}
-                                type="button"
-                                onClick={() => {
-                                  setRunMenu(null);
-                                  void selectSession(c.id);
-                                }}
-                                className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
-                              >
-                                <span
-                                  className={`size-1.5 shrink-0 rounded-full ${active ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"}`}
-                                />
-                                <span className="min-w-0 flex-1 truncate text-[color:var(--text-strong)]">
-                                  {c.title || c.id}
-                                </span>
-                                {c.agent && (
-                                  <span className="font-mono text-[10px] text-[color:var(--text-weaker)]">{c.agent}</span>
-                                )}
-                              </button>
-                            );
-                          })}
-                        {runMenu === "shells" && (
-                          <>
-                            <p className="px-2.5 pt-2 text-[10px] uppercase tracking-wide text-[color:var(--text-weaker)]">
-                              Shell commands — click for output
-                            </p>
-                            {runs.shells.map((s) => (
-                              <div key={s.id}>
-                                <button
-                                  type="button"
-                                  onClick={() => void toggleShellOutput(s.id)}
-                                  className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
-                                >
-                                  <span
-                                    className={`size-1.5 shrink-0 rounded-full ${
-                                      s.status === "running" ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"
-                                    }`}
-                                  />
-                                  <span className="min-w-0 flex-1 truncate font-mono text-[color:var(--text-strong)]">
-                                    {s.command || s.shell}
-                                  </span>
-                                  <span className="font-mono text-[10px] text-[color:var(--text-weaker)]">
-                                    {s.pid ? `pid ${s.pid}` : s.status}
-                                  </span>
-                                </button>
-                                {openShellId === s.id && (
-                                  <pre className="mx-2 mb-1.5 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-[color:var(--border-weak-base)] bg-[color:var(--background-strong)] p-2 font-mono text-[10px] text-[color:var(--text-weak)]">
-                                    {shellOutput[s.id] ?? "loading…"}
-                                  </pre>
-                                )}
-                              </div>
-                            ))}
-                            {runs.shells.length === 0 && (
-                              <p className="px-2.5 py-1.5 text-xs text-[color:var(--text-weaker)]">No shell commands</p>
-                            )}
-                            {runs.ptys.length > 0 && (
-                              <>
-                                <p className="border-t border-[color:var(--border-weak-base)] px-2.5 pt-2 text-[10px] uppercase tracking-wide text-[color:var(--text-weaker)]">
-                                  Terminals
-                                </p>
-                                {runs.ptys.map((p) => (
-                                  <button
-                                    key={p.id}
-                                    type="button"
-                                    onClick={() => {
-                                      setRunMenu(null);
-                                      requestShellPanel();
-                                    }}
-                                    className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-2 text-left text-xs transition-colors hover:bg-[color:var(--surface-base-hover)]"
-                                  >
-                                    <span
-                                      className={`size-1.5 shrink-0 rounded-full ${
-                                        p.status === "running" ? "bg-emerald-500" : "bg-[color:var(--text-weaker)]"
-                                      }`}
-                                    />
-                                    <span className="min-w-0 flex-1 truncate text-[color:var(--text-strong)]">
-                                      {p.title || p.command}
-                                    </span>
-                                  </button>
-                                ))}
-                              </>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                <button
+                  type="button"
+                  data-runs-panel-trigger
+                  onClick={() => (runsPanelOpen ? closeRunsPanel() : openRunsPanel())}
+                  title={runsPanelOpen ? "Close subagents & shells (↓)" : "Subagents & shells — opens the runs panel (↓)"}
+                  className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                    anyRunning
+                      ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
+                      : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                  }`}
+                >
+                  <ListTree className="size-3" />
+                  {runsLabel}
+                </button>
                 <button
                   type="button"
                   title="Shell mode (! command)"
@@ -1206,6 +1172,9 @@ export function Composer({ sessionID }: { sessionID: string }) {
                   </span>
                 )}
               </div>
+              {/* Extension region: right after the meta row (the bottom
+                  border area of the composer card). */}
+              <Slot region="composer.below" sessionID={sessionID} />
             </div>
           </PopoverAnchor>
           <PopoverContent

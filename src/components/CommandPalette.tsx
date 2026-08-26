@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette } from "lucide-react";
+import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette, Puzzle } from "lucide-react";
+import { getCommands } from "../extensions/registry";
 import {
   commandMove,
   commandSelectActive,
@@ -41,6 +42,7 @@ const THEMES_URL = "../theme/themes";
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const sessions = useStore((s) => s.sessions);
+  const currentSessionID = useStore((s) => s.currentSessionID);
   const prefs = usePrefs();
   const [themes, setThemes] = useState<{
     list: ThemeEntry[];
@@ -77,6 +79,15 @@ export function CommandPalette() {
   const sortedSessions = [...sessions]
     .filter((s) => !s.parentID)
     .sort((a, b) => b.time.updated - a.time.updated);
+
+  // Extension commands are read at render time (re-read on every palette
+  // open); no subscription/polling — a mid-open registry change self-corrects
+  // on the next open. The typeof guard rides out HMR ordering while the
+  // registry module is being reworked.
+  const extensionCommands =
+    typeof getCommands === "function"
+      ? getCommands()
+      : [];
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
@@ -146,6 +157,32 @@ export function CommandPalette() {
             </CommandItem>
           ))}
         </CommandGroup>
+        {extensionCommands.length > 0 && (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Extension commands">
+              {extensionCommands.map((c) => (
+                <CommandItem
+                  key={c.id}
+                  // Explicit value so the query matches BOTH title and id
+                  // (text content alone only carries the title).
+                  value={`${c.title} ${c.id}`}
+                  onSelect={() => {
+                    setOpen(false);
+                    try {
+                      c.run({ sessionID: currentSessionID ?? undefined });
+                    } catch (err) {
+                      console.error("[extensions] command failed:", err);
+                    }
+                  }}
+                >
+                  <Puzzle />
+                  <span className="truncate">{c.title}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        )}
         {themes && (
           <>
             <CommandSeparator />

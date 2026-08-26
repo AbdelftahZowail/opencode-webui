@@ -273,6 +273,8 @@ export interface FileAttachment {
 
 export interface QuestionOption {
   label: string;
+  /** Wire value sent back in answers (form-channel questions; defaults to label). */
+  value?: string;
   description: string;
 }
 
