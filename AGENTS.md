@@ -292,14 +292,10 @@ treats the step events as the run lifecycle and keeps an ordered live projection
   until its 20s fuse. Active runs masked it (constant bytes). Fix:
   `idleTimeout: 0` in `Bun.serve` — liveness is owned by heartbeats, the
   browser fuse, and `req.signal` aborts. This also lets `session.wait`
-  long-polls hold (they were silently churning on 10s kills).
-- **Wedge instrumentation** (TEMPORARY — remove once the fix has soak time):
-  `[ssehop]` lines in the debug timeline count bytes at each hop —
-  `bun c#N` (server/index.ts: engine→proxy body stream, tagged upstream-
-  pending vs downstream-backpressure) and `vite c#N` (vite.config.ts: both
-  sides of vite's pipe). Silence logs at ≥17s (healthy never crosses it),
-  close lines always. Keep while confidence builds; delete the helpers when
-  satisfied.
+  long-polls hold (they were silently churning on 10s kills). The temporary
+  `[ssehop]` per-hop byte counters that proved this were removed after a
+  clean soak (zero wedges since the fix; they lived in `server/index.ts`
+  and `vite.config.ts`, see git history if the pattern ever returns).
 - **Fetch scheduler** (`src/lib/scheduler.ts`): the ONLY owner of recurring
   timers. One 1s loop picks a tier — LIVE ~2s (anything running/queued/
   pending/live, or the SSE byte-age is stale), IDLE ~12s (visible, quiet tab),

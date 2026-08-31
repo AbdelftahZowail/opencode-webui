@@ -157,8 +157,9 @@ Frontend log `/tmp/webui-debug.log` (grep `\[sse\]`), server log
 > Post-fix: zero kills, a 40s fully-silent `session.wait` long-poll holds
 > (pre-fix it churned on 10s kills), connections survive indefinitely. Why
 > §6's earlier direct-curl probe survived: likely a Bun upgrade between
-> sessions changed/enabled the default. The `[ssehop]` helpers stay in
-> temporarily to confirm no recurrence, then get deleted.
+> sessions changed/enabled the default. The temporary `[ssehop]` helpers were
+> removed after a clean soak (zero wedges since the fix) — recover them from
+> git history (`cd6085f`) if the pattern ever returns.
 
 **Theory**: something in browser → vite(5173) → proxy(4097) → service reaps
 SSE connections that are silent longer than N seconds, where N < 15s heartbeat
