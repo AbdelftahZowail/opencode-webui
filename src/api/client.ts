@@ -394,6 +394,47 @@ export const api = {
   },
   activeSessions: () =>
     request<{ data: Record<string, { type: "running" }> }>("/api/session/active"),
+  /**
+   * POST /api/session/{sessionID}/wait — engine-native long-poll that
+   * resolves when the session's agent loop goes idle. Returns the RAW
+   * status on purpose: 204 = idle truth, 404 = session gone, 503 =
+   * unavailable, -1 = network error/abort. Only 204 is an idle signal —
+   * everything else is "unknown", so nothing here throws.
+   */
+  sessionWait: (sessionID: string, signal?: AbortSignal): Promise<number> =>
+    fetch(`/api/session/${encodeURIComponent(sessionID)}/wait`, { method: "POST", signal }).then(
+      (r) => r.status,
+      () => -1,
+    ),
+  /**
+   * GET /api/experimental/session/{sessionID}/log?follow=false — cursor
+   * bootstrap for the engine's DURABLE per-session event log (spike-verified:
+   * durable across restarts; head cursor works; `follow=true` streams
+   * nothing on beta-18684, so this is plumbing for a later swap, not a
+   * catch-up channel yet). Returns the head sequence, or null when the
+   * endpoint is unavailable.
+   */
+  sessionLogHead: async (sessionID: string): Promise<number | null> => {
+    try {
+      const res = await fetch(
+        `/api/experimental/session/${encodeURIComponent(sessionID)}/log?follow=false`,
+      );
+      if (!res.ok) return null;
+      const text = await res.text();
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        try {
+          const evt = JSON.parse(line.slice(5).trim()) as { type?: string; seq?: number };
+          if (evt.type === "log.synced" && typeof evt.seq === "number") return evt.seq;
+        } catch {
+          /* skip malformed line */
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  },
   createSession: (body: { title?: string | null; agent?: string | null; model?: ModelRef | null; location?: { directory: string } | null }) =>
     request<{ data: SessionInfo }>("/api/session", {
       method: "POST",

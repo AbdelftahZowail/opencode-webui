@@ -231,6 +231,7 @@ install). They register against a small vocabulary of **kinds**:
 | VCS status badge | vcs routes | ✅ done (in file explorer) |
 | Inbox/steering while busy | session inbox routes | ✅ done |
 | Question dialog (mid-task) | question routes | ✅ done |
+| Idle wait (engine-native run end) | `POST /api/session/{id}/wait` | ✅ done (per-running-session long-poll in the store) |
 | UI extensions (slots) | n/a (frontend convention) | ✅ done |
 
 The "everything the engine can do must eventually be reachable from the UI"
@@ -300,6 +301,15 @@ treats the step events as the run lifecycle and keeps an ordered live projection
   immediately, otherwise after 3 tries) are retired (flags, live entries,
   pending rows, replay cursor) so a deleted session can't 404-loop forever. A
   finished answer can never be lost.
+- **`session.wait` long-poll** (`store.ensureSessionWait`): one loop per
+  running session — `POST /api/session/{id}/wait` resolves 204 the moment
+  the engine's agent loop goes idle (spike-verified: completion, already-
+  idle, and failed runs all resolve; never hangs). On 204 with a still-set
+  running flag we missed the terminal event (dead SSE): clear it, settle
+  history. Armed on execution/step events, on sends (idle + busy paths),
+  and on active-map discovery — the floor under the §7 staircase. Anything
+  but 204 re-arms; 404 retires. `queued` is never cleared by wait (parked
+  inbox items resolve via `reconcileInbox`).
 - **`settleLiveMessages`**: on execution end, reload history; if live
   assistants aren't persisted yet, keep them visible and retry once after
   1.5s.

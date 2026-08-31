@@ -75,10 +75,8 @@ await j(`/api/session/${sid}/prompt`, { method: "POST", body: JSON.stringify({ t
 const promptAt = Date.now();
 let appearedAt: number | null = null;
 let entryShape: Record<string, unknown> | null = null;
-const waitP = fetch(`${B}/api/session/${sid}/wait`, { method: "POST", headers: H as never, signal: AbortSignal.timeout(90_000) }).then((r) => r.status).catch((e) => -1);
-let waitResolved = false;
+const waitP = fetch(`${B}/api/session/${sid}/wait`, { method: "POST", headers: H as never, signal: AbortSignal.timeout(90_000) }).then((r) => r.status).catch(() => -1);
 const waitStatus = await waitP;
-waitResolved = true;
 const waitAt = Date.now();
 console.log(`[wait] status=${waitStatus} after ${((waitAt - promptAt) / 1000).toFixed(1)}s`);
 

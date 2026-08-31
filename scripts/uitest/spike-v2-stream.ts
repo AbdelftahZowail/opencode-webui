@@ -148,7 +148,7 @@ const idleWait = await fetch(`${B}/api/session/${sid}/wait`, { method: "POST", h
 console.log(`[B] wait on idle session -> status=${idleWait.status} after ${((Date.now() - t2) / 1000).toFixed(1)}s ${idleWait.status === -1 ? "(client timeout)" : ""}`);
 
 // ---- resume WITHOUT gap -------------------------------------------------
-const lastSeq = seen.length ? seen[seen.length - 1].seq : null;
+const lastSeq = seen.length ? (seen[seen.length - 1]?.seq ?? null) : null;
 const beforeCount = seen.length;
 followAbort.abort();
 await followPromise;

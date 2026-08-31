@@ -79,14 +79,9 @@ export function sseStale(): boolean {
   return sseByteAgeMs() > SSE_STALE_MS;
 }
 
-// When the most recent stream attempt ended (close, error, or stall). The
-// store uses the gap between attempts to decide whether a reconnect replay
-// pull can have missed anything (a sub-second blip cannot).
-let lastStreamEndAt = 0;
-
 export async function connectEvents(
   onEvent: (env: EventEnvelope) => void,
-  opts: { signal?: AbortSignal; onOpen?: (info: { gapMs: number }) => void } = {},
+  opts: { signal?: AbortSignal; onOpen?: () => void } = {},
 ): Promise<void> {
   while (!opts.signal?.aborted) {
     let stalled = false;
@@ -95,11 +90,7 @@ export async function connectEvents(
       if (!res.ok || !res.body) throw new Error(`event stream: ${res.status}`);
       log("sse", "connected", res.status);
       lastByteAt = Date.now();
-      opts.onOpen?.({
-        // First connect: Infinity — the session-adopt path owns late-join
-        // catch-up and a replay pull is always correct at boot.
-        gapMs: lastStreamEndAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - lastStreamEndAt,
-      });
+      opts.onOpen?.();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -166,14 +157,12 @@ export async function connectEvents(
       }
       // Stream ended cleanly (server closed). Log it — this path used to be
       // silent, which hid reconnect churn behind bare "connected" lines.
-      lastStreamEndAt = Date.now();
       clearTimeout(stallTimer);
       reader.releaseLock();
       if (stalled) throw new Error("event stream stalled");
       log("sse", "stream ended cleanly; reconnecting");
     } catch (err) {
       if (opts.signal?.aborted) return;
-      lastStreamEndAt = Date.now();
       log("sse", "reconnect", String(err));
       console.warn("[events] stream ended, reconnecting:", err);
     }

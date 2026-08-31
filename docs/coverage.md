@@ -1,7 +1,7 @@
 # API coverage — have / don't have / why
 
 Source of truth for the HTTP contract: `docs/reference/openapi.json`
-(snapshot of the running service's `/openapi.json`, 111 paths as of this doc).
+(snapshot of the running service's `/openapi.json`, 115 paths as of this doc).
 Refresh: `bun run scripts/fetch-openapi.ts` (via `Service.ensure()` like the proxy).
 Diff against live: `bun run scripts/diff-openapi.ts` (also `--json`, `--check` for CI).
 Raw diff: `git diff docs/reference/openapi.json`.
@@ -41,10 +41,10 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | `POST /api/generate` | `v2.generate.text` | `api.generate` | Stateless one-shot generation without session/tools — chat (`session/prompt`) supersedes it. Called from plugin/tool contexts (`ctx.generate.text`) where needed. |
 | `GET /api/reference` | `v2.reference.list` | `api.referenceList` | Engine reference bookkeeping (local/git references) — opaque internals, no user action. |
 | `GET /api/debug/location`, `DELETE /api/debug/location` | `v2.debug.location.*` | proxied only | Debug — evict loaded location. |
-| `GET /api/experimental/session/{id}/log` | `v2.session.log` | proxied only | Experimental session log (TUI diagnostic). |
+| `GET /api/experimental/session/{id}/log` | `v2.session.log` | `api.sessionLogHead` | Engine's DURABLE per-session event log with an aggregate-seq cursor. Spike-verified (2026-08-31, `scripts/uitest/spike-v2-log.ts`): durable across process lifetimes (an 8-day-old session serves its head seq), `follow=false` returns a `log.synced` head marker for ANY `after`, but `follow=true` streams ZERO bytes on beta-18684 — no replay, no tail. Wired as dormant cursor tracking (`store.logHeadSeq`, probed on adopt/reconnect); the proxy recorder remains the catch-up channel until a build ships a working follow. |
 | `GET /api/experimental/migration/v1` | `v2.experimental.migration.v1.status` | proxied only | V1 migration status. |
 | `POST /api/experimental/integration/wellknown` | `v2.experimental.integration.wellknown.add` | integration well-known | Experimental integration discovery. |
-| `GET /api/session/{id}/view` | `v2.session.view {idle}` | (add on next client pass) | Marks viewer's idle transition as viewed — viewer bookkeeping, no webapp action needed yet; wire if we add viewed/idle badges. |
+| `POST /api/session/{id}/view` | `v2.session.view {idle}` | (add on next client pass) | Marks viewer's idle transition as viewed — spike-verified accepted (204) but with no observable effect on this build, and the §4.4 active-map lag it would address did NOT reproduce (session left `/session/active` within one poll of `wait` resolving). Wire if we add viewed/idle badges or the lag returns. |
 | `GET /api/session/stats` | `v2.session.stats ?from&to&project&timezone&tools` | (add on next client pass) | Aggregate activity/usage/tool reliability — dashboard/telemetry surface, deliberate follow-up (see Extending checklist). |
 | `POST /api/workspace`, `DELETE /api/workspace/{id}` | `v2.workspace.create/destroy` | (add on next client pass) | Logical workspace lifecycle (idempotent create/destroy `{id?, provider}`) — we use `project` today; track for future workspace UI. |
 
@@ -54,10 +54,13 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | --- | --- | --- |
 | persistent-pty | `GET/POST /api/experimental/persistent-pty/*`, `GET/POST /api/experimental/session/{id}/terminal` | Prototype persistent PTY (`server.experimental.persistentPty.*`) — keep `src/api/client.ts:642` location-scoped `pty` as canonical; revisit if promoted from experimental. |
 
-## What changed vs last snapshot (99 → 111 paths)
+## What changed vs last snapshot (99 → 115 paths)
 
 Snapshot `docs/reference/openapi.json` at `2026-08-16` was 99 paths (`@opencode-ai/client@0.0.0-next-17444`).
-Refreshed to 111 (live as of this doc, `@opencode-ai/client@?` bump pending):
+Refreshed to 111 (`2026-08-26`), then to 115 (live as of 2026-08-31):
+
+- Added 111 → 115: `POST /api/credential/{id}/activate`, `POST /api/experimental/persistent-pty/handoff`,
+  `GET /api/experimental/session/{id}/terminal/read`, `GET /api/vcs/base`. None surfaced in the webapp yet.
 
 - Added: `GET /api/session/stats`, `POST /api/session/{id}/view` (session group),
   `POST /api/workspace` + `DELETE /api/workspace/{id}` (new `workspace` tag),

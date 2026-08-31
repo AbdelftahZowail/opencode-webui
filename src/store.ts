@@ -579,11 +579,14 @@ export async function refreshSessions() {
     // The active map is the only signal that a session STARTED elsewhere
     // (another tab, engine-side) — keep adding it, but never over a local
     // end we just recorded: the map is laggy, our end is not.
+    const newlyActive: string[] = [];
     for (const id of activeKeys) {
       if (running[id]) continue;
       if (now - (lastRunEnd.get(id) ?? 0) < ACTIVE_READD_SUPPRESS_MS) continue;
       running[id] = true;
+      newlyActive.push(id);
     }
+    for (const id of newlyActive) ensureSessionWait(id);
     // Watchdog: the engine says idle AND no live event for a fair window →
     // the flag is stale (its clearing event was missed). Clear it.
     for (const [sid, on] of Object.entries(running)) {
@@ -2018,6 +2021,7 @@ export function handleEvent(event: V2Event) {
         running: { ...state.running, [data.sessionID]: true },
         queued: { ...state.queued, [data.sessionID]: false },
       });
+      ensureSessionWait(data.sessionID);
       if (forLive(data.sessionID)) ensureLiveAssistant(data.sessionID, data.assistantMessageID ?? "pending", event.created);
       break;
 
@@ -2096,6 +2100,7 @@ export function handleEvent(event: V2Event) {
             running: { ...state.running, [data.sessionID]: true },
             queued: { ...state.queued, [data.sessionID]: false },
           });
+          ensureSessionWait(data.sessionID);
         }
       }
       break;
@@ -2345,6 +2350,7 @@ const lastReplayID = new Map<string, string>();
 
 export async function fetchReplay(sessionID: string) {
   if (!sessionID || isDraftSession(sessionID)) return;
+  noteLogHead(sessionID); // dormant v2 cursor tracking — see note at the map
   try {
     const res = await api.webuiReplay(sessionID, lastReplayID.get(sessionID));
     const events = res.data ?? [];
@@ -2372,6 +2378,88 @@ function replayTargets(): string[] {
   if (state.currentSessionID) ids.add(state.currentSessionID);
   for (const [sid, on] of Object.entries(state.running)) if (on) ids.add(sid);
   return [...ids].filter((sid) => !!sid && !isDraftSession(sid));
+}
+
+// ---- session.wait long-poll (engine-native idle signal) -------------------
+//
+// POST /api/session/{id}/wait resolves 204 the moment the engine's agent
+// loop goes idle — a push-shaped primitive that replaces SAMPLING for run
+// end (spike-verified against beta-18684: resolves at completion, resolves
+// instantly when already idle, resolves on failed runs too — no hang path).
+// One loop per running session:
+//   - 204 → engine idle. If we still hold a running flag we missed the
+//     terminal event (dead SSE) — clear it and settle history. `queued` is
+//     deliberately NOT cleared here: parked inbox items resolve through
+//     reconcileInbox (transcript-id drop), and wait-204 also fires while a
+//     queued send sits in the engine's cold-start gap.
+//   - 404 → session deleted: retire everything (pollOnce §8.1 machinery).
+//   - anything else (network error, 5xx, timeout) → NOT idle truth; re-arm
+//     with a small backoff while the store still considers it live.
+const waitLoops = new Set<string>();
+const WAIT_REARM_MS = 1_000;
+const WAIT_ABORT_MS = 5 * 60_000; // client cap; a dropped wait is re-armed, never trusted as idle
+
+/** Arms (or no-ops) the per-session wait loop. Idempotent. */
+export function ensureSessionWait(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  if (waitLoops.has(sessionID)) return;
+  waitLoops.add(sessionID);
+  void sessionWaitLoop(sessionID).finally(() => waitLoops.delete(sessionID));
+}
+
+async function sessionWaitLoop(sessionID: string) {
+  for (;;) {
+    if (!state.running[sessionID] && !state.queued[sessionID]) return;
+    const status = await api
+      .sessionWait(sessionID, AbortSignal.timeout(WAIT_ABORT_MS))
+      .catch(() => -1);
+    if (status === 204) {
+      if (state.running[sessionID]) {
+        log("run", `wait: engine idle ${sessionID}`);
+        noteRunEnd(sessionID);
+        const running = { ...state.running };
+        delete running[sessionID];
+        seenExecution.delete(sessionID);
+        setState({ running });
+        void settleLiveMessages(sessionID);
+        scheduleQueueDrain(sessionID);
+      }
+      if (!state.running[sessionID] && !state.queued[sessionID]) return;
+      // A new run started between resolution and now (or a queued send is in
+      // the cold-start gap) — back off gently, then re-arm. An instant-204
+      // while queued-only must not become a hot loop.
+      await new Promise((r) => setTimeout(r, WAIT_REARM_MS));
+      continue;
+    }
+    if (status === 404) {
+      retireVanishedSession(sessionID, "wait 404");
+      return;
+    }
+    if (!state.running[sessionID] && !state.queued[sessionID]) return;
+    await new Promise((r) => setTimeout(r, WAIT_REARM_MS));
+  }
+}
+
+// ---- v2 session-log cursor (dormant plumbing) -----------------------------
+//
+// The engine keeps a DURABLE per-session event log
+// (GET /api/experimental/session/{id}/log) with an aggregate-seq cursor.
+// On this build the head cursor works but `follow=true` streams nothing, so
+// the recorder still owns catch-up — we only TRACK the head (cheap, on
+// adopt/reconnect) so swapping to cursor-based catch-up later is a channel
+// change, not a redesign.
+const logHeadSeq = new Map<string, number>();
+
+function noteLogHead(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  void api
+    .sessionLogHead(sessionID)
+    .then((seq) => {
+      if (seq === null || logHeadSeq.get(sessionID) === seq) return;
+      logHeadSeq.set(sessionID, seq);
+      log("sse", `log head ${sessionID}: ${seq}`);
+    })
+    .catch(() => undefined);
 }
 
 // ---- lifecycle ----------------------------------------------------------
@@ -2434,19 +2522,18 @@ export function startStore() {
     .then((h) => setState({ serviceOK: h.ok }))
     .catch(() => setState({ serviceOK: false }));
   void connectEvents((env) => enqueueEvent(env.data), {
-    onOpen: (info) => {
+    onOpen: () => {
       setState({ connected: true });
       void refreshSessions();
       void refreshQueues();
       // (Re)connected: pull anything the dead window swallowed. The engine
       // does not replay a fresh subscription for us — the proxy recorder
-      // does. §8.4: only when the connection was actually gone long enough
-      // to miss something — a sub-second blip re-pulled the tail of every
-      // target session on every reconnect, which under a reconnect burst
-      // doubled the sweep traffic it was supposed to calm.
-      if (info.gapMs > 1000) {
-        for (const sid of replayTargets()) void fetchReplay(sid);
-      }
+      // does, and `since=<lastReplayID>` trims each pull to genuinely unseen
+      // events, so a no-loss reconnect costs one near-empty request per
+      // target. (A gap-based skip was tried and reverted: a 20s stall
+      // "ends" a moment before its reconnect, so gap math read it as a
+      // harmless blip and skipped exactly the pulls that mattered.)
+      for (const sid of replayTargets()) void fetchReplay(sid);
     },
   }).then(() => setState({ connected: false }));
   startPolling();
@@ -3059,6 +3146,10 @@ export async function sendPromptTo(
   markPending(sessionID);
   try {
     await api.prompt(sessionID, text);
+    // Arm the engine-native idle wait even though events normally drive the
+    // run lifecycle: if the SSE channel is dead at send time, wait-204 is
+    // the signal that settles the transcript (the §7 staircase's floor).
+    ensureSessionWait(sessionID);
     if (sessionID === DRAFT_SESSION_ID || (state.messages[DRAFT_SESSION_ID]?.length ?? 0) === 0) {
       try {
         const { clearDraft } = await import("./lib/drafts");
@@ -3143,6 +3234,9 @@ async function admitWhileBusy(sessionID: string, text: string, delivery?: Prompt
     // `.data`. (Reading `info.id` off the envelope left every row "sending"
     // forever: no id to drop it by once the engine delivered the item.)
     const res = await api.prompt(sessionID, text, delivery);
+    // The engine loop is running (or about to be): the wait loop may not be
+    // armed if this busy state arose outside this tab — arm it; idempotent.
+    ensureSessionWait(sessionID);
     const info = (res as { data?: InboxInfo } | undefined)?.data ?? (res as unknown as InboxInfo | undefined);
     if (info?.id) {
       patchPendingSend(sessionID, key, (p) => ({

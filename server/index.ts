@@ -403,9 +403,18 @@ const server: Server<Record<string, unknown>> = Bun.serve({
             ...headers,
             ...Object.fromEntries(
               [...req.headers.entries()].filter(
-                ([k]) => !["host", "connection", "upgrade"].includes(k.toLowerCase()),
+                ([k]) =>
+                  !["host", "connection", "upgrade", "accept-encoding"].includes(
+                    k.toLowerCase(),
+                  ),
               ),
             ),
+            // Force identity from the engine: it brotli/gzip-compresses at
+            // least the experimental session-log endpoint with a stream the
+            // browser fails to decode (BrotliDecompressionError), and
+            // compressed SSE would buffer idle heartbeats anyway. Loopback
+            // hops gain nothing from compression — never request it.
+            "accept-encoding": "identity",
           },
           body: ["GET", "HEAD"].includes(method) ? undefined : req.body,
           redirect: "manual",
