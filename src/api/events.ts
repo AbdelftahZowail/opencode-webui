@@ -85,6 +85,7 @@ export async function connectEvents(
 ): Promise<void> {
   while (!opts.signal?.aborted) {
     let stalled = false;
+    let rxBytes = 0; // total bytes this connection received (wedge diagnostics)
     try {
       const res = await fetch("/api/event", { signal: opts.signal });
       if (!res.ok || !res.body) throw new Error(`event stream: ${res.status}`);
@@ -99,7 +100,10 @@ export async function connectEvents(
           // If the server channel dies silently (no bytes, no close), the
           // fetch reader would block forever. Force a reconnect instead.
           stalled = true;
-          log("sse", `STALLED - no data for ${STALL_TIMEOUT_MS / 1000}s; forcing reconnect`);
+          log(
+            "sse",
+            `STALLED - no data for ${STALL_TIMEOUT_MS / 1000}s (rx=${rxBytes}B total); forcing reconnect`,
+          );
           console.warn(`[events] no data for ${STALL_TIMEOUT_MS / 1000}s; forcing reconnect`);
           void reader.cancel();
         }, STALL_TIMEOUT_MS);
@@ -132,6 +136,7 @@ export async function connectEvents(
         if (done) break;
         clearTimeout(stallTimer);
         lastByteAt = Date.now();
+        rxBytes += value.byteLength;
         buffer += decoder.decode(value, { stream: true });
         const frames = buffer.split("\n");
         buffer = frames.pop() ?? "";
@@ -160,7 +165,7 @@ export async function connectEvents(
       clearTimeout(stallTimer);
       reader.releaseLock();
       if (stalled) throw new Error("event stream stalled");
-      log("sse", "stream ended cleanly; reconnecting");
+      log("sse", `stream ended cleanly; reconnecting (rx=${rxBytes}B)`);
     } catch (err) {
       if (opts.signal?.aborted) return;
       log("sse", "reconnect", String(err));

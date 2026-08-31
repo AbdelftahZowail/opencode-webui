@@ -142,7 +142,23 @@ Frontend log `/tmp/webui-debug.log` (grep `\[sse\]`), server log
   on repeated fetch failure** — `applyFetchedMessages` only retires on
   SUCCESSFUL fetch. That's a real bug (§8, fix 1).
 
-## 6. Prime suspect (UNVERIFIED): idle connection reaping
+## 6. Prime suspect (CONFIRMED): idle connection reaping
+
+> **RESOLVED 2026-08-31 — the theory was correct.** The `[ssehop]` byte
+> counters (proxy + vite, both sides of vite's pipe) caught the wedge
+> red-handed: every hop delivered identical bytes, then the `bun` proxy
+> connection died **exactly ~10s after the last byte** — Bun's
+> `idleTimeout` (default 10s in the current runtime) — while the engine
+> heartbeats every 15s. Idle connections were guaranteed to die before the
+> next heartbeat; vite never learned its upstream died (silent socket
+> destroy), so the browser sat until its 20s fuse. Active runs masked it
+> (constant bytes → never 10s idle). Fix: `idleTimeout: 0` in `Bun.serve`
+> (liveness is owned by heartbeats + browser fuse + `req.signal` aborts).
+> Post-fix: zero kills, a 40s fully-silent `session.wait` long-poll holds
+> (pre-fix it churned on 10s kills), connections survive indefinitely. Why
+> §6's earlier direct-curl probe survived: likely a Bun upgrade between
+> sessions changed/enabled the default. The `[ssehop]` helpers stay in
+> temporarily to confirm no recurrence, then get deleted.
 
 **Theory**: something in browser → vite(5173) → proxy(4097) → service reaps
 SSE connections that are silent longer than N seconds, where N < 15s heartbeat

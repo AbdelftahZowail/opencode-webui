@@ -283,7 +283,23 @@ treats the step events as the run lifecycle and keeps an ordered live projection
 - **SSE watchdog** (`events.ts`): if no bytes arrive for 20s (heartbeats come
   every ~15s) the reader is cancelled and the stream reconnects; its byte-age
   health signal (`sseStale()`) is what the scheduler reads to decide the REST
-  fallback tier.
+  fallback tier. Stall lines carry `rx=<bytes>` — the dead connection's total
+  intake, proving whether it EVER received bytes.
+- **The SSE "wedge" — SOLVED (2026-08-31)**: Bun's default `idleTimeout`
+  (10s) killed any proxy socket silent for 10s, while the engine heartbeats
+  every 15s — idle connections were guaranteed to die before the next
+  heartbeat, and vite never learned its upstream died, so the browser sat
+  until its 20s fuse. Active runs masked it (constant bytes). Fix:
+  `idleTimeout: 0` in `Bun.serve` — liveness is owned by heartbeats, the
+  browser fuse, and `req.signal` aborts. This also lets `session.wait`
+  long-polls hold (they were silently churning on 10s kills).
+- **Wedge instrumentation** (TEMPORARY — remove once the fix has soak time):
+  `[ssehop]` lines in the debug timeline count bytes at each hop —
+  `bun c#N` (server/index.ts: engine→proxy body stream, tagged upstream-
+  pending vs downstream-backpressure) and `vite c#N` (vite.config.ts: both
+  sides of vite's pipe). Silence logs at ≥17s (healthy never crosses it),
+  close lines always. Keep while confidence builds; delete the helpers when
+  satisfied.
 - **Fetch scheduler** (`src/lib/scheduler.ts`): the ONLY owner of recurring
   timers. One 1s loop picks a tier — LIVE ~2s (anything running/queued/
   pending/live, or the SSE byte-age is stale), IDLE ~12s (visible, quiet tab),

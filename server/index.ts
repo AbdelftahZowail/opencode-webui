@@ -36,6 +36,75 @@ async function writeDebug(lines: unknown[]) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// TEMPORARY SSE wedge instrumentation ([ssehop] lines in the debug timeline).
+// The browser fuse occasionally fires after 20s of zero bytes while the chain
+// looks healthy (engine heartbeats every ~15s). Count the bytes crossing THIS
+// hop (engine -> proxy body stream) so a wedge resolves to either "engine
+// stopped delivering" (upstream pending) or "downstream stopped reading"
+// (backpressure). Paired with vite-side counters (vite.config.ts) that count
+// both sides of vite's pipe. Remove once the culprit is found.
+
+function ssehop(msg: string) {
+  const d = new Date();
+  const t = `${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+  void writeDebug([`[${t}] [ssehop] ${msg}`]);
+}
+
+let sseConnSeq = 0;
+const SSE_SILENT_LOG_MS = 17_000; // healthy never crosses it (15s heartbeats); fuse fires at 20s
+
+function instrumentSseUpstream(upstream: Response): ReadableStream<Uint8Array> {
+  const conn = ++sseConnSeq;
+  const reader = upstream.body!.getReader();
+  const openedAt = Date.now();
+  let bytes = 0;
+  let lastByteAt = openedAt;
+  let pendingUpstream = false;
+  let warnedSilent = false;
+  let finished = false;
+  const silencer = setInterval(() => {
+    const age = Date.now() - lastByteAt;
+    if (age < SSE_SILENT_LOG_MS || warnedSilent) return;
+    warnedSilent = true;
+    ssehop(
+      `bun c#${conn} silent ${Math.round(age / 1000)}s after ${bytes}B ` +
+        (pendingUpstream ? "(upstream pending — engine→bun leg)" : "(idle — downstream backpressure)"),
+    );
+  }, 1000);
+  const done = (how: string) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(silencer);
+    ssehop(`bun c#${conn} ${how} after ${((Date.now() - openedAt) / 1000).toFixed(1)}s, ${bytes}B`);
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      pendingUpstream = true;
+      try {
+        const { done: finished, value } = await reader.read();
+        if (finished) {
+          done("upstream-end");
+          controller.close();
+          return;
+        }
+        bytes += value.byteLength;
+        lastByteAt = Date.now();
+        controller.enqueue(value);
+      } catch (err) {
+        done(`upstream-error: ${String(err).slice(0, 90)}`);
+        controller.error(err);
+      } finally {
+        pendingUpstream = false;
+      }
+    },
+    cancel(reason) {
+      done("client-gone");
+      void reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 let endpoint: Awaited<ReturnType<typeof Service.ensure>> | null = null;
 
 async function serviceEndpoint() {
@@ -293,6 +362,15 @@ async function bundleUIEntry(entry: string): Promise<string> {
 
 const server: Server<Record<string, unknown>> = Bun.serve({
   port: PROXY_PORT,
+  // Bun's default idleTimeout (10s) kills any socket silent for 10s. The
+  // engine heartbeats /api/event every 15s, so an idle session's connection
+  // is guaranteed to die before the next heartbeat — that WAS the "SSE
+  // wedge" (instrumented 2026-08-31: bun c#N killed exactly 10s after the
+  // last byte, vite never told, browser fuse fired at 20s). It also broke
+  // the session.wait long-polls (silent for minutes). Liveness here is
+  // owned by engine heartbeats + browser fuse + req.signal aborts — not a
+  // socket timer — so disable it.
+  idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
     const method = req.method;
@@ -426,7 +504,11 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           responseHeaders.delete("content-encoding");
         }
         dbg("proxy:", method, path, "->", upstream.status, `${Date.now() - t0}ms`);
-        return new Response(upstream.body, {
+        const body =
+          contentType.includes("text/event-stream") && upstream.body
+            ? instrumentSseUpstream(upstream)
+            : upstream.body;
+        return new Response(body, {
           status: upstream.status,
           headers: responseHeaders,
         });
