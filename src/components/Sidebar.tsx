@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import {
   ChevronDown,
   FolderTree,
@@ -18,16 +18,23 @@ import {
   refreshSessions,
   selectSession,
   sessionHref,
+  setHighlightMessage,
   setPendingWorkspace,
   startDraftSession,
   useStore,
 } from "../store";
 import { api } from "../api/client";
 import type { SessionInfo } from "../api/types";
-import { searchContent } from "../lib/searchIndex";
+import { searchContent, type ContentHits, type MessageHit } from "../lib/searchIndex";
 import { SEARCH_KBD, IS_MAC } from "../lib/platform";
-import { Slot, getPages, subscribeRegistry } from "../extensions/registry";
+import { Slot, getPages, getContextMenus, subscribeRegistry } from "../extensions/registry";
 import { timeAgo } from "./ui";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +56,61 @@ const SIDEBAR_DEFAULT_WIDTH = 288;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 480;
 const SIDEBAR_COLLAPSED_WIDTH = 56;
+
+// Registry tick for context menus — useSyncExternalStore pattern (no exported version).
+// Single registry subscription fans out, so one bump increments exactly once.
+let _sidebarExtVersion = 0;
+const _sidebarExtListeners = new Set<() => void>();
+let _sidebarExtSubscribed = false;
+function ensureSidebarExtSubscribed() {
+  if (_sidebarExtSubscribed) return;
+  _sidebarExtSubscribed = true;
+  subscribeRegistry(() => {
+    _sidebarExtVersion++;
+    for (const cb of _sidebarExtListeners) cb();
+  });
+}
+function subscribeSidebarExt(cb: () => void) {
+  ensureSidebarExtSubscribed();
+  _sidebarExtListeners.add(cb);
+  return () => _sidebarExtListeners.delete(cb);
+}
+function getSidebarExtSnapshot() {
+  return _sidebarExtVersion;
+}
+function getSidebarExtServerSnapshot() {
+  return 0;
+}
+function useSidebarExtVersion(): number {
+  return useSyncExternalStore(subscribeSidebarExt, getSidebarExtSnapshot, getSidebarExtServerSnapshot);
+}
+
+function SessionContextMenu({ sessionID, children }: { sessionID: string; children: ReactNode }) {
+  const version = useSidebarExtVersion();
+  const menus = useMemo(() => getContextMenus("session"), [version]);
+  if (menus.length === 0) return <>{children}</>;
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="min-w-36">
+        {menus.map((item) => (
+          <ContextMenuItem
+            key={item.id}
+            onSelect={() => {
+              try {
+                item.run({ sessionID });
+              } catch (err) {
+                console.error(`[extensions] contextMenu "${item.id}" crashed:`, err);
+              }
+            }}
+          >
+            {item.label}
+          </ContextMenuItem>
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
 
 function isHomeDir(dir: string): boolean {
   return /^\/home\/[^/]+$/.test(dir) || /^\/Users\/[^/]+$/.test(dir);
@@ -99,8 +161,9 @@ export function Sidebar() {
   const [query, setQuery] = useState("");
   // Layer B (server title search) + layer C (message content search).
   const [serverHits, setServerHits] = useState<SessionInfo[]>([]);
-  const [contentMatches, setContentMatches] = useState<Set<string>>(new Set());
+  const [contentHits, setContentHits] = useState<ContentHits>(new Map());
   const [contentSearching, setContentSearching] = useState(false);
+  const [collapsedHits, setCollapsedHits] = useState<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLElement>(null);
   const [showMore, setShowMore] = useState<Record<string, boolean>>({});
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({});
@@ -161,7 +224,7 @@ export function Sidebar() {
   // 250ms. Reports partial matches while fetch batches land.
   useEffect(() => {
     if (trimmedQuery.length < 2) {
-      setContentMatches(new Set());
+      setContentHits(new Map());
       setContentSearching(false);
       return;
     }
@@ -169,12 +232,12 @@ export function Sidebar() {
     setContentSearching(true);
     const timer = setTimeout(() => {
       searchContent(trimmedQuery, sessions, (partial) => {
-        if (!cancelled) setContentMatches(partial);
+        if (!cancelled) setContentHits(new Map(partial));
       })
-        .catch(() => new Set<string>())
+        .catch(() => new Map<string, MessageHit[]>())
         .then((matches) => {
           if (!cancelled) {
-            setContentMatches(matches);
+            setContentHits(new Map(matches));
             setContentSearching(false);
           }
         });
@@ -228,32 +291,58 @@ export function Sidebar() {
       list.push(s);
       buckets.set(key, list);
     }
+    const isRunningId = (id: string) => !!(running[id] || activeIDs.includes(id));
     const sorted = [...buckets.entries()].map(([name, list]) => ({
       name,
-      list: [...list].sort((a, b) => b.time.updated - a.time.updated),
+      list: [...list].sort((a, b) => {
+        const ar = isRunningId(a.id);
+        const br = isRunningId(b.id);
+        if (ar !== br) return Number(br) - Number(ar);
+        return b.time.updated - a.time.updated;
+      }),
     }));
-    // Stable: keep insertion order of first appearance (newest first already).
+    // Running workspaces bubble above idle ones, preserving insertion order within each partition.
+    sorted.sort((a, b) => {
+      const ar = buckets.get(a.name)?.some((s) => isRunningId(s.id)) ?? false;
+      const br = buckets.get(b.name)?.some((s) => isRunningId(s.id)) ?? false;
+      if (ar !== br) return Number(br) - Number(ar);
+      return 0;
+    });
     return sorted;
-  }, [sessions, serverHits, normalizedQuery, home]);
+  }, [sessions, serverHits, normalizedQuery, home, running, activeIDs]);
 
   // Real computation: every known session with a content hit that isn't
   // already visible in a title/workspace/server group.
   const contentOnly = useMemo(() => {
-    if (!normalizedQuery || contentMatches.size === 0) return [] as SessionInfo[];
+    if (!normalizedQuery || contentHits.size === 0) return [] as SessionInfo[];
     const listed = new Set(groups.flatMap((g) => g.list.map((s) => s.id)));
     const byID = new Map(sessions.map((s) => [s.id, s]));
     const out: SessionInfo[] = [];
-    for (const id of contentMatches) {
+    for (const id of contentHits.keys()) {
       if (listed.has(id)) continue;
       const s = byID.get(id);
       if (s) out.push(s);
     }
     return out.sort((a, b) => b.time.updated - a.time.updated).slice(0, CONTENT_GROUP_LIMIT);
-  }, [sessions, groups, contentMatches, normalizedQuery]);
+  }, [sessions, groups, contentHits, normalizedQuery]);
 
   /** Total sessions currently surfaced across all search layers. */
   const matchedCount =
     groups.reduce((n, g) => n + g.list.length, 0) + contentOnly.length;
+
+  const toggleHitCollapse = (id: string) => {
+    setCollapsedHits((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleHitClick = (sessionID: string, messageID: string) => {
+    setHighlightMessage(sessionID, messageID);
+    void selectSession(sessionID);
+  };
 
   const hasMore = sessionsCursor != null;
 
@@ -377,18 +466,59 @@ export function Sidebar() {
                     </span>
                     <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{contentOnly.length}</span>
                   </div>
-                  {contentOnly.map((s) => (
-                    <SessionRow
-                      key={s.id}
-                      id={s.id}
-                      title={s.title ?? "Untitled session"}
-                      updated={s.time.updated}
-                      active={activeIDs.includes(s.id)}
-                      selected={s.id === current}
-                      subagentsActive={subagentActiveParents.has(s.id)}
-                      onSelect={() => void selectSession(s.id)}
-                    />
-                  ))}
+                  {contentOnly.map((s) => {
+                    const hits = contentHits.get(s.id) ?? [];
+                    const collapsed = collapsedHits.has(s.id);
+                    return (
+                      <div key={s.id} className="mb-1">
+                        <SessionRow
+                          id={s.id}
+                          title={s.title ?? "Untitled session"}
+                          updated={s.time.updated}
+                          active={activeIDs.includes(s.id)}
+                          selected={s.id === current}
+                          subagentsActive={subagentActiveParents.has(s.id)}
+                          onSelect={() => void selectSession(s.id)}
+                        />
+                        {hits.length > 0 && (
+                          <div className="ml-2 border-l border-[var(--border-weak-base)] pl-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleHitCollapse(s.id)}
+                              className="mb-1 flex w-full cursor-pointer items-center gap-1 text-[10px] text-[var(--text-weaker)] hover:text-[var(--text-weak)]"
+                            >
+                              <ChevronDown className={`size-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
+                              {hits.length} {hits.length === 1 ? "message" : "messages"} match{hits.length === 1 ? "" : "es"}
+                            </button>
+                            {!collapsed && (
+                              <div className="flex flex-col gap-1 pb-1">
+                                {hits.slice(0, 5).map((h: MessageHit) => (
+                                  <button
+                                    key={h.messageID}
+                                    type="button"
+                                    onClick={() => handleHitClick(s.id, h.messageID)}
+                                    className="cursor-pointer rounded-md bg-[var(--surface-inset-base)] px-2 py-1 text-left text-xs leading-relaxed text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+                                    title="Open session and scroll to message"
+                                  >
+                                    <span className="line-clamp-2">
+                                      {h.snippet.slice(0, h.matchStart)}
+                                      <mark className="rounded-sm bg-yellow-500/30 px-0.5 font-medium text-[var(--text-strong)]">
+                                        {h.snippet.slice(h.matchStart, h.matchEnd)}
+                                      </mark>
+                                      {h.snippet.slice(h.matchEnd)}
+                                    </span>
+                                  </button>
+                                ))}
+                                {hits.length > 5 && (
+                                  <span className="px-2 text-[10px] text-[var(--text-weaker)]">+{hits.length - 5} more in this session</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </section>
               )}
               {groups.length === 0 && contentOnly.length === 0 && (
@@ -458,17 +588,57 @@ export function Sidebar() {
                     </div>
                     {visible.map((s) => {
                       const active = activeIDs.includes(s.id);
+                      const hits = contentHits.get(s.id) ?? [];
+                      const collapsed = collapsedHits.has(s.id);
+                      const showHits = hits.length > 0 && trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH;
                       return (
-                        <SessionRow
-                          key={s.id}
-                          id={s.id}
-                          title={s.title ?? "Untitled session"}
-                          updated={s.time.updated}
-                          active={active}
-                          selected={s.id === current}
-                          subagentsActive={subagentActiveParents.has(s.id)}
-                          onSelect={() => void selectSession(s.id)}
-                        />
+                        <div key={s.id} className="mb-0.5">
+                          <SessionRow
+                            id={s.id}
+                            title={s.title ?? "Untitled session"}
+                            updated={s.time.updated}
+                            active={active}
+                            selected={s.id === current}
+                            subagentsActive={subagentActiveParents.has(s.id)}
+                            onSelect={() => void selectSession(s.id)}
+                          />
+                          {showHits && (
+                            <div className="ml-2 border-l border-[var(--border-weak-base)] pl-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleHitCollapse(s.id)}
+                                className="mb-1 flex w-full cursor-pointer items-center gap-1 text-[10px] text-[var(--text-weaker)] hover:text-[var(--text-weak)]"
+                              >
+                                <ChevronDown className={`size-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
+                                {hits.length} {hits.length === 1 ? "message" : "messages"} match{hits.length === 1 ? "" : "es"}
+                              </button>
+                              {!collapsed && (
+                                <div className="flex flex-col gap-1 pb-1">
+                                  {hits.slice(0, 5).map((h: MessageHit) => (
+                                    <button
+                                      key={h.messageID}
+                                      type="button"
+                                      onClick={() => handleHitClick(s.id, h.messageID)}
+                                      className="cursor-pointer rounded-md bg-[var(--surface-inset-base)] px-2 py-1 text-left text-xs leading-relaxed text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+                                      title="Open session and scroll to message"
+                                    >
+                                      <span className="line-clamp-2">
+                                        {h.snippet.slice(0, h.matchStart)}
+                                        <mark className="rounded-sm bg-yellow-500/30 px-0.5 font-medium text-[var(--text-strong)]">
+                                          {h.snippet.slice(h.matchStart, h.matchEnd)}
+                                        </mark>
+                                        {h.snippet.slice(h.matchEnd)}
+                                      </span>
+                                    </button>
+                                  ))}
+                                  {hits.length > 5 && (
+                                    <span className="px-2 text-[10px] text-[var(--text-weaker)]">+{hits.length - 5} more in this session</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                     {!isCollapsed && moreCount > 0 && (
@@ -740,19 +910,20 @@ function SessionRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
-    <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
-      {/* Hover/focus warms the transcript cache so the click paints instantly. */}
-      <a
-        href={sessionHref(id)}
-        title={title}
-        aria-current={selected ? "page" : undefined}
-        onClick={(event) => handleSessionLinkClick(event, onSelect)}
-        onMouseEnter={() => prefetchSession(id)}
-        onFocus={() => prefetchSession(id)}
-        className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 pr-12 transition-colors ${
-          selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
-        }`}
-      >
+    <SessionContextMenu sessionID={id}>
+      <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
+        {/* Hover/focus warms the transcript cache so the click paints instantly. */}
+        <a
+          href={sessionHref(id)}
+          title={title}
+          aria-current={selected ? "page" : undefined}
+          onClick={(event) => handleSessionLinkClick(event, onSelect)}
+          onMouseEnter={() => prefetchSession(id)}
+          onFocus={() => prefetchSession(id)}
+          className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 pr-12 transition-colors ${
+            selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
+          }`}
+        >
         <div className="flex min-w-0 max-w-full items-center gap-2">
           {subagentsActive && (
             <span
@@ -807,5 +978,6 @@ function SessionRow({
         )}
       </div>
     </div>
+    </SessionContextMenu>
   );
 }

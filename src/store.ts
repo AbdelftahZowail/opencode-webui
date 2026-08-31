@@ -11,8 +11,9 @@ import {
   type PromptDelivery,
   type PromptFile,
 } from "./api/client";
-import { connectEvents, type V2Event } from "./api/events";
+import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { log } from "./lib/log";
+import { registerPoller, startScheduler } from "./lib/scheduler";
 import type {
   AssistantMessage,
   InboxInfo,
@@ -81,6 +82,14 @@ function noteFormSeen(ids: Iterable<string>) {
     for (const [id, t] of formFirstSeen) if (now - t > 10 * NEWBORN_GRACE_MS) formFirstSeen.delete(id);
   }
 }
+
+/**
+ * Forms confirmed settled (answered/cancelled/reaped), with timestamps — a
+ * tombstone so the engine's laggy global listing can't resurrect them (and
+ * re-trigger a /state check every sweep) before the listing itself catches
+ * up. Kept for NEWBORN_GRACE_MS, which comfortably exceeds the listing lag.
+ */
+const settledRecently = new Map<string, number>();
 
 /** Stamp incoming requests, reusing the seq — and the exact OBJECT — of ids
  * we already track. Engine payloads for a pending id are immutable, so
@@ -234,6 +243,8 @@ export interface PendingSend {
   inboxID?: string;
   /** steer = joins the active run at the next step; queue = after this turn. */
   delivery?: PromptDelivery;
+  /** Client epoch ms when the row was admitted — feeds delivered-detection. */
+  admittedAt?: number;
 }
 
 /**
@@ -336,6 +347,19 @@ export interface State {
   runNotices: Record<string, RunNotice[]>;
   /** Workspace targeted by the sidebar for the NEXT new session (highlight). */
   pendingWorkspace: string | null;
+  /** Sidebar search: scroll to this message after selecting its session. */
+  highlightMessageID: string | null;
+  highlightSessionID: string | null;
+  /** Pending edit — staged on click, committed only when the user sends. */
+  pendingEdit: { sessionID: string; messageID: string; originalText: string } | null;
+  /**
+   * Revert (undo/edit) view cut per session: messageID = transcript is cut
+   * AT that message (exclusive); null = known-cleared; absent = unknown —
+   * only then may a session-detail fetch adopt the engine's staged state.
+   * Owned by `session.revert.*` events and local mirrors, NEVER by refetch
+   * races (a late staged-state fetch must not resurrect a cut we cleared).
+   */
+  revertMarkers: Record<string, string | null>;
   /**
    * Two-step interrupt arming: the first Esc sets this (the composer swaps
    * its status line for a yellow confirm hint); a second Esc inside the
@@ -397,6 +421,10 @@ const initialState: State = {
   runNotices: {},
   pendingWorkspace: null,
   interruptArmed: false,
+  highlightMessageID: null,
+  highlightSessionID: null,
+  pendingEdit: null,
+  revertMarkers: {},
 };
 
 let state: State = initialState;
@@ -511,14 +539,94 @@ function debouncedRefreshSessions() {
 
 const SESSION_PAGE = 100;
 
+// ---- engine "active" lag guards ------------------------------------------
+//
+// The engine's GET /session/active map and inbox listings LAG reality by tens
+// of seconds (verified against the live service: a finished session stays
+// "active", a delivered inbox item stays listed). Trusting the map blindly
+// resurrects cleared `running` flags — the stuck "Working…" after a run
+// ends — and keeps dead sessions in the ActivityStrip. Two guards:
+//
+// - `lastRunEnd`: when WE just ended a run (event/interrupt), never let the
+//   laggy map re-add the flag for a grace period.
+// - `lastLiveSignal`: when the map says INACTIVE and no live event has
+//   arrived for a while, clear the flag — the event that would have cleared
+//   it was missed (this is the "stuck running until refresh" bug).
+
+const ACTIVE_READD_SUPPRESS_MS = 30_000;
+const RUNNING_WATCHDOG_MS = 15_000;
+const QUEUED_WATCHDOG_MS = 45_000;
+
+const lastRunEnd = new Map<string, number>();
+const lastLiveSignal = new Map<string, number>();
+
+function noteRunEnd(sessionID: string) {
+  if (sessionID) lastRunEnd.set(sessionID, Date.now());
+}
+
+/** Last time an SSE live event (step/text/tool/execution) hit this session. */
+export function lastLiveSignalAt(sessionID: string): number {
+  return lastLiveSignal.get(sessionID) ?? 0;
+}
+
 export async function refreshSessions() {
   try {
     const res = await api.listSessions({ limit: Math.max(SESSION_PAGE, state.sessions.length + 1) });
     const active = await api.activeSessions();
+    const activeKeys = new Set(Object.keys(active.data));
+    const now = Date.now();
     const running = { ...state.running };
-    for (const id of Object.keys(active.data)) running[id] = true;
+    // The active map is the only signal that a session STARTED elsewhere
+    // (another tab, engine-side) — keep adding it, but never over a local
+    // end we just recorded: the map is laggy, our end is not.
+    for (const id of activeKeys) {
+      if (running[id]) continue;
+      if (now - (lastRunEnd.get(id) ?? 0) < ACTIVE_READD_SUPPRESS_MS) continue;
+      running[id] = true;
+    }
+    // Watchdog: the engine says idle AND no live event for a fair window →
+    // the flag is stale (its clearing event was missed). Clear it.
+    for (const [sid, on] of Object.entries(running)) {
+      if (!on || activeKeys.has(sid)) continue;
+      if (now - lastLiveSignalAt(sid) < RUNNING_WATCHDOG_MS) continue;
+      delete running[sid];
+    }
+    const queued = { ...state.queued };
+    for (const [sid, on] of Object.entries(queued)) {
+      if (!on || activeKeys.has(sid) || running[sid]) continue;
+      if (now - lastLiveSignalAt(sid) < QUEUED_WATCHDOG_MS) continue;
+      delete queued[sid];
+    }
     const sessions = [...res.data].sort((a, b) => b.time.updated - a.time.updated);
-    setState({ sessions, sessionsCursor: res.cursor.next, activeIDs: Object.keys(active.data), running });
+    // Compare-before-set: this sweep runs every 10-20s forever, and replacing
+    // the sessions array (or the flags) unconditionally re-rendered the
+    // Sidebar even when nothing changed — the visible "refresh every few
+    // seconds" churn. Only touch what actually moved.
+    const sessionsChanged =
+      state.sessions.length !== sessions.length ||
+      state.sessions.some((s, i) => {
+        const n = sessions[i];
+        if (!n) return true;
+        return n.id !== s.id || n.time.updated !== s.time.updated || n.title !== s.title;
+      });
+    const flagsEqual = (a: Record<string, boolean>, b: Record<string, boolean>) => {
+      const ka = Object.keys(a).filter((k) => a[k]);
+      const kb = Object.keys(b).filter((k) => b[k]);
+      return ka.length === kb.length && ka.every((k) => b[k]);
+    };
+    const activeIDs = [...activeKeys];
+    const activeChanged =
+      state.activeIDs.length !== activeIDs.length ||
+      state.activeIDs.some((id, i) => id !== activeIDs[i]);
+    if (!sessionsChanged && !activeChanged && flagsEqual(state.running, running) && flagsEqual(state.queued, queued)) {
+      return;
+    }
+    setState({
+      ...(sessionsChanged ? { sessions, sessionsCursor: res.cursor.next } : {}),
+      ...(activeChanged ? { activeIDs } : {}),
+      ...(!flagsEqual(state.running, running) ? { running } : {}),
+      ...(!flagsEqual(state.queued, queued) ? { queued } : {}),
+    });
   } catch (err) {
     console.warn("refreshSessions failed:", err);
   }
@@ -595,11 +703,17 @@ async function refreshQueues() {
     // below (no awaits between reading state and setState).
     const current = state.forms;
     noteFormSeen([...current.map((f) => f.id), ...listed.map((f) => f.id)]);
-    const knownIds = new Set(current.map((f) => f.id));
-    for (const f of listed) knownIds.add(f.id);
+    // §8.3: /state-check ONLY forms we already track (the displayed set).
+    // Checking current ∪ listed re-verified every form the listing returns
+    // every sweep — an N+1 that also fed itself: a laggy listing keeps
+    // returning an ANSWERED form for tens of seconds, the union re-added it
+    // after the check removed it, and the loop never converged. Newly listed
+    // forms skip this sweep's check (they enter state.forms and are checked
+    // next sweep; NEWBORN_GRACE_MS already tolerates their create-race 404).
+    const checkIds = new Set(current.map((f) => f.id));
     const settled = new Set<string>();
     await Promise.all(
-      [...knownIds].map(async (id) => {
+      [...checkIds].map(async (id) => {
         const f =
           state.forms.find((x) => x.id === id) ?? byId.get(id);
         if (!f) return;
@@ -617,9 +731,20 @@ async function refreshQueues() {
         }
       }),
     );
+    // Tombstone what we just settled so the laggy listing can't resurrect it
+    // (and re-trigger checks) until the listing itself catches up.
+    const now = Date.now();
+    for (const id of settled) settledRecently.set(id, now);
+    if (settledRecently.size > 500) {
+      for (const [id, at] of settledRecently) if (now - at > NEWBORN_GRACE_MS) settledRecently.delete(id);
+    }
+    const stillListed = listed.filter((f) => {
+      const at = settledRecently.get(f.id);
+      return at === undefined || Date.now() - at > NEWBORN_GRACE_MS;
+    });
     log("queue", `refresh forms=${current.length} listed=${listed.length} settled=${settled.size}`);
     setState({
-      forms: unionById(state.forms, listed).filter((f) => !settled.has(f.id)),
+      forms: unionById(state.forms, stillListed).filter((f) => !settled.has(f.id)),
     });
   } else console.warn("refreshQueues forms failed:", forms.reason);
   // NOTE: questions are NOT fetched here — this engine version exposes no
@@ -631,15 +756,34 @@ async function refreshQueues() {
 export async function loadMessages(sessionID: string) {
   if (isDraftSession(sessionID)) return; // nothing exists server-side yet
   const request = beginMessageRequest(sessionID);
+  // Fetch up to 200 per page and follow cursor to get full history (up to ~500) so the rail / search see all user messages.
+  let all: typeof api.messages extends (a: string, b: number) => Promise<infer R> ? R extends { data: infer D } ? D : never : never = [] as never;
+  let cursor: string | null | undefined = undefined;
+  let pages = 0;
   try {
-    const res = await api.messages(sessionID, 100);
-    if (messageRequests.get(sessionID) !== request) return;
-    const history = [...res.data].reverse();
-    log("load", `messages ${sessionID}: ${history.length} (limit 100)`);
-    applyFetchedMessages(sessionID, history);
+    do {
+      const res: { data: MessageInfo[]; cursor?: { next?: string | null; previous?: string | null } } = cursor
+        ? await api.messagesWithCursor(sessionID, 200, cursor)
+        : await api.messages(sessionID, 200);
+      if (messageRequests.get(sessionID) !== request) return;
+      const chunk = res.data as MessageInfo[];
+      // api.messages returns desc order; accumulate then reverse once at end.
+      (all as MessageInfo[]).push(...chunk);
+      cursor = (res as { cursor?: { next?: string | null } }).cursor?.next;
+      pages++;
+      if (chunk.length < 200) break;
+    } while (cursor && pages < 5);
   } catch (err) {
-    console.warn("loadMessages failed:", err);
+    if ((all as MessageInfo[]).length === 0) {
+      console.warn("loadMessages failed:", err);
+      return;
+    }
+    console.warn("loadMessages partial failure, using", (all as MessageInfo[]).length, "messages:", err);
   }
+  if (messageRequests.get(sessionID) !== request) return;
+  const history = [...(all as MessageInfo[])].reverse();
+  log("load", `messages ${sessionID}: ${history.length} (${pages} pages)`);
+  applyFetchedMessages(sessionID, history);
 }
 
 // ---- live message helpers ----------------------------------------------
@@ -1129,7 +1273,33 @@ function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
   hydrateLiveFromHistory(sessionID, history);
   const merged = mergeFetchedMessages(sessionID, history);
   if (!isPaneSession(sessionID)) {
-    setState({ messages: { ...state.messages, [sessionID]: merged } });
+    // Background (unmounted) session: merge the transcript AND retire its
+    // live entries — settled ones (persisted completed) and ghosts (never
+    // persisted, session idle, past the grace window). Without this a
+    // finished background run kept its live entry forever and haunted the
+    // ActivityStrip ("active" while actually stopped).
+    const fetchedByID = new Map(history.map((message) => [message.id, message]));
+    const idle = !state.running[sessionID] && !state.queued[sessionID];
+    const own = liveForSession(sessionID);
+    const retired = new Set(
+      own
+        .filter((live) => {
+          if (live.id === "pending") return false;
+          if (idle && !fetchedByID.has(live.id) && Date.now() - live.started > 30_000) return true;
+          const persisted = fetchedByID.get(live.id);
+          return persisted?.type === "assistant" && persisted.time.completed !== undefined;
+        })
+        .map((live) => live.id),
+    );
+    const nextLive =
+      retired.size > 0
+        ? state.live.filter((live) => !(live.sessionID === sessionID && retired.has(live.id)))
+        : state.live;
+    setState({
+      messages: { ...state.messages, [sessionID]: merged },
+      ...(nextLive !== state.live ? { live: nextLive } : {}),
+    });
+    if (own.length > 0 && retired.size === own.length) clearPersistedLive(sessionID);
     return;
   }
 
@@ -1311,7 +1481,13 @@ function patchLiveTool(assistantID: string, toolID: string, patch: Partial<LiveT
   if (!assistant) return;
   const tool = assistant.tools.get(toolID);
   if (!tool) return;
-  const updated = { ...tool, ...patch };
+  // Undefined patch keys must NOT erase existing values: terminal events
+  // (success/failed) often omit content/metadata, and spreading them would
+  // wipe what the streaming events had already accumulated.
+  const applied = Object.fromEntries(
+    Object.entries(patch).filter(([, v]) => v !== undefined),
+  ) as Partial<LiveTool>;
+  const updated = { ...tool, ...applied };
   patchLiveAssistant(assistantID, {
     content: assistant.content.map((part) =>
       part.type === "tool" && part.tool.id === toolID ? { type: "tool", tool: updated } : part,
@@ -1405,7 +1581,19 @@ export async function loadSessionDetail(sessionID: string) {
   if (isDraftSession(sessionID)) return;
   try {
     const res = await api.getSession(sessionID);
-    setState({ sessionDetails: { ...state.sessionDetails, [sessionID]: res.data } });
+    const detail = res.data;
+    // First-sight adoption only: if a revert event or local action already
+    // set/cleared the marker, a fetched detail (whose snapshot may predate
+    // the commit) must not resurrect or contradict it.
+    let markers = state.revertMarkers;
+    if (markers[sessionID] === undefined) {
+      const staged = (detail as { revert?: { messageID?: string } }).revert?.messageID;
+      if (staged) markers = { ...markers, [sessionID]: staged };
+    }
+    setState({
+      sessionDetails: { ...state.sessionDetails, [sessionID]: detail },
+      ...(markers !== state.revertMarkers ? { revertMarkers: markers } : {}),
+    });
   } catch (err) {
     console.warn("loadSessionDetail failed:", err);
   }
@@ -1575,11 +1763,29 @@ function lastLiveAssistant(sessionID: string): LiveAssistant | undefined {
     .find((assistant) => assistant.sessionID === sessionID && assistant.id !== "pending");
 }
 
+/**
+ * A tracked session is streaming — make the run state say so. step.started
+ * already re-arms the flag; this covers streams whose step/execution events
+ * were missed but whose deltas still arrive (tracked via running/activeIDs/
+ * pane membership): without it the composer showed "idle" over a live
+ * stream. Deltas only reach handlers for tracked sessions (forLive gate),
+ * so promoting here can never mark an unrelated session running.
+ */
+function promoteRunning(sessionID: string) {
+  if (!sessionID || state.running[sessionID]) return;
+  log("run", `live via stream delta ${sessionID}`);
+  setState({
+    running: { ...state.running, [sessionID]: true },
+    queued: { ...state.queued, [sessionID]: false },
+  });
+}
+
 function settleRun(sessionID: string) {
   expireRetryNotices(sessionID);
   const running = { ...state.running };
   delete running[sessionID];
   seenExecution.delete(sessionID);
+  noteRunEnd(sessionID);
   setState({ running, queued: { ...state.queued, [sessionID]: false } });
   if (state.live.some((assistant) => assistant.sessionID === sessionID && assistant.id === "pending")) {
     setState({
@@ -1597,6 +1803,7 @@ function finishRun(sessionID: string, type: string, error?: StructuredError) {
   const running = { ...state.running };
   delete running[sessionID];
   seenExecution.delete(sessionID);
+  noteRunEnd(sessionID);
   setState({ running, queued: { ...state.queued, [sessionID]: false } });
 
   if (state.live.some((assistant) => assistant.sessionID === sessionID && assistant.id === "pending")) {
@@ -1619,7 +1826,6 @@ function finishRun(sessionID: string, type: string, error?: StructuredError) {
     });
   }
   void settleLiveMessages(sessionID);
-  }
   // Live persistence is cleared in applyFetchedMessages when the completed
   // history arrives; do not clear here or mid-stream deltas would be lost
   // before the poll reconciles.
@@ -1630,12 +1836,21 @@ function finishRun(sessionID: string, type: string, error?: StructuredError) {
 export function handleEvent(event: V2Event) {
   const { type, data } = event;
   const eventSessionID = (data as { sessionID?: string }).sessionID;
+  if (eventSessionID && (LIVE_TYPES.has(type) || type === "session.status")) {
+    // Freshest possible liveness signal — the active-map watchdog compares
+    // its age against engine-reported inactivity.
+    lastLiveSignal.set(eventSessionID, Date.now());
+  }
   // Replay protection covers EVERY session we track live for (pane + current +
   // already-live) — two sessions interleave on one SSE stream, so a reconnect
   // replay must not double-append either pane's text deltas.
   const shouldTrackForReplay = eventSessionID ? shouldTrackLive(eventSessionID) || isPaneSession(eventSessionID) : false;
   if (event.id && eventSessionID && shouldTrackForReplay && seenEventIDs.has(event.id)) return;
   if (event.id && eventSessionID && shouldTrackForReplay) {
+    // Bounded: replay protection only matters for RECENT events; a long-lived
+    // tab must not grow this set without limit. Cleared wholesale (reconnect
+    // replays arrive within seconds) and on session switches.
+    if (seenEventIDs.size > 20_000) seenEventIDs.clear();
     seenEventIDs.add(event.id);
   }
 
@@ -1658,16 +1873,65 @@ export function handleEvent(event: V2Event) {
     case "session.moved":
     case "session.forked":
     case "session.usage.updated":
-    case "session.revert.staged":
-    case "session.revert.committed":
-    case "session.revert.cleared":
       debouncedRefreshSessions();
-      // A revert rewrites history — refresh the transcript of any session
-      // whose messages we hold so removed turns disappear immediately.
       if (eventSessionID && (state.messages[eventSessionID]?.length ?? 0) > 0) {
         void loadMessages(eventSessionID);
       }
       if (type !== "session.usage.updated") void loadSessionDetail(data.sessionID);
+      break;
+
+    case "session.revert.staged": {
+      // The engine cut its view at this message — mirror it locally so the
+      // transcript hides the undone tail the instant the event lands,
+      // regardless of detail-fetch timing.
+      const staged = (data as { revert?: { messageID?: string } }).revert?.messageID;
+      if (eventSessionID && staged) setRevertMarker(eventSessionID, staged);
+      debouncedRefreshSessions();
+      if (eventSessionID && (state.messages[eventSessionID]?.length ?? 0) > 0) {
+        void loadMessages(eventSessionID);
+      }
+      if (eventSessionID) void loadSessionDetail(data.sessionID);
+      break;
+    }
+
+    case "session.revert.committed": {
+      // Commit deletes the staged message AND everything after it
+      // (probe-verified: history shrank to exactly the post-revert turns).
+      // Apply the cut locally — client-local optimistic messages belong to
+      // the NEW turn and survive. Clearing the marker also immunizes against
+      // a late detail fetch still carrying the staged snapshot.
+      const to = (data as { to?: string }).to;
+      if (eventSessionID && to) {
+        const messages = state.messages[eventSessionID] ?? [];
+        const idx = messages.findIndex((m) => m.id === to);
+        if (idx !== -1) {
+          const cut = [
+            ...messages.slice(0, idx),
+            ...messages.slice(idx).filter((m) => m.id.startsWith("msg_local_")),
+          ];
+          setState({
+            messages: { ...state.messages, [eventSessionID]: cut },
+            revertMarkers: { ...state.revertMarkers, [eventSessionID]: null },
+          });
+        } else {
+          setRevertMarker(eventSessionID, null);
+        }
+      }
+      debouncedRefreshSessions();
+      if (eventSessionID) {
+        void loadMessages(eventSessionID);
+        void loadSessionDetail(eventSessionID);
+      }
+      break;
+    }
+
+    case "session.revert.cleared":
+      if (eventSessionID) setRevertMarker(eventSessionID, null);
+      debouncedRefreshSessions();
+      if (eventSessionID && (state.messages[eventSessionID]?.length ?? 0) > 0) {
+        void loadMessages(eventSessionID);
+      }
+      if (eventSessionID) void loadSessionDetail(data.sessionID);
       break;
 
     case "session.agent.selected":
@@ -1823,7 +2087,10 @@ export function handleEvent(event: V2Event) {
           error: undefined,
           completed: undefined,
         });
-        if (!seenExecution.has(data.sessionID) && !state.running[data.sessionID]) {
+        // A step IS running — re-arm the flag unconditionally. The
+        // active-map watchdog may have cleared it during a silent stretch
+        // (long tool call); the next step event is the fresher truth.
+        if (!state.running[data.sessionID]) {
           log("run", `live via step.started ${data.sessionID}`);
           setState({
             running: { ...state.running, [data.sessionID]: true },
@@ -1869,6 +2136,7 @@ export function handleEvent(event: V2Event) {
 
     case "session.text.started":
       if (forLive(data.sessionID) && data.assistantMessageID) {
+        promoteRunning(data.sessionID);
         ensureLiveContentPart(data.sessionID, data.assistantMessageID, "text", data.ordinal ?? 0);
         if (state.queued[data.sessionID]) setState({ queued: { ...state.queued, [data.sessionID]: false } });
       }
@@ -1888,6 +2156,7 @@ export function handleEvent(event: V2Event) {
 
     case "session.reasoning.started":
       if (forLive(data.sessionID) && data.assistantMessageID) {
+        promoteRunning(data.sessionID);
         ensureLiveContentPart(data.sessionID, data.assistantMessageID, "reasoning", data.ordinal ?? 0);
       }
       break;
@@ -1906,6 +2175,7 @@ export function handleEvent(event: V2Event) {
 
     case "session.tool.input.started":
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        promoteRunning(data.sessionID);
         ensureLiveTool(data.sessionID, data.assistantMessageID, data.id, data.name);
       }
       break;
@@ -1956,7 +2226,9 @@ export function handleEvent(event: V2Event) {
       break;
     case "session.tool.success":
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
+        promoteRunning(data.sessionID);
         patchLiveTool(data.assistantMessageID, data.id, {
+          ...(typeof data.name === "string" ? { name: data.name } : {}),
           status: "completed",
           content: (data.content as ToolContent[]) ?? undefined,
           metadata: data.metadata,
@@ -1968,6 +2240,7 @@ export function handleEvent(event: V2Event) {
     case "session.tool.failed":
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         patchLiveTool(data.assistantMessageID, data.id, {
+          ...(typeof data.name === "string" ? { name: data.name } : {}),
           status: "error",
           error: data.error,
           content: (data.content as ToolContent[]) ?? undefined,
@@ -2056,6 +2329,51 @@ export function handleEvent(event: V2Event) {
   }
 }
 
+// ---- SSE-replay catch-up ---------------------------------------------------
+//
+// The engine does not replay history for a FRESH /api/event subscription, and
+// serves no mid-stream text over REST — so a browser that attached, reloaded
+// or reconnected mid-run missed everything before that moment (the "stream
+// starts seconds late" bug). The proxy records session events for us; pull
+// the ones we have not seen and feed them through the normal event path:
+// seenEventIDs drops anything already processed, appendStreamDelta makes the
+// appends overlap-safe, and out-of-order delivery cannot garble text because
+// replayed events are always OLDER than everything processed after the
+// reconnect point (SSE + replay are both in-order per session).
+
+const lastReplayID = new Map<string, string>();
+
+export async function fetchReplay(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  try {
+    const res = await api.webuiReplay(sessionID, lastReplayID.get(sessionID));
+    const events = res.data ?? [];
+    for (const evt of events) {
+      if (evt.id) lastReplayID.set(sessionID, evt.id);
+      // Same pipeline as SSE events; dedupe is id-based downstream.
+      const v2: V2Event = {
+        id: evt.id,
+        created: evt.created,
+        type: evt.type,
+        data: evt.data as V2Event["data"],
+      };
+      enqueueEvent(v2);
+    }
+    if (events.length > 0) log("sse", `replay ${sessionID}: ${events.length} event(s)`);
+  } catch {
+    /* older proxy without the recorder — SSE/poll still cover it */
+  }
+}
+
+/** Which sessions need a catch-up pull right now. */
+function replayTargets(): string[] {
+  const ids = new Set<string>();
+  for (const p of state.panes) if (p.sessionID) ids.add(p.sessionID);
+  if (state.currentSessionID) ids.add(state.currentSessionID);
+  for (const [sid, on] of Object.entries(state.running)) if (on) ids.add(sid);
+  return [...ids].filter((sid) => !!sid && !isDraftSession(sid));
+}
+
 // ---- lifecycle ----------------------------------------------------------
 
 let started = false;
@@ -2069,7 +2387,16 @@ function enqueueEvent(event: V2Event) {
     eventFlushTimer = null;
     const events = pendingEvents.splice(0, pendingEvents.length);
     batchState(() => {
-      for (const item of events) handleEvent(item);
+      for (const item of events) {
+        // One poisoned event (malformed payload, engine surprise) must not
+        // kill the REST of the batch — the stream would silently lose every
+        // event after it until the next 16ms window.
+        try {
+          handleEvent(item);
+        } catch (err) {
+          console.warn("event handler failed:", item.type, err);
+        }
+      }
     });
   }, 16);
 }
@@ -2107,51 +2434,88 @@ export function startStore() {
     .then((h) => setState({ serviceOK: h.ok }))
     .catch(() => setState({ serviceOK: false }));
   void connectEvents((env) => enqueueEvent(env.data), {
-    onOpen: () => {
+    onOpen: (info) => {
       setState({ connected: true });
       void refreshSessions();
       void refreshQueues();
+      // (Re)connected: pull anything the dead window swallowed. The engine
+      // does not replay a fresh subscription for us — the proxy recorder
+      // does. §8.4: only when the connection was actually gone long enough
+      // to miss something — a sub-second blip re-pulled the tail of every
+      // target session on every reconnect, which under a reconnect burst
+      // doubled the sweep traffic it was supposed to calm.
+      if (info.gapMs > 1000) {
+        for (const sid of replayTargets()) void fetchReplay(sid);
+      }
     },
   }).then(() => setState({ connected: false }));
   startPolling();
 }
 
-// ---- live poll fallback -------------------------------------------------
+// ---- scheduled poll fallback --------------------------------------------
 //
 // The SSE stream is the primary channel and streams character deltas. As a
-// safety net (events have proven flaky over the proxy in some runs), a light
-// poll reconciles the transcript with the service while a session is running
-// or has live content, so a finished answer can NEVER be lost behind a silent
-// SSE hiccup.
-
-const POLL_MS = 2000;
-/** Pending-request queues re-fetch every Nth poll tick (~10s): a missed or
- * renamed SSE event must never leave an agent blocked unnoticed. */
-const QUEUE_POLL_EVERY = 5;
-
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-let pollInFlight = false;
+// safety net (the push channel has proven flaky over the dev proxy in some
+// runs), a light poll reconciles the transcript with the service while a
+// session is running or has live content, so a finished answer can NEVER be
+// lost behind a silent SSE hiccup.
+//
+// All cadences live in the scheduler (src/lib/scheduler.ts) — LIVE ~2s while
+// anything is streaming/queued/pending or the SSE looks stale, IDLE ~12s in
+// a visible but quiet tab, HIDDEN ~60s. The old unconditional 2s interval +
+// 10s sweeps are gone; the invariants (a missed permission/form event can
+// never block an agent unnoticed, a finished answer can never be lost) are
+// preserved by the LIVE tier, which is exactly what "SSE dead or busy"
+// computes.
 
 function startPolling() {
-  if (pollTimer) return;
-  let tick = 0;
-  pollTimer = setInterval(() => {
-    // First two ticks queue-refresh too: boot-time REST discovery must
-    // converge fast (a hard refresh on a pending question has to repaint
-    // the panel within seconds, not wait for tick #5).
-    ++tick;
-    if (tick <= 2 || tick % QUEUE_POLL_EVERY === 0) void refreshQueues();
-    void pollOnce();
-  }, POLL_MS);
+  startScheduler({
+    isBusy: () => {
+      const s = state;
+      for (const on of Object.values(s.running)) if (on) return true;
+      for (const on of Object.values(s.queued)) if (on) return true;
+      for (const rows of Object.values(s.pending)) if (rows.length > 0) return true;
+      return s.live.length > 0;
+    },
+    isSseStale: sseStale,
+  });
+  // Transcript reconcile: no-op for free in IDLE (its target set is empty —
+  // sessions with nothing live/queued/pending never fetch).
+  registerPoller({
+    name: "messages",
+    minInterval: 2_000,
+    intervals: { live: 2_000, idle: 12_000, hidden: 60_000 },
+    run: () => pollOnce(),
+  });
+  // Permission/form queues: a missed `permission.asked`/`form.created` must
+  // never leave an agent blocked unnoticed. With the SSE channel stale this
+  // stays at the invariant's ~10s worst case; while healthy it may stretch.
+  registerPoller({
+    name: "queues",
+    minInterval: 10_000,
+    intervals: { live: 10_000, idle: 12_000, hidden: 60_000 },
+    run: () => refreshQueues(),
+  });
+  // Session/active sweep: the run-state watchdog that clears stuck
+  // running/queued flags lives inside refreshSessions, so it keeps a 10s
+  // cadence in LIVE; deep idle stretches it (the sweep fetches the whole
+  // session list — its cost is why IDLE must not run it at 10s).
+  registerPoller({
+    name: "sessions",
+    minInterval: 10_000,
+    intervals: { live: 10_000, idle: 20_000, hidden: 60_000 },
+    run: () => refreshSessions(),
+  });
 }
 
-async function reconcileSession(sid: string, historyDesc: MessageInfo[]) {
+async function reconcileSession(sid: string, historyAsc: MessageInfo[]) {
   // Reconcile every MOUNTED pane (main + splits) — each pane's live projection
   // settles through its own fetch; unmounted sessions are skipped.
   if (!state.panes.some((p) => p.sessionID === sid)) return;
-  const history = [...historyDesc].reverse();
-  applyFetchedMessages(sid, history);
+  applyFetchedMessages(sid, historyAsc);
 }
+
+let pollInFlight = false;
 
 async function pollOnce() {
   if (pollInFlight) return;
@@ -2168,6 +2532,12 @@ async function pollOnce() {
     const sid = pane.sessionID;
     if (sid && !isDraftSession(sid) && (liveForSession(sid).length > 0 || state.queued[sid])) sids.add(sid);
   }
+  // Sessions holding ANY live projection (background/unmounted included):
+  // their transcripts must keep reconciling so finished entries can retire
+  // instead of haunting the ActivityStrip forever.
+  for (const a of state.live) {
+    if (!isDraftSession(a.sessionID)) sids.add(a.sessionID);
+  }
   if (sids.size === 0) return;
 
   pollInFlight = true;
@@ -2177,8 +2547,10 @@ async function pollOnce() {
       try {
         const res = await api.messages(sid, 50);
         if (messageRequests.get(sid) !== request) continue;
+        pollFailures.delete(sid);
         const before = state.messages[sid]?.length ?? 0;
-        await reconcileSession(sid, res.data);
+        const history = [...res.data].reverse();
+        await reconcileSession(sid, history);
         const after = state.messages[sid]?.length ?? 0;
         if (after !== before) log("poll", `reconcile ${sid}: ${before} -> ${after} messages`);
         // Inbox reconciliation rides the same tick as the transcript fetch:
@@ -2186,15 +2558,65 @@ async function pollOnce() {
         // hydrate items queued from elsewhere. The queued flag also covers
         // sessions that only have the header badge so far.
         if ((state.pending[sid]?.length ?? 0) > 0 || state.queued[sid]) {
-          await reconcileInbox(sid);
+          await reconcileInbox(sid, history);
         }
-      } catch {
-        /* transient; try again next tick */
+      } catch (err) {
+        // §8.1: a fetch that keeps failing must not churn forever. A deleted
+        // session 404s on every tick while its running flag / live entries /
+        // pending rows pin it into the target set (seen live: a probe session
+        // deleted mid-run produced a 2s 404 loop that never ended, because
+        // retirement only ran on SUCCESSFUL fetches). 404 ⇒ the session is
+        // gone — retire immediately; other errors ⇒ retire after three
+        // consecutive failures so a dead service can't pin state either.
+        const msg = err instanceof Error ? err.message : String(err);
+        const f = pollFailures.get(sid) ?? { count: 0 };
+        f.count += 1;
+        pollFailures.set(sid, f);
+        if (msg.includes("404") || f.count >= 3) {
+          retireVanishedSession(sid, msg);
+          pollFailures.delete(sid);
+        }
       }
     }
   } finally {
     pollInFlight = false;
   }
+}
+
+/** Consecutive message-fetch failures per session (see pollOnce). */
+const pollFailures = new Map<string, { count: number }>();
+
+/**
+ * A session the engine no longer serves (deleted, or the service lost it):
+ * drop every client-side pin — running/queued flags, live projection,
+ * pending inbox rows, replay cursor — so the poll target set actually
+ * shrinks instead of looping on 404s forever.
+ */
+function retireVanishedSession(sessionID: string, reason: string) {
+  log("poll", `retiring vanished session ${sessionID} (${reason})`);
+  const running = { ...state.running };
+  delete running[sessionID];
+  const queued = { ...state.queued };
+  delete queued[sessionID];
+  const pending = { ...state.pending };
+  delete pending[sessionID];
+  seenExecution.delete(sessionID);
+  lastRunEnd.delete(sessionID);
+  lastLiveSignal.delete(sessionID);
+  lastReplayID.delete(sessionID);
+  const drainTimer = queueDrainTimers.get(sessionID);
+  if (drainTimer) {
+    clearTimeout(drainTimer);
+    queueDrainTimers.delete(sessionID);
+  }
+  setState({
+    running,
+    queued,
+    pending,
+    live: state.live.filter((a) => a.sessionID !== sessionID),
+  });
+  clearPersistedLive(sessionID);
+  pollFailures.delete(sessionID);
 }
 
 // ---- actions ------------------------------------------------------------
@@ -2282,6 +2704,41 @@ export function applyRevertView<T extends { id: string }>(messages: T[], revertM
   return index === -1 ? messages : messages.slice(0, index);
 }
 
+/**
+ * The authoritative revert view cut per session (see State.revertMarkers).
+ * Undefined (never touched) → fall back to the fetched session detail so a
+ * page load mid-staged-undo still cuts; any event or local action owns it
+ * from then on.
+ */
+export function revertMarkerFor(s: State, sessionID: string, detail?: SessionInfo): string | undefined {
+  const marker = s.revertMarkers[sessionID];
+  if (marker !== undefined) return marker ?? undefined;
+  const d = detail ?? s.sessionDetails[sessionID];
+  return (d as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+}
+
+function setRevertMarker(sessionID: string, messageID: string | null) {
+  if (state.revertMarkers[sessionID] === messageID) return;
+  setState({ revertMarkers: { ...state.revertMarkers, [sessionID]: messageID } });
+}
+
+/**
+ * A prompt commit-consumes a staged revert engine-side (verified: sending a
+ * prompt with a staged revert fires `session.revert.committed` and shrinks
+ * history). Apply the local cut BEFORE the prompt goes out so the send never
+ * races the async detail refresh (the stale-detail race that made an edited
+ * message show twice, old and new). The marker itself stays SET until the
+ * engine's `session.revert.committed` event lands — it remains a correct
+ * view cut the whole time, and clearing it early would let a pre-commit
+ * refetch flash the old turns back in.
+ */
+function commitRevertOptimistically(sessionID: string) {
+  const revertID = revertMarkerFor(state, sessionID);
+  if (!revertID) return;
+  const truncated = applyRevertView(state.messages[sessionID] ?? [], revertID);
+  setState({ messages: { ...state.messages, [sessionID]: truncated } });
+}
+
 export async function selectSession(
   sessionID: string | null,
   options: { history?: "push" | "replace" | "none" } = {},
@@ -2325,6 +2782,9 @@ export async function selectSession(
     // before the history fetch returns, so the transcript appears
     // immediately from the start rather than after the next delta.
     tryRestoreLiveFromStorage(sessionID);
+    // Catch up on anything streamed before we attached (mid-run join):
+    // the recorder holds the deltas the engine will never re-serve.
+    void fetchReplay(sessionID);
     // Navigating to a real session discards the pending draft — the draft
     // only exists while it IS the current surface.
     if (state.draftWorkspace !== null) setState({ draftWorkspace: null });
@@ -2428,6 +2888,8 @@ async function adoptFocusedSession(sessionID: string | null) {
   });
   if (sessionID && !isDraftSession(sessionID)) {
     tryRestoreLiveFromStorage(sessionID);
+    // Same catch-up as selectSession — pane focus counts as attaching.
+    void fetchReplay(sessionID);
     await loadMessages(sessionID);
     void reconcileInbox(sessionID).catch(() => undefined);
   }
@@ -2588,13 +3050,21 @@ export async function sendPromptTo(
   );
   await ensureSessionModel(sessionID);
   if (!isDraftSession(sessionID) && sessionBusy(sessionID)) {
+    commitRevertOptimistically(sessionID);
     await admitWhileBusy(sessionID, text, opts?.delivery);
     return;
   }
+  commitRevertOptimistically(sessionID);
   appendOptimisticUserMessage(sessionID, text);
   markPending(sessionID);
   try {
     await api.prompt(sessionID, text);
+    if (sessionID === DRAFT_SESSION_ID || (state.messages[DRAFT_SESSION_ID]?.length ?? 0) === 0) {
+      try {
+        const { clearDraft } = await import("./lib/drafts");
+        clearDraft(DRAFT_SESSION_ID);
+      } catch {}
+    }
   } catch (err) {
     clearPending(sessionID);
     recordSendError(sessionID, err);
@@ -2664,11 +3134,16 @@ async function admitWhileBusy(sessionID: string, text: string, delivery?: Prompt
     key,
     text,
     state: "sending",
+    admittedAt: Date.now(),
     ...(delivery ? { delivery } : {}),
   });
   try {
     // Omitted delivery ⇒ engine default (busy ⇒ steer at next LLM call).
-    const info = await api.prompt(sessionID, text, delivery);
+    // The response is the standard {data} envelope — the item lives in
+    // `.data`. (Reading `info.id` off the envelope left every row "sending"
+    // forever: no id to drop it by once the engine delivered the item.)
+    const res = await api.prompt(sessionID, text, delivery);
+    const info = (res as { data?: InboxInfo } | undefined)?.data ?? (res as unknown as InboxInfo | undefined);
     if (info?.id) {
       patchPendingSend(sessionID, key, (p) => ({
         ...p,
@@ -2730,13 +3205,45 @@ function samePendingList(a: PendingSend[], b: PendingSend[]): boolean {
  * 2. drop tracked rows whose id left the inbox (delivered or cancelled);
  * 3. hydrate rows for items this client didn't create (InboxPanel, another
  *    tab). Compare-before-set keeps repeat polls from churning state.
+ *
+ * `history` (ascending transcript, when the caller just fetched it) adds a
+ * lag-proof delivery signal: the engine's inbox LISTING keeps a delivered
+ * item for tens of seconds, but the delivered turn persists with the SAME id
+ * as the inbox item — any row whose id (or, for never-tracked rows, whose
+ * text past the admit time) shows up as a persisted user message was
+ * delivered, full stop.
  */
-async function reconcileInbox(sessionID: string) {
+// Exported for scripts/uitest/* regression harnesses (store-replay style).
+export async function reconcileInbox(sessionID: string, history?: MessageInfo[]) {
   const res = await api.inboxList(sessionID);
   const server = res.data.filter((i) => i.type === "user");
   const serverIDs = new Set(server.map((i) => i.id));
   const before = state.pending[sessionID] ?? [];
   let list = [...before];
+
+  // Delivered-detection from the transcript (see docblock above).
+  let persistedUserIDs: Set<string> | null = null;
+  let deliveredByTranscript = new Set<string>();
+  if (history) {
+    persistedUserIDs = new Set(
+      history.filter((m) => m.type === "user" && !m.id.startsWith("msg_local_")).map((m) => m.id),
+    );
+    for (const p of before) {
+      if (p.inboxID && persistedUserIDs.has(p.inboxID)) deliveredByTranscript.add(p.key);
+      else if (!p.inboxID && p.admittedAt !== undefined) {
+        // A row that never got its id (hung POST): match by text against
+        // persisted user messages from around its admit time (60s skew).
+        const hit = history.some(
+          (m) =>
+            m.type === "user" &&
+            !m.id.startsWith("msg_local_") &&
+            m.text === p.text &&
+            m.time.created >= p.admittedAt! - 60_000,
+        );
+        if (hit) deliveredByTranscript.add(p.key);
+      }
+    }
+  }
 
   const claimed = new Set(list.filter((p) => p.inboxID).map((p) => p.inboxID!));
   list = list.map((p) => {
@@ -2748,10 +3255,17 @@ async function reconcileInbox(sessionID: string) {
     return { ...p, state: "tracked" as const, inboxID: match.id, delivery: match.delivery };
   });
 
-  list = list.filter((p) => !(p.state === "tracked" && p.inboxID && !serverIDs.has(p.inboxID)));
+  list = list.filter(
+    (p) =>
+      !deliveredByTranscript.has(p.key) &&
+      !(p.state === "tracked" && p.inboxID && !serverIDs.has(p.inboxID)),
+  );
 
   for (const item of [...server].sort((a, b) => a.timeCreated - b.timeCreated)) {
     if (list.some((p) => p.inboxID === item.id)) continue;
+    // Already delivered (its turn is in the transcript) but the laggy listing
+    // still returns it — hydrating it here would resurrect a dropped row.
+    if (persistedUserIDs?.has(item.id)) continue;
     const text = inboxItemText(item);
     if (isOwnIdleAdmission(sessionID, text)) continue;
     list.push({
@@ -2760,14 +3274,24 @@ async function reconcileInbox(sessionID: string) {
       state: "tracked",
       inboxID: item.id,
       delivery: item.delivery,
+      admittedAt: Date.now(),
     });
   }
 
   // Merge in rows that appeared while the fetch was in flight (a fresh
-  // admitWhileBusy push) — the stale snapshot must never erase them.
+  // admitWhileBusy push) — the stale snapshot must never erase them. But
+  // NEVER resurrect rows this reconciliation just deliberately dropped
+  // (delivered via transcript, or gone from the inbox): the merge used to
+  // re-add them from live state, which made the poll unable to finish a
+  // drop — only the SSE delivered-event could, so a missed event stuck the
+  // strip row forever.
+  const droppedKeys = new Set(deliveredByTranscript);
+  for (const p of before) {
+    if (p.state === "tracked" && p.inboxID && !serverIDs.has(p.inboxID)) droppedKeys.add(p.key);
+  }
   const knownKeys = new Set(list.map((p) => p.key));
   for (const row of state.pending[sessionID] ?? []) {
-    if (!knownKeys.has(row.key)) list.push(row);
+    if (!knownKeys.has(row.key) && !droppedKeys.has(row.key)) list.push(row);
   }
 
   if (samePendingList(before, list)) return;
@@ -2793,6 +3317,7 @@ function hydrateServerInboxItem(
     state: "tracked",
     inboxID: item.id,
     delivery: item.delivery ?? "steer",
+    admittedAt: Date.now(),
   });
 }
 
@@ -2828,6 +3353,7 @@ export async function sendCommand(name: string, args?: string) {
   assertRealTarget(sid);
   log("send", `command ${sid}: /${name} ${args ?? ""}`.trim());
   await ensureSessionModel(sid);
+  commitRevertOptimistically(sid);
   appendOptimisticUserMessage(sid, args ? `/${name} ${args}` : `/${name}`);
   markPending(sid);
   try {
@@ -2845,6 +3371,7 @@ export async function sendShell(command: string) {
   assertRealTarget(sid);
   log("send", `shell ${sid}: !${command.slice(0, 60)}`);
   await ensureSessionModel(sid);
+  commitRevertOptimistically(sid);
   appendOptimisticUserMessage(sid, `!${command}`);
   markPending(sid);
   try {
@@ -2862,10 +3389,15 @@ export async function sendPromptWithFiles(text: string, files: PromptFile[]) {
   assertRealTarget(sid);
   log("send", `prompt+files ${sid}: ${text.slice(0, 80)}`);
   await ensureSessionModel(sid);
+  commitRevertOptimistically(sid);
   appendOptimisticUserMessage(sid, text);
   markPending(sid);
   try {
     await api.promptWithFiles(sid, text, files);
+    try {
+      const { clearDraft } = await import("./lib/drafts");
+      clearDraft(DRAFT_SESSION_ID);
+    } catch {}
   } catch (err) {
     clearPending(sid);
     recordSendError(sid, err);
@@ -2937,6 +3469,7 @@ export async function flushSteersNow(sessionID: string) {
   await api.interrupt(sessionID, true);
   // Reflect the stop immediately; events/poll reconciliation confirms after
   // (mirrors interrupt()).
+  noteRunEnd(sessionID);
   setState({
     running: { ...state.running, [sessionID]: false },
     queued: { ...state.queued, [sessionID]: false },
@@ -3041,12 +3574,13 @@ export async function activateSkill(id: string) {
   void refreshQueues();
 }
 
-export async function interrupt() {
-  const sid = state.currentSessionID;
+export async function interrupt(sessionID?: string) {
+  const sid = sessionID ?? state.currentSessionID;
   if (!sid || isDraftSession(sid)) return;
   disarmInterrupt();
   await api.interrupt(sid);
   // Reflect the stop immediately; events/poll reconciliation confirms after.
+  noteRunEnd(sid);
   setState({
     running: { ...state.running, [sid]: false },
     queued: { ...state.queued, [sid]: false },
@@ -3244,6 +3778,14 @@ export function setPendingWorkspace(directory: string | null) {
   setState({ pendingWorkspace: directory });
 }
 
+export function setHighlightMessage(sessionID: string, messageID: string) {
+  setState({ highlightSessionID: sessionID, highlightMessageID: messageID });
+}
+
+export function clearHighlightMessage() {
+  setState({ highlightSessionID: null, highlightMessageID: null });
+}
+
 /**
  * Turn the draft into a real session and deliver its first message.
  * Returns the created session id. Safe against double-invocation via the
@@ -3352,17 +3894,19 @@ export async function compactSession(sessionID: string, delivery: CompactDeliver
  * user message, and hand its text back to the composer (via `revertPrompt`).
  */
 export async function undoSession(sessionID: string) {
-  if (state.running[sessionID]) await interrupt();
+  if (state.running[sessionID]) await interrupt(sessionID);
   const detail =
     state.sessionDetails[sessionID] ??
     (await api.getSession(sessionID).then((r) => r.data).catch(() => undefined));
-  const revertMessageID = (detail as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+  const revertMessageID = revertMarkerFor(state, sessionID, detail ?? undefined);
   // Consecutive undos walk backwards: start from the already-reverted view.
   const visible = applyRevertView(state.messages[sessionID] ?? [], revertMessageID);
   const lastUser = [...visible].reverse().find((m) => m.type === "user");
   if (!lastUser || lastUser.id.startsWith("msg_local_")) return;
   try {
     await api.revertStage(sessionID, lastUser.id);
+    // Mirror the staged cut immediately — the SSE event confirms later.
+    setRevertMarker(sessionID, lastUser.id);
   } finally {
     void loadSessionDetail(sessionID);
     void loadMessages(sessionID);
@@ -3376,18 +3920,76 @@ export async function redoSession(sessionID: string) {
   const detail =
     state.sessionDetails[sessionID] ??
     (await api.getSession(sessionID).then((r) => r.data).catch(() => undefined));
-  const revertMessageID = (detail as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+  const revertMessageID = revertMarkerFor(state, sessionID, detail ?? undefined);
   if (!revertMessageID) return;
   try {
+    // Full array, NOT the reverted view: redo steps FORWARD past the cut.
     const messages = state.messages[sessionID] ?? [];
     const nextUser = messages.find((m) => m.type === "user" && m.id > revertMessageID);
-    if (!nextUser) await api.revertClear(sessionID);
-    else await api.revertStage(sessionID, nextUser.id);
+    if (!nextUser) {
+      await api.revertClear(sessionID);
+      setRevertMarker(sessionID, null);
+    } else {
+      await api.revertStage(sessionID, nextUser.id);
+      setRevertMarker(sessionID, nextUser.id);
+    }
   } finally {
     void loadSessionDetail(sessionID);
     void loadMessages(sessionID);
     debouncedRefreshSessions();
   }
+}
+
+export function startEditAtMessage(sessionID: string, messageID: string, text: string) {
+  // Staged — not committed until the user actually sends. Accident-free: no history is truncated on click.
+  setState({ pendingEdit: { sessionID, messageID, originalText: text ?? "" }, revertPrompt: text ?? null });
+}
+
+export function clearPendingEdit() {
+  setState({ pendingEdit: null });
+  // keep revertPrompt as-is if already consumed; otherwise clear it if it matches the pending edit
+}
+
+export async function commitPendingEdit(sessionID: string) {
+  const pending = state.pendingEdit;
+  if (!pending || pending.sessionID !== sessionID) return;
+  if (state.running[sessionID]) await interrupt(sessionID);
+  try {
+    await api.revertStage(sessionID, pending.messageID);
+  } finally {
+    void loadSessionDetail(sessionID);
+    void loadMessages(sessionID);
+    debouncedRefreshSessions();
+  }
+  // The engine auto-commits a staged revert when the NEXT prompt arrives
+  // (verified: `session.revert.committed` fires as the prompt is processed
+  // and history shrinks to the post-revert turns). Model that locally RIGHT
+  // NOW — cut the transcript at the edited message and point the marker at
+  // it — so the imminent send can never race the async detail refresh.
+  // This is the fix for the "old and new message both visible" / "where did
+  // my response go" edit bug: commitRevertOptimistically (at send time) used
+  // to read a STALE pre-stage detail, cut nothing, and a lagging staged
+  // detail could then hide the new turn behind a view cut.
+  const messages = state.messages[sessionID] ?? [];
+  const idx = messages.findIndex((m) => m.id === pending.messageID);
+  const truncated = idx === -1 ? messages : messages.slice(0, idx);
+  setState({
+    messages: { ...state.messages, [sessionID]: truncated },
+    revertMarkers: { ...state.revertMarkers, [sessionID]: pending.messageID },
+    pendingEdit: null,
+  });
+}
+
+export async function editAtMessage(sessionID: string, messageID: string, text: string) {
+  // Legacy immediate path (kept for compat) — now just stages.
+  startEditAtMessage(sessionID, messageID, text);
+}
+
+export async function forkAtMessage(sessionID: string, messageID: string) {
+  const res = await api.forkSession(sessionID, { type: "before", messageID });
+  const newID = res.data.id;
+  if (newID) await selectSession(newID);
+  return newID;
 }
 
 export function toolStateFor(part: { state?: ToolState }): ToolState | undefined {

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, Fragment, type ReactNode } from "react";
+import { useEffect, useMemo, useState, Fragment, type ReactNode, useSyncExternalStore } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Brain, ChevronRight, Paperclip, User } from "lucide-react";
+import { Brain, ChevronRight, GitBranch, Pencil, Paperclip, User } from "lucide-react";
 import type {
   AssistantMessage,
   FileAttachment,
@@ -11,14 +11,28 @@ import type {
   UserMessage,
 } from "../api/types";
 import { api } from "../api/client";
-import { useStore } from "../store";
+import { editAtMessage, forkAtMessage, useStore } from "../store";
+import { notify } from "../lib/notify";
 import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachments";
 import { formatModelRef } from "../lib/modelLabel";
 import { ToolCard } from "./ToolCard";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
 import { getPrefs, subscribePrefs } from "../prefs";
-import { getMessageDecorations, subscribeRegistry, Slot } from "../extensions/registry";
+import {
+  getMessageDecorations,
+  getMessagePartDecorations,
+  getContextMenus,
+  subscribeRegistry,
+  Slot,
+} from "../extensions/registry";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
 
 function useTimestamps(): boolean {
   const [show, setShow] = useState(getPrefs().showTimestamps);
@@ -37,19 +51,153 @@ function useRegistryVersion(): number {
   return version;
 }
 
+// useSyncExternalStore-backed tick for new extension kinds. The registry
+// exposes subscribeRegistry but not its internal version, so we maintain a
+// module-level counter that bumps on every registry notification. A single
+// registry subscription fans out to all local listeners so one registry bump
+// increments the version exactly once, regardless of subscriber count.
+let _extVersion = 0;
+const _extListeners = new Set<() => void>();
+let _extSubscribed = false;
+function ensureExtSubscribed() {
+  if (_extSubscribed) return;
+  _extSubscribed = true;
+  subscribeRegistry(() => {
+    _extVersion++;
+    for (const cb of _extListeners) cb();
+  });
+}
+function subscribeExt(cb: () => void) {
+  ensureExtSubscribed();
+  _extListeners.add(cb);
+  return () => _extListeners.delete(cb);
+}
+function getExtSnapshot() {
+  return _extVersion;
+}
+function getExtServerSnapshot() {
+  return 0;
+}
+function useExtensionVersion(): number {
+  return useSyncExternalStore(subscribeExt, getExtSnapshot, getExtServerSnapshot);
+}
+
+/** Wraps message rows with extension context menus (right-click) plus built-in Edit/Fork for user messages. */
+function MessageContextMenu({
+  message,
+  sessionID,
+  children,
+}: {
+  message: MessageInfo;
+  sessionID?: string;
+  children: ReactNode;
+}) {
+  const version = useExtensionVersion();
+  const menus = useMemo(() => getContextMenus("message"), [version]);
+  const isUser = message.type === "user" && !message.id.startsWith("msg_local_");
+  const hasBuiltIn = isUser && !!sessionID && sessionID !== "__draft__";
+  if (menus.length === 0 && !hasBuiltIn) return <>{children}</>;
+  const messageID = message.id;
+  const userText = isUser ? (message as UserMessage).text : "";
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        {/* div wrapper preserves block layout while allowing text selection */}
+        <div>{children}</div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="min-w-40">
+        {hasBuiltIn && (
+          <>
+            <ContextMenuItem
+              onSelect={() => {
+                void editAtMessage(sessionID!, messageID, userText).catch((err) =>
+                  notify({
+                    title: "Edit failed",
+                    description: err instanceof Error ? err.message : String(err),
+                    variant: "destructive",
+                  }),
+                );
+              }}
+            >
+              <Pencil className="size-3.5" /> Edit
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() => {
+                void forkAtMessage(sessionID!, messageID).catch((err) =>
+                  notify({
+                    title: "Fork failed",
+                    description: err instanceof Error ? err.message : String(err),
+                    variant: "destructive",
+                  }),
+                );
+              }}
+            >
+              <GitBranch className="size-3.5" /> Fork
+            </ContextMenuItem>
+            {menus.length > 0 && <ContextMenuSeparator />}
+          </>
+        )}
+        {menus.map((item) => (
+          <ContextMenuItem
+            key={item.id}
+            onSelect={() => {
+              try {
+                item.run({ messageID });
+              } catch (err) {
+                console.error(`[extensions] contextMenu "${item.id}" crashed:`, err);
+              }
+            }}
+          >
+            {item.label}
+          </ContextMenuItem>
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/** Renders per-part decorations inline below a single content part. */
+function PartDecorations({
+  message,
+  part,
+  partIndex,
+}: {
+  message: MessageInfo;
+  part: ToolPart;
+  partIndex: number;
+}) {
+  const version = useExtensionVersion();
+  const decorations = useMemo(() => getMessagePartDecorations(), [version]);
+  if (decorations.length === 0) return null;
+  const nodes: ReactNode[] = [];
+  for (let i = 0; i < decorations.length; i++) {
+    const dec = decorations[i]!;
+    let node: ReactNode = null;
+    try {
+      node = dec.render({ messageID: message.id, message, part, partIndex });
+    } catch (err) {
+      console.error(`[extensions] message.part "${dec.id ?? i}" crashed:`, err);
+    }
+    if (node == null) continue;
+    nodes.push(<Fragment key={dec.id ?? i}>{node}</Fragment>);
+  }
+  if (nodes.length === 0) return null;
+  return <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-[var(--text-weak)]">{nodes}</div>;
+}
+
 function formatClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function MessageItem({ message, compact = false }: { message: MessageInfo; compact?: boolean }) {
+export function MessageItem({ message, compact = false, sessionID }: { message: MessageInfo; compact?: boolean; sessionID?: string }) {
   // Extension freshness — read before the body so hooks order is stable.
   const registryVersion = useRegistryVersion();
   // Memoized on the registry version only: decorations are a static list
   // per registration state; per-message work happens in the render calls.
   const decorations = useMemo(() => getMessageDecorations(), [registryVersion]);
   return (
-    <>
-      {renderMessageBody(message, compact)}
+    <MessageContextMenu message={message} sessionID={sessionID}>
+      <>{renderMessageBody(message, compact, sessionID)}
       {/* Message decorations: a tiny inline row under the body. Guarded by
           a length check so zero registrations cost nothing; individual
           renderers are crash-isolated like slot items. */}
@@ -68,17 +216,38 @@ export function MessageItem({ message, compact = false }: { message: MessageInfo
         </div>
       )}
       <Slot region="message.after" messageID={message.id} />
-    </>
+      </>
+    </MessageContextMenu>
   );
 }
 
 /** The per-type body exactly as MessageItem always rendered it. */
-function renderMessageBody(message: MessageInfo, compact: boolean): ReactNode {
+function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string): ReactNode {
   switch (message.type) {
-    case "user":
+    case "user": {
+      const canAct = !!sessionID && !message.id.startsWith("msg_local_") && !message.id.startsWith("__draft__");
+      const onEdit = () => {
+        if (!sessionID) return;
+        void import("../store").then(({ startEditAtMessage }) => startEditAtMessage(sessionID, message.id, (message as UserMessage).text ?? ""));
+      };
+      const onFork = () => {
+        if (!sessionID) return;
+        void import("../store").then(({ forkAtMessage }) => void forkAtMessage(sessionID, message.id).catch(() => {}));
+      };
       return (
-        <Row align="right">
-          <div className="max-w-[85%]">
+        <div className="group flex w-full justify-end mb-3.5">
+          <div className="relative max-w-[85%] rounded-lg px-3 py-2">
+            {/* Hover actions — anchored to the whole row (group), not just the bubble, so moving the cursor to the buttons doesn't lose hover */}
+            {canAct && (
+              <div className="absolute top-1/2 right-full mr-3 hidden -translate-y-1/2 items-center gap-1.5 group-hover:flex">
+                <button type="button" onClick={onEdit} title="Edit from here" className="flex size-7 cursor-pointer items-center justify-center rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm hover:text-[var(--text-strong)]">
+                  <Pencil className="size-3.5" />
+                </button>
+                <button type="button" onClick={onFork} title="Fork from here" className="flex size-7 cursor-pointer items-center justify-center rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm hover:text-[var(--text-strong)]">
+                  <GitBranch className="size-3.5" />
+                </button>
+              </div>
+            )}
             <div className="flex items-center justify-end gap-1.5 text-xs text-[var(--text-weak)]">
               <TimestampIfWanted time={message.time.created} />
               <User className="size-3.5" />
@@ -89,8 +258,9 @@ function renderMessageBody(message: MessageInfo, compact: boolean): ReactNode {
               {message.text}
             </div>
           </div>
-        </Row>
+        </div>
       );
+    }
     case "assistant":
       return <AssistantView message={message} compact={compact} />;
     case "system":
@@ -367,12 +537,17 @@ function AssistantView({ message, compact }: { message: AssistantMessage; compac
         )}
         {(() => {
           const ordinal = { text: 0, reasoning: 0 };
-          return message.content.map((part) => {
+          return message.content.map((part, partIndex) => {
             const key =
               part.type === "tool"
                 ? `${message.id}:tool:${part.id}`
                 : `${message.id}:${part.type}:${ordinal[part.type]++}`;
-            return <MessagePart key={key} stateKey={key} part={part} />;
+            return (
+              <Fragment key={key}>
+                <MessagePart stateKey={key} part={part} />
+                <PartDecorations message={message} part={part as unknown as ToolPart} partIndex={partIndex} />
+              </Fragment>
+            );
           });
         })()}
       </div>

@@ -50,6 +50,29 @@ export interface CommandExtension {
   title: string;
   run: (ctx: ExtensionContext) => void;
   order?: number;
+  keybind?: string;
+}
+
+export interface MessagePartDecorationExtension {
+  kind: "message.part";
+  id: string;
+  render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null;
+}
+
+export interface ContextMenuExtension {
+  kind: "contextMenu";
+  id: string;
+  target: "message" | "session" | "file";
+  label: string;
+  run: (ctx: ExtensionContext) => void;
+  order?: number;
+}
+
+export interface HookExtension {
+  kind: "hook";
+  id: string;
+  event: "store.dispatch" | "session.prompt" | "message.render";
+  handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void>;
 }
 
 export interface MessageDecorationExtension {
@@ -102,8 +125,11 @@ export interface ToolRendererExtension {
 /** What register() accepts: first-class kinds plus the legacy slot shapes. */
 export type ExtInput =
   | { kind: "region"; id: string; region: string; render: (ctx: ExtensionContext) => ReactNode }
-  | { kind: "command"; id: string; title: string; run: (ctx: ExtensionContext) => void; order?: number }
+  | { kind: "command"; id: string; title: string; run: (ctx: ExtensionContext) => void; order?: number; keybind?: string }
   | { kind: "message.decoration"; id: string; render: (ctx: MessageDecorationCtx) => ReactNode | null }
+  | { kind: "message.part"; id: string; render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null }
+  | { kind: "contextMenu"; id: string; target: "message" | "session" | "file"; label: string; run: (ctx: ExtensionContext) => void; order?: number }
+  | { kind: "hook"; id: string; event: "store.dispatch" | "session.prompt" | "message.render"; handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void> }
   | { kind: "page"; id: string; title: string; description?: string; render: (ctx: ExtensionContext) => ReactNode }
   | { kind: "settings"; id: string; title: string; description?: string; render: () => ReactNode }
   | { id: string; slot: "sidebar" | "footer" | "composer.replace"; render: () => ReactNode }
@@ -114,6 +140,9 @@ type StoredExt =
   | RegionExtension
   | CommandExtension
   | MessageDecorationExtension
+  | MessagePartDecorationExtension
+  | ContextMenuExtension
+  | HookExtension
   | PageExt
   | SettingsExtension
   | ComposerReplaceExtension
@@ -309,6 +338,29 @@ export function getSettings(): {
   return registry.filter(
     (e): e is SettingsExtension => e.kind === "settings" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
   );
+}
+
+export function getMessagePartDecorations(): {
+  id: string;
+  render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null;
+}[] {
+  return registry.filter(
+    (e): e is MessagePartDecorationExtension => e.kind === "message.part" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+  );
+}
+
+export function getContextMenus(target: ContextMenuExtension["target"]): {
+  id: string;
+  label: string;
+  run: (ctx: ExtensionContext) => void;
+}[] {
+  return registry
+    .filter((e): e is ContextMenuExtension => e.kind === "contextMenu" && e.target === target && (enabledSet.has(e.id) || isIdEnabled(e.id)))
+    .sort((a, b) => (a.order ?? 100) - (b.order ?? 100) || a.label.localeCompare(b.label));
+}
+
+export function getHooks(event: HookExtension["event"]): HookExtension[] {
+  return registry.filter((e): e is HookExtension => e.kind === "hook" && e.event === event && (enabledSet.has(e.id) || isIdEnabled(e.id)));
 }
 
 export function getPage(id: string): PageExt | undefined {

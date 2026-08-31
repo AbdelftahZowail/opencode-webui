@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, type ReactNode } from "react";
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowUp, X } from "lucide-react";
 import {
   applyRevertView,
@@ -7,6 +7,7 @@ import {
   liveToolPart,
   loadMessages,
   pendingRequests,
+  revertMarkerFor,
   revealSubagentComposer,
   selectSession,
   useStore,
@@ -73,15 +74,42 @@ export function Conversation({
   const ownPending = useStore((s) =>
     focused ? pendingRequests(s).some((r) => r.req.sessionID === sessionID) : false,
   );
-  // A staged revert rewrites the visible transcript (service keeps full history).
+  // A staged revert rewrites the visible transcript (service keeps full
+  // history). The marker is event/local-owned (see State.revertMarkers) —
+  // reading the detail's field directly here would resurrect a cleared cut.
+  const revertMarker = useStore((s) => revertMarkerFor(s, sessionID));
   const messages = useMemo(
-    () => applyRevertView(allMessages, (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID),
-    [allMessages, session],
+    () => applyRevertView(allMessages, revertMarker),
+    [allMessages, revertMarker],
   );
 
   useEffect(() => {
     void loadMessages(sessionID);
   }, [sessionID]);
+
+  // Scroll to highlightMessageID when Sidebar search navigates to a specific message.
+  const highlightID = useStore((s) => s.highlightMessageID);
+  const highlightSID = useStore((s) => s.highlightSessionID);
+  useEffect(() => {
+    if (!highlightID || highlightSID !== sessionID) return;
+    let attempts = 0;
+    const tryScroll = () => {
+      const el = document.getElementById(`msg-${highlightID}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("ring-2", "ring-[var(--border-selected)]", "rounded-md");
+        setTimeout(() => el.classList.remove("ring-2", "ring-[var(--border-selected)]", "rounded-md"), 2000);
+        return true;
+      }
+      return false;
+    };
+    if (tryScroll()) return;
+    const iv = setInterval(() => {
+      attempts += 1;
+      if (tryScroll() || attempts > 20) clearInterval(iv);
+    }, 150);
+    return () => clearInterval(iv);
+  }, [sessionID, highlightID, highlightSID, messages]);
 
   return (
     <div className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
@@ -100,23 +128,26 @@ export function Conversation({
       <Slot region="transcript.above" sessionID={sessionID} />
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
-        <MessageScroller className="flex-1">
-          <MessageScrollerViewport>
-            {/* The 2s poll (mergeFetchedMessages) replaces the messages array
-                even when content is identical; without this guard every poll
-                re-renders the whole transcript, re-runs the scroller's stick
-                logic and toggles its data-autoscrolling attribute — the
-                flicker the user sees as data-autoscroll appearing/disappearing. */}
-            <TranscriptList
-              sessionID={sessionID}
-              messages={messages}
-              live={live}
-              running={running}
-            />
-          </MessageScrollerViewport>
-          <MessageScrollerButton direction="end" />
-          <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
-        </MessageScroller>
+        <div className="relative flex flex-1 flex-col overflow-hidden">
+          <MessageScroller className="flex-1">
+            <MessageScrollerViewport>
+              {/* The 2s poll (mergeFetchedMessages) replaces the messages array
+                  even when content is identical; without this guard every poll
+                  re-renders the whole transcript, re-runs the scroller's stick
+                  logic and toggles its data-autoscrolling attribute — the
+                  flicker the user sees as data-autoscroll appearing/disappearing. */}
+              <TranscriptList
+                sessionID={sessionID}
+                messages={messages}
+                live={live}
+                running={running}
+              />
+            </MessageScrollerViewport>
+            <MessageScrollerButton direction="end" />
+            <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
+          </MessageScroller>
+          <UserMessageRail messages={allMessages} />
+        </div>
       </MessageScrollerProvider>
 
       {/* Extension region: right after the transcript (live block included),
@@ -415,8 +446,8 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
           const compact = isAssistant && prevAssistant;
           prevAssistant = isAssistant;
           rows.push(
-            <MessageScrollerItem key={message.id} messageId={message.id}>
-              <MessageItem message={message} compact={compact} />
+            <MessageScrollerItem key={message.id} messageId={message.id} id={`msg-${message.id}`}>
+              <MessageItem message={message} compact={compact} sessionID={sessionID} />
             </MessageScrollerItem>,
           );
         }
@@ -598,6 +629,69 @@ function LiveAssistantView({
           part={part.type === "tool" ? liveToolPart(part.tool) : part}
         />
       ))}
+    </div>
+  );
+}
+
+function UserMessageRail({ messages }: { messages: MessageInfo[] }) {
+  const userMsgs = useMemo(() => messages.filter((m) => m.type === "user"), [messages]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  useEffect(() => {
+    if (userMsgs.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        if (visible[0]?.target) {
+          const id = (visible[0].target as HTMLElement).id.replace(/^msg-/, "");
+          setActiveId(id);
+        }
+      },
+      { root: null, rootMargin: "-30% 0px -60% 0px", threshold: [0, 0.25, 0.5, 1] },
+    );
+    const els: Element[] = [];
+    for (const m of userMsgs) {
+      const el = document.getElementById(`msg-${m.id}`);
+      if (el) { observer.observe(el); els.push(el); }
+    }
+    return () => { for (const el of els) observer.unobserve(el); observer.disconnect(); };
+  }, [userMsgs]);
+  if (userMsgs.length < 3) return null;
+  const scrollTo = (id: string) => {
+    const el = document.getElementById(`msg-${id}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    else {
+      try {
+        const sel = `[data-message-id="${CSS.escape(id)}"]`;
+        document.querySelector(sel)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch {}
+    }
+  };
+  return (
+    <div className="pointer-events-none absolute top-1/2 right-3 hidden -translate-y-1/2 flex-col items-center justify-center md:flex" style={{ maxHeight: "min(70vh, 560px)" }}>
+      <div className="pointer-events-auto flex flex-col items-center gap-2 rounded-full border border-[var(--border-weak-base)] bg-[var(--background-base)]/95 px-2 py-3 shadow-md backdrop-blur">
+        <div className="absolute inset-y-3 w-px bg-[var(--border-weak-base)]" />
+        {userMsgs.map((m) => {
+          const snippet = (m as { text?: string }).text ?? "";
+          const short = snippet.replace(/\s+/g, " ").slice(0, 400) || m.id.slice(0, 8);
+          const isActive = m.id === activeId;
+          return (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => scrollTo(m.id)}
+              title={short}
+              className="group relative flex size-4 items-center justify-center"
+            >
+              <span className={`rounded-full ring-1 transition-all ${isActive ? "size-3 bg-[var(--surface-brand-base)] ring-[var(--surface-brand-base)] shadow-sm" : "size-2 bg-[var(--text-weaker)] ring-[var(--border-weak-base)] group-hover:size-2.5 group-hover:bg-[var(--text-strong)]"}`} />
+              <span className="pointer-events-none absolute right-full mr-4 hidden max-w-[560px] whitespace-pre-wrap rounded-xl border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] px-4 py-3 text-sm leading-relaxed text-[var(--text-weak)] shadow-xl group-hover:block">
+                {short}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

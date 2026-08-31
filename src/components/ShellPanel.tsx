@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api, type PtyInfo, type ShellInfo } from "../api/client";
 import { cn } from "../lib/utils";
+import { registerPoller } from "../lib/scheduler";
 import { useStore } from "../store";
 import { Badge, Spinner, formatTime } from "./ui";
 import { Button } from "./ui/button";
@@ -130,8 +131,12 @@ function ShellTab({ active }: { active: boolean }) {
   useEffect(() => {
     if (!active) return;
     void load();
-    const t = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(t);
+    // Cadence owned by the scheduler (runs only while this panel is active).
+    return registerPoller({
+      name: "shell-panel-list",
+      minInterval: 5_000,
+      run: () => load(),
+    });
   }, [active, load]);
 
   const appendOutput = useCallback(async (id: string) => {
@@ -150,8 +155,15 @@ function ShellTab({ active }: { active: boolean }) {
     if (!active || !expandedId) return;
     const shell = shells.find((s) => s.id === expandedId);
     if (!shell || shell.status !== "running") return;
-    const t = window.setInterval(() => void appendOutput(expandedId), 1200);
-    return () => window.clearInterval(t);
+    // PTY output append: a cursor-offset tail fetch, not a listing sweep —
+    // genuinely needs its fast 1.2s cadence while a shell is expanded, and
+    // only while one is. Still scheduler-owned so it disappears when the
+    // panel closes or the shell exits.
+    return registerPoller({
+      name: "shell-panel-output",
+      minInterval: 1_200,
+      run: () => appendOutput(expandedId),
+    });
   }, [active, expandedId, shells, appendOutput]);
 
   const create = async () => {
@@ -396,11 +408,14 @@ function TerminalsTab({ active }: { active: boolean }) {
   useEffect(() => {
     if (!active) return;
     void load();
-    const t = window.setInterval(() => {
-      void load();
-      setNow(Date.now());
-    }, 5000);
-    return () => window.clearInterval(t);
+    return registerPoller({
+      name: "pty-panel-list",
+      minInterval: 5_000,
+      run: () => {
+        void load();
+        setNow(Date.now());
+      },
+    });
   }, [active, load]);
 
   const create = async () => {

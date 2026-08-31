@@ -372,10 +372,24 @@ export const api = {
   health: () => request<{ ok: boolean; service?: string; error?: string }>("/api/webui/status"),
 
   // sessions
+  /**
+   * Proxy-local catch-up: the recorder's ring buffer of recent session
+   * events (see server/index.ts). `since` trims to after the given event id.
+   */
+  webuiReplay: (sessionID: string, since?: string) =>
+    request<{ data: Array<{ id: string; created: number; type: string; data: unknown }> }>(
+      `/api/webui/replay?sessionID=${encodeURIComponent(sessionID)}${since ? `&since=${encodeURIComponent(since)}` : ""}`,
+    ),
+
   listSessions: (opts: { limit?: number; cursor?: string | null; search?: string } = {}) => {
-    const params = new URLSearchParams({ limit: String(opts.limit ?? 50), order: "desc" });
-    if (opts.cursor) params.set("cursor", opts.cursor);
-    if (opts.search) params.set("search", opts.search);
+    const params = new URLSearchParams();
+    params.set("limit", String(opts.limit ?? 50));
+    if (opts.cursor) {
+      params.set("cursor", opts.cursor);
+    } else {
+      params.set("order", "desc");
+      if (opts.search) params.set("search", opts.search);
+    }
     return request<SessionsResponse>(`/api/session?${params.toString()}`);
   },
   activeSessions: () =>
@@ -433,6 +447,13 @@ export const api = {
       { method: "POST" },
     );
   },
+  /** Move session to another workspace/directory. */
+  moveSession: (sessionID: string, directory: string) =>
+    request<unknown>(`/api/session/${sessionID}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ directory }),
+    }),
   /** Stage a revert at a message (undo messages + file changes up to it). */
   revertStage: (sessionID: string, messageID: string) =>
     request<unknown>(`/api/session/${sessionID}/revert/stage`, {
@@ -459,6 +480,12 @@ export const api = {
   // messaging
   messages: (sessionID: string, limit = 100) =>
     request<MessagesResponse>(`/api/session/${sessionID}/message?limit=${limit}&order=desc`),
+  messagesWithCursor: (sessionID: string, limit = 100, cursor?: string | null) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    else params.set("order", "desc");
+    return request<MessagesResponse>(`/api/session/${sessionID}/message?${params.toString()}`);
+  },
   /**
    * Send a prompt. `delivery` only matters while the session is busy: omit it
    * for the engine default (busy ⇒ steer: joins the active run at the next

@@ -20,7 +20,9 @@ export function SubagentStrip({
   const children = useStore((s) => childSessionsOf(s.sessions, sessionID));
   const runningMap = useStore((s) => s.running);
   const activeIDs = useStore((s) => s.activeIDs);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => {
+    try { return localStorage.getItem("webui.subagentStripCollapsed") !== "1"; } catch { return false; }
+  });
   // Opening a child must swap the pane it was opened FROM, not the whole app.
   const go = (sid: string) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
 
@@ -32,7 +34,13 @@ export function SubagentStrip({
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOpen((v) => {
+            const n = !v;
+            try { localStorage.setItem("webui.subagentStripCollapsed", n ? "0" : "1"); } catch {}
+            return n;
+          });
+        }}
         className="flex cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-[11px] text-[color:var(--text-weaker)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
         title="Subagent sessions of this session"
       >
@@ -108,7 +116,7 @@ function SubagentRow({
           className="min-w-0 flex-1 cursor-pointer truncate text-left text-xs text-[color:var(--text-weak)] hover:text-[color:var(--text-strong)]"
           title={`Open ${title ?? id}`}
         >
-          {title || agent || "subagent"}
+          {agent && title ? `${agent} — ${title}` : title || agent || "subagent"}
           <span className="ml-2 hidden font-mono text-[10px] text-[color:var(--text-weaker)] sm:inline">
             {id.slice(0, 12)}
           </span>

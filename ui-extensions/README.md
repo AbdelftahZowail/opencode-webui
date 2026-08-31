@@ -14,11 +14,14 @@ deliberately changed.
 | Kind | What it does |
 | --- | --- |
 | `region` | render into any `<Slot region="…">` marker placed by core (see generated table below) |
-| `command` | entry in the palette's "Extension commands" group (`run({ sessionID })`; palette-invoked) |
-| `message.decoration` | small extras under message rows; `render({ messageID, message }) => node \| null` (null skips) |
+| `command` | entry in the palette's "Extension commands" group (`run({ sessionID })`; palette or `keybind` like `ctrl+shift+k`) |
+| `message.decoration` | small extras under message rows; `render({ messageID, message }) => node \| null` |
+| `message.part` | inject after *each* part (text/tool/reasoning) inside a message; `render({messageID, message, part, partIndex})` |
+| `contextMenu` | right-click menu item (`target: "message"\|"session"\|"file"`, `label`, `run`, `order`) |
+| `hook` | intercept/behavior (`event: "session.prompt"\|"store.dispatch"\|"message.render"`, `handler(ctx,next)`) — mutate prompt text, observe dispatches |
 | `page` | full surface at `/ext/{id}` (route derived from the id); listed in the sidebar when registered |
 | `tool.renderer` | custom card for a specific tool name |
-| `settings` | titled section inside Settings › Extensions (`render: () => ReactNode`; persistence is the extension's own) |
+| `settings` | titled section inside Settings › Extensions (`render: () => ReactNode`) |
 
 Legacy `{ id, slot: "sidebar" \| "footer" \| "composer.replace", render }`
 registrations still work — they normalize onto regions internally
@@ -75,13 +78,17 @@ Everything the app can — it's the same build:
 
 - `useStore` / store actions from `src/store.ts` (session state, sending prompts, permissions)
 - `api` from `src/api/client.ts` (any endpoint)
+- `window.__opencodeUI.notify({title, description, variant})` — toasts (also available as `import {notify} from "../../src/lib/notify"` in built-ins)
+- `window.__opencodeUI.getHooks` — inspect registered hooks (runtime bridge)
 - UI primitives from `src/components/ui/` (shadcn: `Button`, `Dialog`,
-  `DropdownMenu`, `Command`, `Tooltip`, …) — always build on these so
+  `DropdownMenu`, `Command`, `Tooltip`, `ContextMenu`, …) — always build on these so
   extensions look native
 - The OC-2 design tokens in `src/styles.css` — consume as
   `var(--background-base)`, `var(--text-weak)`, `var(--border-base)`, etc.
   **Never hardcode colors**; tokens keep extensions theme-compatible
 - Any component, hook, or CSS class
+- Hooks: `register({kind:"hook", event:"session.prompt", handler:(ctx,next)=>{ ctx.text = "modified"; next() }})` to intercept prompts/dispatches.
+  Right-click menus and per-part injections need no extra setup — just register `contextMenu`/`message.part` kinds.
 
 ## Add / remove / disable
 

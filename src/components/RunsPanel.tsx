@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, Square } from "lucide-react";
 import { api } from "../api/client";
 import { childSessionsOf, closeRunsPanel, requestShellPanel, selectSession, setRunsSelection, useStore } from "../store";
+import { registerPoller } from "../lib/scheduler";
 
 /**
  * Subagents & shells panel, styled after the v2 TUI's bottom widget: a
@@ -140,8 +141,12 @@ export function RunsPanel({ sessionID, paneKey = "main" }: { sessionID: string; 
       return;
     }
     void loadShells();
-    const timer = window.setInterval(() => void loadShells(), 5000);
-    return () => window.clearInterval(timer);
+    // Cadence owned by the scheduler (runs only while this panel is open).
+    return registerPoller({
+      name: "runs-panel-shells",
+      minInterval: 5_000,
+      run: () => loadShells(),
+    });
   }, [open, loadShells]);
 
   // Kill a running shell/pty row. TUI parity: immediate, no confirm — the
@@ -302,8 +307,7 @@ export function RunsPanel({ sessionID, paneKey = "main" }: { sessionID: string; 
                   selected={i === selIdx}
                   current={c.id === sessionID}
                   running={isRunning(c.id)}
-                  label={c.title || c.id}
-                  hint={c.agent}
+                  label={c.agent && c.title ? `${c.agent} — ${c.title}` : c.title || c.agent || c.id}
                   onClick={() => {
                     closeRunsPanel();
                     void selectSession(c.id);

@@ -52,3 +52,10 @@ export function saveDraft(sessionID: string, text: string): void {
   }
   write(map);
 }
+
+export function clearDraft(sessionID: string): void {
+  const map = load();
+  if (!(sessionID in map)) return;
+  delete map[sessionID];
+  write(map);
+}

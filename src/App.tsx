@@ -6,6 +6,9 @@ import { HelpDialog } from "./components/HelpDialog";
 import { Sidebar } from "./components/Sidebar";
 import { ShellPanel } from "./components/ShellPanel";
 import { SplitPicker } from "./components/SplitPicker";
+import { ActivityStrip } from "./components/ActivityStrip";
+import { CommandKeybinds } from "./components/CommandKeybinds";
+import { Toasts } from "./components/Toasts";
 import { Slot, getPage, getPages, subscribeRegistry } from "./extensions/registry";
 import { handCharToComposer } from "./lib/composerHandoff";
 import { log } from "./lib/log";
@@ -295,10 +298,13 @@ export default function App() {
           </div>
         </div>
       </div>
+      <ActivityStrip />
       <Slot region="footer" />
       <ForeignPendingChip />
       <SplitPicker />
       <CommandPalette />
+      <CommandKeybinds />
+      <Toasts />
       <HelpDialog />
       {/* The app's ONLY ShellPanel instance: trigger-less (hidden-span
           trigger), opened by requestShellPanel() ticks from the runs panel /

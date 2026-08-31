@@ -47,6 +47,125 @@ async function serviceEndpoint() {
 }
 
 // ---------------------------------------------------------------------------
+// Live-event recorder (catch-up for late-joining browsers).
+//
+// The engine serves NO mid-stream text over REST (verified: part skeletons
+// appear with text:0 until each part ends) and a FRESH /api/event
+// subscription receives only future events — so a browser that attaches,
+// reloads or reconnects mid-run loses everything since the run started (the
+// "stream starts 5-15s late" bug). The TUI never detaches; the browser does.
+//
+// This proxy is the always-on background: it holds ONE service-side event
+// subscription of its own and keeps a bounded per-session ring buffer of
+// recent session-scoped events. Browsers fetch
+//   GET /api/webui/replay?sessionID=X[&since=<eventID>]
+// on session join and on (re)connect and feed the events through the exact
+// same reducer path — id-based dedupe (seenEventIDs) and overlap-safe delta
+// appends (appendStreamDelta) make replaying already-seen events harmless.
+// ---------------------------------------------------------------------------
+
+const RECORDER_MAX_EVENTS = 400; // per session
+const RECORDER_MAX_BYTES = 512 * 1024; // per session
+const RECORDER_SESSION_TTL_MS = 10 * 60_000; // idle sessions drop after this
+const RECORDER_MAX_SESSIONS = 60;
+const RECORDER_SEEN_MAX = 20_000; // engine-replay dedupe window
+
+// `bytes` is the event's JSON size, computed ONCE at record time — the ring
+// caps used to re-stringify on every push AND every drop. (Served replay
+// payloads carry the extra field; the client picks only known fields.)
+type RecordedEvent = { id: string; created: number; type: string; data: unknown; bytes: number };
+const replayBuffers = new Map<string, { events: RecordedEvent[]; bytes: number; lastAt: number }>();
+const recorderSeenIds = new Set<string>();
+
+function recordEvent(evt: RecordedEvent) {
+  const sessionID = (evt.data as { sessionID?: string } | undefined)?.sessionID;
+  if (!sessionID) return;
+  // Engine replays overlap on reconnect — dedupe by event id (bounded).
+  if (evt.id) {
+    if (recorderSeenIds.has(evt.id)) return;
+    recorderSeenIds.add(evt.id);
+    if (recorderSeenIds.size > RECORDER_SEEN_MAX) recorderSeenIds.clear();
+  }
+  let buf = replayBuffers.get(sessionID);
+  if (!buf) {
+    // Hard cap on tracked sessions; drop the least recently active.
+    if (replayBuffers.size >= RECORDER_MAX_SESSIONS) {
+      let oldestKey: string | null = null;
+      let oldestAt = Infinity;
+      for (const [k, v] of replayBuffers) {
+        if (v.lastAt < oldestAt) {
+          oldestAt = v.lastAt;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) replayBuffers.delete(oldestKey);
+    }
+    buf = { events: [], bytes: 0, lastAt: Date.now() };
+    replayBuffers.set(sessionID, buf);
+  }
+  const entry: RecordedEvent = { ...evt, bytes: JSON.stringify(evt).length };
+  buf.events.push(entry);
+  buf.bytes += entry.bytes;
+  buf.lastAt = Date.now();
+  // Ring caps: newest wins.
+  while (buf.events.length > RECORDER_MAX_EVENTS || buf.bytes > RECORDER_MAX_BYTES) {
+    const dropped = buf.events.shift();
+    if (!dropped) break;
+    buf.bytes -= dropped.bytes;
+  }
+  // TTL prune (cheap: on insert, only when the map is large).
+  if (replayBuffers.size > 8) {
+    const now = Date.now();
+    for (const [k, v] of replayBuffers) {
+      if (now - v.lastAt > RECORDER_SESSION_TTL_MS) replayBuffers.delete(k);
+    }
+  }
+}
+
+let recorderRunning = false;
+async function startEventRecorder() {
+  if (recorderRunning) return;
+  recorderRunning = true;
+  void (async () => {
+    for (;;) {
+      try {
+        const ep = await serviceEndpoint();
+        const res = await fetch(`${ep.url}/api/event`, { headers: Service.headers(ep) });
+        if (!res.ok || !res.body) throw new Error(`recorder: ${res.status}`);
+        console.log("[webui] event recorder connected");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            try {
+              const parsed = JSON.parse(trimmed.slice("data:".length).trim()) as RecordedEvent;
+              if (typeof parsed.type === "string" && parsed.type.startsWith("session.")) {
+                recordEvent(parsed);
+              }
+            } catch {
+              /* malformed line — skip */
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[webui] event recorder dropped, reconnecting:", err instanceof Error ? err.message : err);
+        // The service may have restarted with a NEW url — re-discover.
+        endpoint = null;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
 // Plugin web-UI extensions.
 //
 // opencode v2 plugins may ship an optional BROWSER half next to their server
@@ -204,6 +323,22 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       }
     }
 
+    // Live-event replay — proxy-local (the engine has no such route), serves
+    // the recorder's ring buffer so a late-joining browser can catch up.
+    if (method === "GET" && path === "/api/webui/replay") {
+      const sessionID = url.searchParams.get("sessionID");
+      if (!sessionID) return Response.json({ error: "sessionID required" }, { status: 400 });
+      const since = url.searchParams.get("since") ?? "";
+      const buf = replayBuffers.get(sessionID);
+      let events = buf?.events ?? [];
+      if (since) {
+        const idx = events.findIndex((e) => e.id === since);
+        if (idx >= 0) events = events.slice(idx + 1);
+      }
+      dbg("replay:", sessionID, `${events.length} event(s)`);
+      return Response.json({ data: events });
+    }
+
     // Plugin web-UI extensions — must match before the generic /api proxy.
     if (method === "GET" && path === "/api/webui/extensions") {
       // discoverUIEntries never throws; failures collapse to { data: [] }.
@@ -350,3 +485,4 @@ const server: Server<Record<string, unknown>> = Bun.serve({
 });
 
 console.log(`[webui] proxy listening on http://127.0.0.1:${server.port}`);
+void startEventRecorder();

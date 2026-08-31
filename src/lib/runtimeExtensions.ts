@@ -1,5 +1,7 @@
-import { disableRuntimeIds, enableRuntimeIds } from "../extensions/registry";
+import { disableRuntimeIds, enableRuntimeIds, getHooks, register } from "../extensions/registry";
 import { isDisabled } from "./extGate";
+import { notify } from "./notify";
+import { registerPoller } from "./scheduler";
 
 /**
  * Runtime extension loader — brings plugin-shipped UI halves into the app.
@@ -46,10 +48,20 @@ const loaded = new Map<string, string>();
 
 const POLL_MS = 8_000;
 
+function ensureBridge() {
+  const w = window as unknown as Record<string, unknown>;
+  const bridge = (w.__opencodeUI ?? {}) as Record<string, unknown>;
+  if (!bridge.notify) bridge.notify = notify;
+  if (!bridge.getHooks) bridge.getHooks = getHooks;
+  if (!bridge.register) bridge.register = register;
+  w.__opencodeUI = bridge;
+}
+
 /** Guard so startRuntimeExtensions() is safe to call more than once. */
 let started = false;
 
 async function pollOnce(opts?: { force?: boolean }): Promise<void> {
+  ensureBridge();
   // Background tabs skip RE-DISCOVERY ticks — but the very first (boot) tick
   // always runs, so extensions are ready the moment the user looks at the
   // tab even if it loaded in the background.
@@ -99,12 +111,17 @@ async function pollOnce(opts?: { force?: boolean }): Promise<void> {
   if (stale.length > 0) disableRuntimeIds(stale);
 }
 
-/** Kicks off polling (immediately, then every 8s while visible). Idempotent. */
+/** Kicks off manifest polling (immediately, then on the scheduler's 8s
+ * cadence while the tab is visible — the scheduler skips hidden tabs, which
+ * replaces this module's own document.hidden check). Idempotent. */
 export function startRuntimeExtensions(): void {
   if (started) return;
   started = true;
+  ensureBridge();
   void pollOnce({ force: true }); // boot tick: unconditional
-  setInterval(() => {
-    void pollOnce();
-  }, POLL_MS);
+  registerPoller({
+    name: "extensions-manifest",
+    minInterval: POLL_MS,
+    run: () => pollOnce(),
+  });
 }

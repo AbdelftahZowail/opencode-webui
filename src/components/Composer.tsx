@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListTree, Send, Terminal, X } from "lucide-react";
+import { ListTree, Pencil, Send, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
-import type { FsEntry, PromptFile, PtyInfo, ShellInfo } from "../api/client";
+import type { FsEntry, LocationInfo, ProjectInfo, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
 import {
   attachmentPromptFile,
@@ -26,6 +26,7 @@ import {
   closeRunsPanel,
   openRunsPanel,
   redoSession,
+  refreshSessions,
   renameSession,
   requestInterrupt,
   selectSession,
@@ -40,6 +41,7 @@ import {
   getState,
   type SendPromptOptions,
 } from "../store";
+import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Slot } from "../extensions/registry";
@@ -168,15 +170,15 @@ function usePrefs(): Prefs {
 
 /**
  * Live shells (backgrounded or currently-running commands) and PTYs for the
- * session's workspace. Light 5s poll, paused while the tab is hidden — the
- * same cadence ShellPanel uses when its dialog is open.
+ * session's workspace, feeding the runs chips. Polling is owned by the
+ * scheduler: ~5s while anything is live, ~15s in a quiet visible tab,
+ * nothing while the tab is hidden (the old own-setInterval + hidden check).
  */
 function useRunningRuns(location?: string): { shells: ShellInfo[]; ptys: PtyInfo[] } {
   const [runs, setRuns] = useState<{ shells: ShellInfo[]; ptys: PtyInfo[] }>({ shells: [], ptys: [] });
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const loc = location ? { directory: location } : undefined;
         const [shells, ptys] = await Promise.all([api.shellList(loc), api.ptyList(loc)]);
@@ -187,11 +189,12 @@ function useRunningRuns(location?: string): { shells: ShellInfo[]; ptys: PtyInfo
       }
     }
     void load();
-    const timer = window.setInterval(() => void load(), 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+    return registerPoller({
+      name: "composer-runs",
+      minInterval: 5_000,
+      intervals: { live: 5_000, idle: 15_000 },
+      run: () => load(),
+    });
   }, [location]);
   return runs;
 }
@@ -337,6 +340,9 @@ export function Composer({
   const runsPanelOpen = useStore((s) => s.runsPanelOpen);
   const [skillsMenu, setSkillsMenu] = useState(false);
   const skillsMenuRef = useDismiss(skillsMenu, () => setSkillsMenu(false));
+  const [movePickerOpen, setMovePickerOpen] = useState(false);
+  const pendingEdit = useStore((s) => s.pendingEdit);
+  const isEditingThisSession = pendingEdit?.sessionID === sessionID;
 
   useEffect(() => {
     void api.commands().then(setCommands);
@@ -407,6 +413,33 @@ export function Composer({
         aliases: ["resume", "continue"],
         description: "Switch session",
         run: () => go(null),
+      },
+      {
+        name: "move",
+        description: "Move session to another workspace",
+        run: (args) => {
+          const dir = args.trim();
+          if (isDraftSession(sessionID)) {
+            window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: "Create a session first", variant: "destructive" } }));
+            return;
+          }
+          if (dir) {
+            void api
+              .moveSession(sessionID, dir)
+              .then(() => {
+                window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Moved to ${dir}` } }));
+                void loadSessionDetail(sessionID);
+                void refreshSessions();
+              })
+              .catch((err: unknown) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Move failed: ${msg}`, variant: "destructive" } }));
+              });
+            return;
+          }
+          // No args → open the TUI-style directory picker dialog.
+          setMovePickerOpen(true);
+        },
       },
       {
         name: "undo",
@@ -720,6 +753,12 @@ export function Composer({
       // any of the send kinds below may run.
       const sid = await resolveSendTarget();
       if (!sid) return;
+      // Staged edit: commit the revert only when the user actually sends (accident-free).
+      const pending = getState().pendingEdit;
+      if (pending && pending.sessionID === sid) {
+        const { commitPendingEdit } = await import("../store");
+        await commitPendingEdit(sid);
+      }
       if (shellMode) {
         await sendShell(value.startsWith("!") ? value.slice(1) : value);
       } else if (value.startsWith("!")) {
@@ -870,6 +909,20 @@ export function Composer({
             >
               {/* Extension region: very top inside the composer card. */}
               <Slot region="composer.above" sessionID={sessionID} />
+              {isEditingThisSession && pendingEdit && (
+                <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs">
+                  <span className="flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-300">
+                    <Pencil className="size-3" /> Editing
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[var(--text-weaker)]" title={pendingEdit.originalText}>
+                    {pendingEdit.originalText.slice(0, 80).replace(/\s+/g, " ") || "(empty)"}
+                  </span>
+                  <span className="hidden text-[10px] text-[var(--text-weaker)] sm:inline">will revert on send</span>
+                  <button type="button" onClick={() => { void import("../store").then(m => m.clearPendingEdit()); }} title="Dismiss edit — next send is a normal message" className="ml-auto flex size-6 cursor-pointer items-center justify-center rounded-md hover:bg-black/10 dark:hover:bg-white/10">
+                    <X className="size-3" />
+                  </button>
+                </div>
+              )}
               {attachments.length > 0 && (
                 <div className="mb-1.5 flex flex-wrap items-start gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5">
                   {attachments.map((att) => (
@@ -1204,6 +1257,78 @@ export function Composer({
         <div className="mt-1.5 flex items-center justify-between px-1 text-[11px] text-[color:var(--text-weaker)]">
           {hint}
           {cwd && <p className="hidden truncate font-mono sm:block">{cwd}</p>}
+        </div>
+      </div>
+      {movePickerOpen && (
+        <MovePickerDialog
+          sessionID={sessionID}
+          currentDirectory={sessionLocation}
+          onClose={() => setMovePickerOpen(false)}
+          onMoved={(dir) => {
+            setMovePickerOpen(false);
+            window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Moved to ${dir}` } }));
+            void loadSessionDetail(sessionID);
+            void refreshSessions();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function MovePickerDialog({ sessionID, currentDirectory, onClose, onMoved }: { sessionID: string; currentDirectory?: string; onClose: () => void; onMoved: (dir: string) => void }) {
+  const [dirs, setDirs] = useState<string[]>([]);
+  const [custom, setCustom] = useState("");
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [projects, loc] = await Promise.all([api.projectList().catch(() => [] as ProjectInfo[]), api.location().catch(() => null as LocationInfo | null)]);
+        if (cancelled) return;
+        const set = new Set<string>();
+        for (const p of projects as ProjectInfo[]) {
+          const d = (p as ProjectInfo).directory;
+          if (d) set.add(d);
+        }
+        if ((loc as LocationInfo | null)?.directory) set.add((loc as LocationInfo).directory);
+        if (currentDirectory) set.add(currentDirectory);
+        setDirs([...set].sort());
+      } catch {}
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [currentDirectory]);
+  const doMove = (dir: string) => {
+    const trimmed = dir.trim();
+    if (!trimmed) return;
+    void api.moveSession(sessionID, trimmed).then(() => onMoved(trimmed)).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Move failed: ${msg}`, variant: "destructive" } }));
+    });
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-medium text-[var(--text-strong)]">Move session</h3>
+        <p className="mt-1 text-xs text-[var(--text-weaker)]">Pick a workspace or enter a path. Mirrors the TUI picker.</p>
+        {loading ? (
+          <p className="mt-4 text-xs text-[var(--text-weaker)]">Loading workspaces…</p>
+        ) : (
+          <div className="mt-3 max-h-56 overflow-y-auto rounded-md border border-[var(--border-weak-base)]">
+            {dirs.map((d) => (
+              <button key={d} type="button" onClick={() => doMove(d)} className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-[var(--surface-base-hover)] ${d === currentDirectory ? "bg-[var(--surface-raised-base-active)] font-medium" : ""}`}>
+                <span className="truncate font-mono text-[var(--text-strong)]">{d.replace(/^\/(home|Users)\/[^/]+/, "~")}</span>
+                {d === currentDirectory && <span className="ml-2 text-[10px] text-[var(--text-weaker)]">current</span>}
+              </button>
+            ))}
+            {dirs.length === 0 && <p className="px-3 py-2 text-xs text-[var(--text-weaker)]">No workspaces found</p>}
+          </div>
+        )}
+        <div className="mt-3 flex gap-2">
+          <input value={custom} onChange={(e) => setCustom(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doMove(custom); if (e.key === "Escape") onClose(); }} placeholder="Custom path — e.g. /home/z/projects/foo" className="flex-1 rounded-md border border-[var(--border-base)] bg-[var(--input-base)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--border-selected)]" autoFocus />
+          <button type="button" onClick={() => doMove(custom)} disabled={!custom.trim()} className="rounded-md bg-[var(--surface-brand-base)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">Move</button>
+          <button type="button" onClick={onClose} className="rounded-md border border-[var(--border-weak-base)] px-3 py-1.5 text-xs">Cancel</button>
         </div>
       </div>
     </div>

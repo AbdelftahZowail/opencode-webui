@@ -7,6 +7,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { isDisabled, setDisabled, subscribeExtGate } from "../../lib/extGate";
+import { registerPoller } from "../../lib/scheduler";
 import { getSettings, subscribeRegistry } from "../../extensions/registry";
 import { enabled as builtinExtensions } from "../../../ui-extensions/config";
 import { ConfigSection } from "./ConfigSection";
@@ -175,18 +176,14 @@ function ExtensionsSection() {
       }
     };
     void load();
-    const poll = setInterval(load, 10_000);
-    // Catch up immediately on returning to a visible tab instead of waiting
-    // out the current interval tick.
-    const onVisibility = () => {
-      if (!document.hidden) void load();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      cancelled = true;
-      clearInterval(poll);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
+    // Cadence owned by the scheduler (runs only while this section is
+    // mounted); the scheduler's visibilitychange kick covers the "catch up
+    // on tab return" duty the old local listener handled.
+    return registerPoller({
+      name: "extensions-runtime-list",
+      minInterval: 10_000,
+      run: () => load(),
+    });
   }, []);
 
   // Extension-contributed settings sections; re-read when registrations change.

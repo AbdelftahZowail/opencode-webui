@@ -5,6 +5,7 @@ import {
   type RunNotice,
   type RunNoticeKind,
 } from "../store";
+import { registerPoller } from "../lib/scheduler";
 
 /**
  * Transient run-problem notes for this session (provider retries, run
@@ -88,8 +89,11 @@ function useRelativeTick(enabled: boolean) {
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!enabled) return;
-    const timer = setInterval(() => setTick((n) => n + 1), 15_000);
-    return () => clearInterval(timer);
+    return registerPoller({
+      name: "run-notices-age",
+      minInterval: 15_000,
+      run: () => setTick((n) => n + 1),
+    });
   }, [enabled]);
 }
 
@@ -115,6 +119,11 @@ function useNoticeCountdown(sessionID: string, notices: RunNotice[] | undefined)
     }
 
     let last = Date.now();
+    // Kept as a LOCAL interval on purpose: this is visible-time metrology,
+    // not a fetch cadence. It must keep timestamping wall-clock while the
+    // tab is hidden (its hidden early-return IS the pause contract) — the
+    // scheduler deliberately skips hidden tabs, which would stall `last`
+    // and burn the whole hidden window on the first visible tick.
     const timer = setInterval(() => {
       const now = Date.now();
       const delta = now - last;

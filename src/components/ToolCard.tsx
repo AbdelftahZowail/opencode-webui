@@ -193,6 +193,8 @@ function InlineTool({
   state,
   runningLabel,
   runningIcon,
+  input,
+  part,
 }: ToolProps & {
   icon: string;
   label?: ReactNode;
@@ -211,37 +213,56 @@ function InlineTool({
   runningIcon?: ReactNode;
 }) {
   const [showError, setShowError] = useState(false);
+  const [showStreaming, setShowStreaming] = useState(false);
   const failed = !!error;
   const running = state.status === "running";
   const inFlight = running || state.status === "streaming";
+  const streamingPreview = (() => {
+    const entries = Object.entries((input ?? {}) as Record<string, unknown>).filter(([, v]) => v !== undefined && v !== null && v !== "");
+    if (entries.length > 0) {
+      const pairs: string[] = [];
+      for (const [k, v] of entries) {
+        if (pairs.length >= 3) break;
+        const raw = typeof v === "string" ? v : (() => { try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } })();
+        if (!raw || raw === "{}" || raw === "[]") continue;
+        pairs.push(`[${k}=${oneLine(raw, 40)}]`);
+      }
+      if (pairs.length > 0) return pairs.join(" ");
+    }
+    if (streamingText && streamingText.trim()) return oneLine(streamingText, 80);
+    return undefined;
+  })();
   const body = inFlight && runningLabel !== undefined ? (
     <span className="text-[var(--text-base)]">{runningLabel}</span>
-  ) : running ? (
+  ) : inFlight ? (
     <span className="flex items-center gap-2 text-[var(--text-base)]">
       <Spinner className="size-3" />
-      {pending}
-    </span>
-  ) : streamingText !== undefined ? (
-    <span className="flex items-center gap-2 text-[var(--text-base)]">
-      <Spinner className="size-3" />
-      <span className="truncate font-mono">{oneLine(streamingText)}</span>
+      <span className="font-medium">{part.name}</span>
+      {streamingPreview ? (
+        <span className="truncate font-mono text-[var(--text-weaker)]">{streamingPreview}</span>
+      ) : (
+        <span className="text-[var(--text-weaker)]">{pending}</span>
+      )}
     </span>
   ) : (
     <span className={failed ? "" : complete ? "text-[var(--text-weak)]" : "text-[var(--text-base)]"}>
       {label ?? children}
     </span>
   );
+  const expandableStreaming = !failed && !onClick && streamingText !== undefined && streamingText.trim().length > 0;
+  const clickable = !!(onClick || failed || expandableStreaming);
 
   return (
     <div className="py-0.5 pl-1 text-xs">
       <div
-        role={onClick || failed ? "button" : undefined}
+        role={clickable ? "button" : undefined}
         onClick={() => {
           if (failed) setShowError((v) => !v);
+          else if (expandableStreaming) setShowStreaming((v) => !v);
           else onClick?.();
         }}
         className={`flex min-w-0 items-center gap-2 ${
-          onClick || failed ? "cursor-pointer" : ""
+          clickable ? "cursor-pointer rounded px-1 -mx-1 hover:bg-[color:var(--surface-base-hover)]" : ""
         } ${failed ? "text-[color:var(--surface-critical-strong)]" : ""}`}
       >
         <span
@@ -252,6 +273,9 @@ function InlineTool({
           {inFlight && runningIcon !== undefined ? runningIcon : icon}
         </span>
         <span className="min-w-0 flex-1 truncate">{body}</span>
+        {expandableStreaming && (
+          <ChevronRight className={`size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${showStreaming ? "rotate-90" : ""}`} />
+        )}
       </div>
       {failed && showError && (
         <pre className="ml-5 mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-[color-mix(in_oklch,var(--surface-critical-strong)_30%,transparent)] bg-[var(--surface-critical-weak)] p-2 font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
@@ -259,8 +283,13 @@ function InlineTool({
         </pre>
       )}
       {/* Failed tools often carry partial output before dying — the TUI keeps
-          it visible (capped) instead of dropping the lines entirely. */}
+           it visible (capped) instead of dropping the lines entirely. */}
       {failed && !showError && output && <FailedOutput output={output} />}
+      {expandableStreaming && showStreaming && (
+        <pre className="ml-5 mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-[color-mix(in_oklch,var(--border-selected)_20%,transparent)] bg-[var(--background-strong)] p-2 font-mono text-[10px] leading-relaxed text-[var(--text-weak)]">
+          {streamingText}
+        </pre>
+      )}
     </div>
   );
 }

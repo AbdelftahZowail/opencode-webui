@@ -84,10 +84,9 @@ export function CommandPalette() {
   // open); no subscription/polling — a mid-open registry change self-corrects
   // on the next open. The typeof guard rides out HMR ordering while the
   // registry module is being reworked.
-  const extensionCommands =
-    typeof getCommands === "function"
-      ? getCommands()
-      : [];
+  const extensionCommands = (
+    typeof getCommands === "function" ? getCommands() : []
+  ) as unknown as Array<{ id: string; title: string; run: (ctx: { sessionID?: string }) => void; keybind?: string }>;
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
@@ -161,25 +160,29 @@ export function CommandPalette() {
           <>
             <CommandSeparator />
             <CommandGroup heading="Extension commands">
-              {extensionCommands.map((c) => (
-                <CommandItem
-                  key={c.id}
-                  // Explicit value so the query matches BOTH title and id
-                  // (text content alone only carries the title).
-                  value={`${c.title} ${c.id}`}
-                  onSelect={() => {
-                    setOpen(false);
-                    try {
-                      c.run({ sessionID: currentSessionID ?? undefined });
-                    } catch (err) {
-                      console.error("[extensions] command failed:", err);
-                    }
-                  }}
-                >
-                  <Puzzle />
-                  <span className="truncate">{c.title}</span>
-                </CommandItem>
-              ))}
+              {extensionCommands.map((c) => {
+                const kb = (c as { keybind?: string }).keybind;
+                return (
+                  <CommandItem
+                    key={c.id}
+                    // Explicit value so the query matches BOTH title and id
+                    // (text content alone only carries the title).
+                    value={`${c.title} ${c.id} ${kb ?? ""}`}
+                    onSelect={() => {
+                      setOpen(false);
+                      try {
+                        c.run({ sessionID: currentSessionID ?? undefined });
+                      } catch (err) {
+                        console.error("[extensions] command failed:", err);
+                      }
+                    }}
+                  >
+                    <Puzzle />
+                    <span className="truncate">{c.title}</span>
+                    {kb ? <CommandShortcut>{kb}</CommandShortcut> : null}
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
           </>
         )}

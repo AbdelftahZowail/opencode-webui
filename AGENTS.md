@@ -36,6 +36,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/api/types.ts` | All API schemas — copy from the service's `/openapi.json` (the contract) |
 | `src/api/client.ts` | Typed REST client (one function per endpoint) |
 | `src/api/events.ts` | SSE parser for `/api/event` + reconnection |
+| `src/lib/scheduler.ts` | The one fetch/tick scheduler — tiers (live/idle/hidden), registered pollers, no component-owned `setInterval` |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
 | `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip` (pending steers/queue), `PendingRequestsPanel` (permissions/questions/forms), `ui` (primitives) |
 | `src/extensions/registry.tsx` | The slot registry — the stable contract for UI extensions (do not change lightly) |
@@ -179,10 +180,15 @@ install). They register against a small vocabulary of **kinds**:
 | Kind | What it does | Surfaces via |
 | --- | --- | --- |
 | `region` | renders into any `<Slot region="…">` marker in core markup | generated table: `bun run regions` |
-| `command` | palette action (`Extension commands` group) | command palette (⌘/ctrl-K) |
+| `command` | palette action (`Extension commands` group) — add `keybind:"ctrl+shift+k"` for global hotkey | palette (⌘/ctrl-K) + keybind |
 | `message.decoration` | per-message extras (`render({ messageID, message }) => node \| null`) | under every message row |
+| `message.part` | inject after each text/tool/reasoning part inside a message | inside `MessageItem` per part |
+| `contextMenu` | right-click item `target:"message"\|"session"\|"file"` | context menu |
+| `hook` | intercept `session.prompt` (mutate `ctx.text`), observe `store.dispatch` | store middleware |
 | `page` | full surface at auto-route `/ext/{id}` | sidebar links + direct URL |
 | `tool.renderer` | custom card for a tool name | tool cards |
+| `settings` | titled section inside Settings › Extensions | Settings dialog |
+| toasts | `window.__opencodeUI.notify({title, variant})` | bottom-right stack, 3s |
 | legacy slots (`sidebar`, `footer`, `composer.replace`) | normalized onto regions internally | unchanged |
 
 - **Add a feature**: create `ui-extensions/<name>/index.tsx`, call
@@ -249,6 +255,17 @@ The service emits one assistant message per step (reasoning / tool / text)
 and in this deployment often NO `session.execution.*` events — so the store
 treats the step events as the run lifecycle and keeps an ordered live projection:
 
+- **Proxy-side event recorder** (`server/index.ts`): the proxy keeps ONE
+  always-on service-side subscription and a bounded per-session ring buffer
+  (400 events / 512KB / 10min TTL). The engine serves NO mid-stream text over
+  REST (part skeletons arrive with `text:0`) and does NOT replay a fresh
+  `/api/event` subscription — so a browser that attaches, reloads or
+  reconnects mid-run pulls the gap from `GET /api/webui/replay?sessionID=X`
+  (`fetchReplay` in the store, on session adopt + SSE reconnect) and feeds it
+  through the normal event path; id-based dedupe and overlap-safe delta
+  appends make replays harmless. `scripts/uitest/catchup-check.ts` proves a
+  late join reconstructs the stream.
+
 - **`store.queued` ("waiting")**: set optimistically on every send AND on
   `session.inbox.enqueued`; cleared on the first live event
   (`execution.started` / `step.started` / `text.started`). Covers both the
@@ -262,13 +279,27 @@ treats the step events as the run lifecycle and keeps an ordered live projection
   rebuilds a stream as separate reasoning → text → tools buckets.
 - **Frame-batched events**: SSE events are reduced in 16ms batches so a burst
   of token deltas produces one React update instead of one render per delta.
-- **SSE watchdog** (`events.ts`): if no bytes arrive for 30s the reader is
-  cancelled and the stream reconnects (the service replays recent events).
-- **Always-poll fallback** (`store.pollOnce`): every 2s the current session's
-  messages are fetched and reconciled — replace newer copies of existing
-  messages, keep unfinished persisted assistants behind the live overlay, and
-  drop optimistic `msg_local_` copies once the real message exists. A finished
-  answer can never be lost.
+- **SSE watchdog** (`events.ts`): if no bytes arrive for 20s (heartbeats come
+  every ~15s) the reader is cancelled and the stream reconnects; its byte-age
+  health signal (`sseStale()`) is what the scheduler reads to decide the REST
+  fallback tier.
+- **Fetch scheduler** (`src/lib/scheduler.ts`): the ONLY owner of recurring
+  timers. One 1s loop picks a tier — LIVE ~2s (anything running/queued/
+  pending/live, or the SSE byte-age is stale), IDLE ~12s (visible, quiet tab),
+  HIDDEN ~60s (document.hidden) — and runs registered pollers
+  (`messages`/`queues`/`sessions` in the store, plus composer/panels/
+  extensions pollers) no more often than their per-tier interval, with
+  registration jitter and in-flight guards. Components never own
+  `setInterval`; they `registerPoller()` or derive from store state. A
+  visibilitychange kick catches up due pollers on tab return.
+- **Poll fallback** (`store.pollOnce`): on the scheduler's LIVE tier the
+  running/queued/pending/live sessions' messages are fetched and reconciled —
+  replace newer copies of existing messages, keep unfinished persisted
+  assistants behind the live overlay, and drop optimistic `msg_local_` copies
+  once the real message exists; sessions whose fetches keep failing (404 ⇒
+  immediately, otherwise after 3 tries) are retired (flags, live entries,
+  pending rows, replay cursor) so a deleted session can't 404-loop forever. A
+  finished answer can never be lost.
 - **`settleLiveMessages`**: on execution end, reload history; if live
   assistants aren't persisted yet, keep them visible and retry once after
   1.5s.

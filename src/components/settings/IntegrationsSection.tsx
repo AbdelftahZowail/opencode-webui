@@ -7,6 +7,7 @@ import { Badge } from "../ui";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogFooter, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { CopyButton, Empty, ErrorNote, SectionHeader, inputCls, useAsync } from "./shared";
+import { registerPoller } from "../../lib/scheduler";
 
 const dialogCls =
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 text-sm text-popover-foreground duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95";
@@ -80,12 +81,13 @@ function useAttempt(
         /* keep polling */
       }
     };
-    const t = setInterval(tick, 2000);
-    return () => {
-      stopped = true;
-      clearInterval(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // OAuth attempt status: short-lived (only while an attempt pends) and
+    // genuinely wants its snappy 2s cadence — still scheduler-owned.
+    return registerPoller({
+      name: "integration-attempt",
+      minInterval: 2_000,
+      run: () => tick(),
+    });
   }, [target?.integrationID, target?.methodID, activeAttemptID, activeStatus]);
 
   return state;

@@ -4,6 +4,7 @@ import { Inbox as InboxIcon, Send, Trash2, XIcon } from "lucide-react";
 import { api } from "../api/client";
 import type { InboxInfo } from "../api/types";
 import { useStore } from "../store";
+import { registerPoller } from "../lib/scheduler";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogFooter, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "./ui/dialog";
@@ -44,8 +45,12 @@ export function InboxPanel({
   useEffect(() => {
     if (!open || !currentSessionID) return;
     void load();
-    const timer = setInterval(() => void load(), 5000);
-    return () => clearInterval(timer);
+    // Cadence owned by the scheduler (runs only while this panel is open).
+    return registerPoller({
+      name: "inbox-panel",
+      minInterval: 5_000,
+      run: () => load(),
+    });
   }, [open, currentSessionID, load]);
 
   const run = async (fn: () => Promise<unknown>) => {

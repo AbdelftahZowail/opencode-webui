@@ -8,9 +8,10 @@ import "./styles.css";
 import { startStore, useStore } from "./store";
 import "../ui-extensions";
 import { log } from "./lib/log";
-import { register } from "./extensions/registry";
+import { register, getHooks } from "./extensions/registry";
 import { api } from "./api/client";
 import { startRuntimeExtensions } from "./lib/runtimeExtensions";
+import { notify } from "./lib/notify";
 
 const DEBUG_CONSOLE = typeof localStorage !== "undefined" && localStorage.getItem("webui.debug") === "1";
 (window as unknown as { __WEBUI_DEBUG_CONSOLE__?: boolean }).__WEBUI_DEBUG_CONSOLE__ = DEBUG_CONSOLE;
@@ -26,6 +27,8 @@ const DEBUG_CONSOLE = typeof localStorage !== "undefined" && localStorage.getIte
   jsxRuntime: ReactJSXRuntime,
   useStore,
   api,
+  notify,
+  getHooks,
 };
 
 startRuntimeExtensions();

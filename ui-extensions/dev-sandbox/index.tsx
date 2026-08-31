@@ -80,5 +80,43 @@ register({
   ),
 });
 
+// 7) CONTEXT MENU — right-click on messages and sessions.
+register({
+  kind: "contextMenu",
+  id: "dev-sandbox.msg-menu",
+  target: "message",
+  label: "Sandbox: copy message ID",
+  run: ({ messageID }) => {
+    void navigator.clipboard?.writeText(messageID ?? "");
+    (window as unknown as { __opencodeUI?: { notify?: (o: {title:string})=>void } }).__opencodeUI?.notify?.({ title: `Copied ${messageID?.slice(0, 8)}` });
+  },
+});
+register({
+  kind: "contextMenu",
+  id: "dev-sandbox.session-menu",
+  target: "session",
+  label: "Sandbox: log session",
+  run: ({ sessionID }) => console.log("[dev-sandbox] session", sessionID),
+});
+
+// 8) COMMAND WITH KEYBIND — global hotkey (respects inputs).
+register({
+  kind: "command",
+  id: "dev-sandbox.quick-ping",
+  title: "Sandbox: quick ping (ctrl+shift+k)",
+  keybind: "ctrl+shift+k",
+  run: () => (window as unknown as { __opencodeUI?: { notify?: (o: {title:string})=>void } }).__opencodeUI?.notify?.({ title: "Sandbox quick ping" }),
+});
+
+// 9) HOOK — intercept prompts (demo: log and pass through).
+register({
+  kind: "hook",
+  id: "dev-sandbox.hook",
+  event: "session.prompt",
+  handler: (_ctx) => {
+    // _ctx: {text, sessionID} - mutate _ctx.text to transform prompts, or just observe.
+  },
+});
+
 // Self-accept so editing this extension hot-swaps it live.
 if (import.meta.hot) import.meta.hot.accept();

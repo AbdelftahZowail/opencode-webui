@@ -217,18 +217,54 @@ export function ModelPicker({
   const enabledModels = useMemo(() => models.filter((m) => m.enabled), [models]);
   const listId = "menu-models";
 
+  function fuzzyScore(query: string, haystack: string): number | null {
+    if (haystack.includes(query)) {
+      const start = haystack.indexOf(query);
+      let s = 1000 - start * 2;
+      if (start === 0 || haystack[start - 1] === " " || haystack[start - 1] === "/" || haystack[start - 1] === "-") s += 20;
+      return s;
+    }
+    let qi = 0;
+    let lastIdx = -2;
+    let gaps = 0;
+    let contiguous = 0;
+    let maxRun = 0;
+    let run = 0;
+    let boundaryHits = 0;
+    for (let hi = 0; hi < haystack.length && qi < query.length; hi++) {
+      if (haystack[hi] === query[qi]) {
+        if (hi === 0 || haystack[hi - 1] === " " || haystack[hi - 1] === "/" || haystack[hi - 1] === "-") boundaryHits++;
+        if (lastIdx + 1 === hi) {
+          contiguous++;
+          run++;
+          maxRun = Math.max(maxRun, run);
+        } else {
+          gaps += hi - lastIdx - 1;
+          run = 1;
+        }
+        lastIdx = hi;
+        qi++;
+      }
+    }
+    if (qi !== query.length) return null;
+    return 500 - lastIdx * 0.5 - gaps * 2 + contiguous * 10 + boundaryHits * 2 + maxRun * 3;
+  }
+
   // Filter query lives only while the menu is open (reset on every open).
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-  const filteredModels = useMemo(
-    () =>
-      q
-        ? enabledModels.filter((m) =>
-            `${m.name} ${m.modelID} ${m.providerID} ${m.id}`.toLowerCase().includes(q),
-          )
-        : enabledModels,
-    [enabledModels, q],
-  );
+  const filteredModels = useMemo(() => {
+    if (!q) return enabledModels;
+    const scored: { m: ModelInfo; s: number; i: number }[] = [];
+    for (let i = 0; i < enabledModels.length; i++) {
+      const m = enabledModels[i]!;
+      const hay = `${m.name} ${m.modelID} ${m.providerID} ${m.id}`.toLowerCase();
+      const s = fuzzyScore(q, hay);
+      if (s !== null) scored.push({ m, s, i });
+    }
+    scored.sort((a, b) => b.s - a.s || a.i - b.i);
+    return scored.map((x) => x.m);
+  }, [enabledModels, q]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   // Fresh open: unfiltered, caret in the search box.
