@@ -296,6 +296,12 @@ treats the step events as the run lifecycle and keeps an ordered live projection
   `[ssehop]` per-hop byte counters that proved this were removed after a
   clean soak (zero wedges since the fix; they lived in `server/index.ts`
   and `vite.config.ts`, see git history if the pattern ever returns).
+- **Recorder → cursor-replay swap** (the one open item): the engine's
+  durable per-session log will replace the proxy recorder's catch-up once
+  a build serves backlog (`follow=true` streams nothing on beta-18684).
+  Run `bun run check:swap` after engine bumps — when it prints READY (with
+  captured wire shapes), follow its 3-step runbook; the client already
+  tracks the cursor (`logHeadSeq`).
 - **Fetch scheduler** (`src/lib/scheduler.ts`): the ONLY owner of recurring
   timers. One 1s loop picks a tier — LIVE ~2s (anything running/queued/
   pending/live, or the SSE byte-age is stale), IDLE ~12s (visible, quiet tab),
