@@ -517,6 +517,7 @@ function Header({
   const draftWorkspace = useStore((s) => s.draftWorkspace);
   return (
     <div className="flex items-center justify-between border-b border-[var(--border-base)] px-4 py-2.5">
+      <Slot region="header.session.before" sessionID={sessionID} />
       <div className="flex min-w-0 items-center gap-2">
         {parentID && (
           <button

@@ -235,6 +235,7 @@ export default function App() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
+      <Slot region="app.header" sessionID={sessionID ?? undefined} />
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <div className="flex min-w-0 flex-1 overflow-x-auto">

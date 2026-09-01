@@ -1723,8 +1723,21 @@ function expireRetryNotices(sessionID: string) {
   setRunNotices(sessionID, list.filter((n) => n.kind !== "retry"));
 }
 
+function isAbortLikeError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { type?: string; message?: string };
+  const t = (e.type ?? "").toLowerCase();
+  const m = (e.message ?? "").toLowerCase();
+  return t === "aborted" || t === "abort" || m.includes("aborted") || m.includes("step interrupted") || m.includes("run interrupted") || m.includes("interrupted");
+}
+
 function pushRunNotice(sessionID: string, kind: RunNoticeKind, text: string, at = Date.now()) {
   if (!sessionID || isDraftSession(sessionID)) return;
+  // User-initiated interrupts are not errors: Esc aborts the step which
+  // surfaces as "aborted: Step interrupted" via step.failed + execution.interrupted.
+  // Showing two red/amber notices for an intentional cancel is noise.
+  if (kind === "interrupted") return;
+  if (kind === "failed" && /aborted|step interrupted|run interrupted/i.test(text)) return;
   const list = state.runNotices[sessionID] ?? [];
   const last = list[list.length - 1];
   if (last && last.kind === kind && last.text === text && at - last.at < RUN_NOTICE_DEDUPE_MS) return;
@@ -1999,9 +2012,10 @@ export function handleEvent(event: V2Event) {
       // Run-level failure the step/execution events don't carry (e.g.
       // provider auth errors). Surface it inline; clear any waiting state —
       // the run is over even if no terminal execution event follows.
+      // Abort/interrupted errors are intentional cancels, not failures.
       if (data.sessionID) {
         const err = (data as { error?: StructuredError }).error;
-        if (err) {
+        if (err && !isAbortLikeError(err)) {
           setState({
             sendErrors: {
               ...state.sendErrors,
@@ -2009,6 +2023,8 @@ export function handleEvent(event: V2Event) {
             },
           });
           pushRunNotice(data.sessionID, "error", `${err.type}: ${err.message}`, event.created);
+        } else if (err && isAbortLikeError(err)) {
+          // Still clear waiting state but don't surface noise.
         }
         clearPending(data.sessionID);
       }
@@ -2051,29 +2067,24 @@ export function handleEvent(event: V2Event) {
     case "session.execution.failed":
     case "session.execution.interrupted": {
       log("run", `finished ${data.sessionID} (${type})`);
-      // A clean finish leaves nothing to account for; a failure or an
-      // interrupt is exactly what the strip exists to show.
       if (type === "session.execution.succeeded") {
         clearRunNotices(data.sessionID);
       } else {
         expireRetryNotices(data.sessionID);
         if (type === "session.execution.failed") {
           const err = data.error;
-          pushRunNotice(
-            data.sessionID,
-            "failed",
-            err ? `${err.type}: ${err.message}` : "Run failed",
-            event.created,
-          );
-        } else {
-          const reason = (data as { reason?: string }).reason;
-          pushRunNotice(
-            data.sessionID,
-            "interrupted",
-            `Run interrupted${reason && reason !== "user" ? ` (${reason})` : ""}`,
-            event.created,
-          );
+          if (err && !isAbortLikeError(err)) {
+            pushRunNotice(
+              data.sessionID,
+              "failed",
+              `${err.type}: ${err.message}`,
+              event.created,
+            );
+          } else if (!err) {
+            pushRunNotice(data.sessionID, "failed", "Run failed", event.created);
+          }
         }
+        // interrupted: intentional (Esc) — not an error to surface; filter in pushRunNotice
       }
       finishRun(data.sessionID, type, data.error);
       break;
@@ -2121,7 +2132,7 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "session.step.failed":
-      if (data.sessionID && data.error) {
+      if (data.sessionID && data.error && !isAbortLikeError(data.error)) {
         pushRunNotice(data.sessionID, "failed", `${data.error.type}: ${data.error.message}`, event.created);
       }
       if (forLive(data.sessionID) && data.assistantMessageID) {
@@ -2324,6 +2335,22 @@ export function handleEvent(event: V2Event) {
     case "question.replied":
     case "question.rejected":
       setState({ questions: state.questions.filter((q) => q.id !== (data as { requestID?: string }).requestID) });
+      break;
+
+    // Session shell + compaction: no true SSE streaming for output, but the
+    // messages themselves update via REST polling. Nudge an immediate fetch
+    // so the running block appears instantly and output "streams" via poll.
+    case "session.shell.started":
+    case "session.shell.ended":
+      if (eventSessionID) void loadMessages(eventSessionID);
+      break;
+    case "session.compaction.started":
+    case "session.compaction.ended":
+    case "session.compaction.failed":
+      if (eventSessionID) {
+        void loadMessages(eventSessionID);
+        void loadSessionDetail(eventSessionID);
+      }
       break;
 
     default:

@@ -30,8 +30,9 @@ function RuntimeStatus() {
 }
 
 register({
+  kind: "region",
   id: "runtime-status",
-  slot: "footer",
+  region: "footer",
   render: () => <RuntimeStatus />,
 });
 

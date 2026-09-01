@@ -44,7 +44,7 @@ import {
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
-import { Slot } from "../extensions/registry";
+import { getSlashCommands, Slot, subscribeRegistry } from "../extensions/registry";
 import { openSettings } from "./settings/SettingsDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
@@ -262,6 +262,9 @@ export function Composer({
   const parentID = useStore(
     (s) => s.sessions.find((x) => x.id === sessionID)?.parentID ?? s.sessionDetails[sessionID]?.parentID,
   );
+  const [registryVersion, setRegistryVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setRegistryVersion((v) => v + 1)), []);
+  const slashExtensions = useMemo(() => getSlashCommands(), [registryVersion]);
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /**
@@ -588,6 +591,18 @@ export function Composer({
         },
       });
     }
+    for (const ext of slashExtensions) {
+      entries.push({
+        key: `slash:${ext.id}`,
+        display: `/${ext.name}`,
+        names: [ext.name, ...(ext.aliases ?? [])],
+        description: ext.description,
+        onSelect: () => {
+          setText("");
+          void ext.run("", { sessionID });
+        },
+      });
+    }
     for (const command of commands) {
       entries.push({
         key: `command:${command.name}`,
@@ -611,7 +626,7 @@ export function Composer({
       });
     }
     return entries.sort((a, b) => a.display.localeCompare(b.display));
-  }, [slashActions, commands, skills, commandNames, modelHasVariants]);
+  }, [slashActions, slashExtensions, commands, skills, commandNames, modelHasVariants, sessionID]);
 
   const filteredSlash = useMemo(
     () => filterSlashEntries(slashEntries, slashQuery),
@@ -738,11 +753,17 @@ export function Composer({
       if (!shellMode && value.startsWith("/")) {
         const parts = value.slice(1).split(" ");
         const name = parts[0]!;
-        const action = slashActions.find((a) => a.name === name);
+        const action = slashActions.find((a) => a.name === name || a.aliases?.includes(name));
         if (action) {
-          // Built-ins are UI actions; the engine's command route would
-          // reject them, so dispatch locally with the typed arguments.
           action.run(parts.slice(1).join(" "));
+          setText("");
+          setPickedFiles([]);
+          setAttachments([]);
+          return;
+        }
+        const slashExt = slashExtensions.find((s) => s.name === name || s.aliases?.includes(name));
+        if (slashExt) {
+          await slashExt.run(parts.slice(1).join(" "), { sessionID });
           setText("");
           setPickedFiles([]);
           setAttachments([]);
@@ -1216,6 +1237,7 @@ export function Composer({
                 <AgentPicker sessionID={sessionID} openUp align="left" />
                 <ModelPicker sessionID={sessionID} openUp align="left" />
                 <VariantPicker sessionID={sessionID} openUp align="left" />
+                <Slot region="composer.toolbar" sessionID={sessionID} />
                 {contextParts.length > 0 && (
                   <span
                     className="ml-auto font-mono text-[11px] text-[color:var(--text-weaker)]"

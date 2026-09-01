@@ -6,6 +6,7 @@ import type {
   AssistantMessage,
   FileAttachment,
   MessageInfo,
+  ShellMessage,
   ToolContent,
   ToolPart,
   UserMessage,
@@ -20,8 +21,10 @@ import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
 import { getPrefs, subscribePrefs } from "../prefs";
 import {
+  getHooks,
   getMessageDecorations,
   getMessagePartDecorations,
+  getMessageRenderer,
   getContextMenus,
   subscribeRegistry,
   Slot,
@@ -195,18 +198,55 @@ export function MessageItem({ message, compact = false, sessionID }: { message: 
   // Memoized on the registry version only: decorations are a static list
   // per registration state; per-message work happens in the render calls.
   const decorations = useMemo(() => getMessageDecorations(), [registryVersion]);
+
+  // --- extension hook + message renderer (the "do everything" contract) ---
+  // `hook:message.render` runs first (observe/mutate), then `kind:"message"`
+  // can fully replace the body. Both are version-gated so HMR repaint works.
+  let effectiveMessage: MessageInfo = message;
+  const hooks = useMemo(() => getHooks("message.render"), [registryVersion]);
+  if (hooks.length > 0) {
+    const ctx: Record<string, unknown> = { message: { ...message }, sessionID };
+    for (const h of hooks) {
+      try {
+        const res = h.handler(ctx, () => {});
+        if (res instanceof Promise) void res.catch((err) => console.error(`[extensions] hook "${h.id}" failed:`, err));
+      } catch (err) {
+        console.error(`[extensions] hook "${h.id}" crashed:`, err);
+      }
+    }
+    effectiveMessage = ctx.message as MessageInfo;
+  }
+  const customRenderer = useMemo(
+    () => getMessageRenderer(effectiveMessage.type as MessageInfo["type"]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [registryVersion, effectiveMessage.type, effectiveMessage.id],
+  );
+  let body: ReactNode;
+  if (customRenderer) {
+    try {
+      const node = customRenderer.render({ message: effectiveMessage, sessionID });
+      body = node ?? renderMessageBody(effectiveMessage, compact, sessionID);
+    } catch (err) {
+      console.error(`[extensions] message "${customRenderer.id}" crashed:`, err);
+      body = renderMessageBody(effectiveMessage, compact, sessionID);
+    }
+  } else {
+    body = renderMessageBody(effectiveMessage, compact, sessionID);
+  }
+
   return (
-    <MessageContextMenu message={message} sessionID={sessionID}>
-      <>{renderMessageBody(message, compact, sessionID)}
+    <MessageContextMenu message={effectiveMessage} sessionID={sessionID}>
+      <Slot region="message.before" messageID={effectiveMessage.id} />
+      <>{body}
       {/* Message decorations: a tiny inline row under the body. Guarded by
-          a length check so zero registrations cost nothing; individual
-          renderers are crash-isolated like slot items. */}
+           a length check so zero registrations cost nothing; individual
+           renderers are crash-isolated like slot items. */}
       {decorations.length > 0 && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
           {decorations.map((decoration, i) => {
             let node: ReactNode = null;
             try {
-              node = decoration.render({ messageID: message.id, message });
+              node = decoration.render({ messageID: effectiveMessage.id, message: effectiveMessage });
             } catch (err) {
               console.error(`[extensions] message decoration "${decoration.id ?? i}" crashed:`, err);
             }
@@ -215,7 +255,7 @@ export function MessageItem({ message, compact = false, sessionID }: { message: 
           })}
         </div>
       )}
-      <Slot region="message.after" messageID={message.id} />
+      <Slot region="message.after" messageID={effectiveMessage.id} />
       </>
     </MessageContextMenu>
   );
@@ -264,7 +304,22 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
     case "assistant":
       return <AssistantView message={message} compact={compact} />;
     case "system":
-    case "synthetic":
+    case "synthetic": {
+      const text = (message as { text?: string; description?: string }).text ?? "";
+      const description = (message as { description?: string }).description;
+      // TUI shows only "Instructions updated: core/codemode" — the web UI was dumping
+      // the entire Code Mode catalog (hundreds of lines) inline. Keep it minimal:
+      // first line as the note, full catalog collapsed behind a chevron.
+      const isVerboseCatalog = text.length > 500 || text.includes("The Code Mode tool catalog has changed");
+      const isInstructionUpdate =
+        (description ?? "").startsWith("Instructions updated") || text.startsWith("Instructions updated");
+      if ((isVerboseCatalog || isInstructionUpdate) && text.length > 200) {
+        return (
+          <Row>
+            <InstructionCard message={message as { description?: string; text: string }} />
+          </Row>
+        );
+      }
       return (
         <Row>
           <div className="w-full rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] px-3 py-2 text-xs text-[var(--text-weak)]">
@@ -275,6 +330,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
           </div>
         </Row>
       );
+    }
     case "skill":
       return (
         <Row>
@@ -291,7 +347,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
     case "shell":
       return (
         <Row>
-          <ShellCard command={message.command} status={message.status} exit={message.exit} />
+          <ShellCard message={message as ShellMessage} />
         </Row>
       );
     case "agent-switched":
@@ -301,31 +357,81 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
     case "location-switched":
       return <Note>Moved to <b>{message.location.directory}</b></Note>;
     case "compaction": {
-      // Single line: status, then the trigger reason and any engine error —
-      // a failed compaction used to render identical to a running one.
-      const label =
-        message.status === "completed"
-          ? "Conversation compacted"
-          : message.status === "failed"
-            ? "Compaction failed"
-            : "Compacting…";
+      const isRunning = message.status === "running";
+      const isFailed = message.status === "failed";
+      const label = isFailed ? "Compaction failed" : isRunning ? "Compacting…" : "Conversation compacted";
       const reason = message.reason === "auto" || message.reason === "manual" ? ` (${message.reason})` : "";
+      const summary = (message as { summary?: string }).summary;
+      const recent = (message as { recent?: string }).recent;
+      // Completed/running carry summary+recent from the engine (openapi: required).
+      // Show them TUI-style: header line plus collapsible summary. Streaming
+      // compaction text arrives via session.compaction.ended's `text` field
+      // which surfaces as summary on the completed message.
+      if (isFailed) {
+        return (
+          <Note>
+            {label}
+            {reason}
+            {message.error && (
+              <span className="text-[var(--text-on-critical-base)]">
+                {" — "}
+                {message.error.type}: {message.error.message}
+              </span>
+            )}
+          </Note>
+        );
+      }
+      if (!summary && !recent) {
+        return (
+          <Note>
+            {label}
+            {reason}
+          </Note>
+        );
+      }
       return (
-        <Note>
-          {label}
-          {reason}
-          {message.status === "failed" && message.error && (
-            <span className="text-[var(--text-on-critical-base)]">
-              {" — "}
-              {message.error.type}: {message.error.message}
-            </span>
-          )}
-        </Note>
+        <Row>
+          <CompactionCard
+            label={label}
+            reason={reason}
+            summary={summary}
+            recent={recent}
+            running={isRunning}
+          />
+        </Row>
       );
     }
     default:
       return null;
   }
+}
+
+function InstructionCard({ message }: { message: { description?: string; text: string } }) {
+  const [expanded, setExpanded] = useState(false);
+  // description holds the TUI line ("Instructions updated: core/codemode") when present;
+  // otherwise the first line of text is the title and the rest is the catalog dump.
+  const title = message.description ?? message.text.split("\n")[0] ?? "Instructions updated";
+  const body = message.description ? message.text : message.text.split("\n").slice(1).join("\n").trim();
+  const hasBody = body.length > 0;
+  return (
+    <div className="w-full overflow-hidden rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)]">
+      <button
+        type="button"
+        onClick={() => hasBody && setExpanded((v) => !v)}
+        className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs ${hasBody ? "cursor-pointer hover:bg-[color:var(--surface-base-hover)]" : ""}`}
+      >
+        <span className="flex-1 truncate text-[var(--text-weak)]">
+          <b className="font-medium text-[var(--text-base)]">{title}</b>
+        </span>
+        {hasBody && <ChevronRight className={`size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`} />}
+      </button>
+      {hasBody && expanded && (
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-[var(--border-weak-base)] bg-[var(--surface-inset-base)] px-3 py-2 font-mono text-[11px] leading-relaxed text-[var(--text-weak)]">
+          {body}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 function Note({ children }: { children: ReactNode }) {
@@ -467,23 +573,35 @@ function Tokens({ tokens }: { tokens: NonNullable<AssistantMessage["tokens"]> })
   );
 }
 
-function ShellCard({
-  command,
-  status,
-  exit,
-}: {
-  command: string;
-  status: string;
-  exit?: number;
-}) {
-  // ShellMessage statuses are running|exited|timeout|killed — there is no
-  // "completed"/"error"; the old map never colored anything but running.
+function ShellCard({ message }: { message: ShellMessage }) {
+  const { command, status, exit, output } = message;
   const failed = (status === "exited" && exit !== 0) || status === "timeout" || status === "killed";
-  const statusColor = status === "running" ? "" : failed ? "text-[var(--text-on-critical-base)]" : "text-[var(--text-on-success-base)]";
+  const running = status === "running";
+  const outputText = output?.output ?? "";
+  const hasOutput = outputText.length > 0;
+  const [expanded, setExpanded] = useState(false);
+  // Same block for running and finished — TUI parity: "$ command" header plus
+  // streaming output. The engine has no incremental shell output events; the
+  // output grows via GET /api/session/{id}/message polling (LIVE tier ~2s)
+  // while running, so "streaming" here is poll-driven, not SSE.
+  const statusColor = running ? "" : failed ? "text-[var(--text-on-critical-base)]" : "text-[var(--text-on-success-base)]";
+  const shouldCollapse = hasOutput && outputText.split("\n").length > 10;
+  const showAll = expanded || !shouldCollapse;
+  const displayOutput = showAll ? outputText : outputText.split("\n").slice(0, 10).join("\n");
+  const truncated = output?.truncated;
+
   return (
-    <div className="w-full max-w-[85%] overflow-hidden rounded-md border border-[var(--border-weak-base)]">
-      <div className="flex items-center justify-between gap-2 bg-[var(--surface-base)] px-3 py-1.5 font-mono text-xs text-[var(--text-weak)]">
-        <span className="truncate">$ {command}</span>
+    <div className="w-full max-w-[85%] overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)]">
+      {/* Header: hover highlights the whole row; click toggles full command when truncated */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        title={expanded ? "Click to collapse" : command}
+        className="flex w-full items-center justify-between gap-2 bg-[var(--surface-base)] px-2.5 py-1.5 text-left font-mono text-xs text-[var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+      >
+        <span className={`min-w-0 flex-1 ${expanded ? "whitespace-pre-wrap break-all" : "truncate"}`}>
+          <span className="text-[var(--text-weaker)]">$</span> {command}
+        </span>
         <span className="flex shrink-0 items-center gap-1.5">
           {failed && typeof exit === "number" && (
             <span className="rounded-sm bg-[color-mix(in_oklch,var(--surface-critical-strong)_12%,transparent)] px-1 py-px text-[10px] text-[color:var(--surface-critical-strong)]">
@@ -494,11 +612,82 @@ function ShellCard({
             className={`inline-flex items-center gap-1 ${statusColor}`}
             title={status === "timeout" ? "Command timed out" : status === "killed" ? "Command was killed" : undefined}
           >
-            {status === "running" && <Spinner className="size-3" />}
+            {running && <Spinner className="size-3" />}
             {status}
           </span>
+          <ChevronRight className={`size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`} />
         </span>
-      </div>
+      </button>
+      {/* Output: same block while running (poll-streamed) and after exit. Capped at 10 lines collapsed, click header or here to expand. */}
+      {running && !hasOutput && (
+        <div className="px-2.5 py-2 font-mono text-xs text-[var(--text-weaker)]">Running…</div>
+      )}
+      {hasOutput && (
+        <div className="border-t border-[var(--border-weak-base)]">
+          <pre
+            onClick={() => shouldCollapse && setExpanded((v) => !v)}
+            className={`max-h-64 overflow-auto whitespace-pre-wrap px-2.5 py-2 font-mono text-xs leading-relaxed text-[var(--text-base)] ${shouldCollapse ? "cursor-pointer hover:bg-[color:var(--surface-base-hover)]" : ""}`}
+            title={shouldCollapse ? (expanded ? "Click to collapse" : "Click to expand full output") : undefined}
+          >
+            {displayOutput}
+            {!showAll && shouldCollapse && "\n…"}
+            {truncated && <span className="text-[var(--text-weaker)]"> (truncated)</span>}
+          </pre>
+        </div>
+      )}
+      {!hasOutput && !running && (
+        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 font-mono text-xs text-[var(--text-weaker)]">(no output)</div>
+      )}
+    </div>
+  );
+}
+
+function CompactionCard({
+  label,
+  reason,
+  summary,
+  recent,
+  running,
+}: {
+  label: string;
+  reason: string;
+  summary?: string;
+  recent?: string;
+  running: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const shouldCollapse = !!summary && summary.length > 400;
+  const showSummary = !shouldCollapse || expanded ? summary : summary ? `${summary.slice(0, 400).trim()}…` : undefined;
+  return (
+    <div className="w-full max-w-[85%] overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)]">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-xs text-[var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)]"
+      >
+        <span className="flex items-center gap-1.5 font-medium text-[var(--text-strong)]">
+          {running && <Spinner className="size-3" />}
+          {label}
+          <span className="font-normal text-[var(--text-weaker)]">{reason}</span>
+        </span>
+        {shouldCollapse && <ChevronRight className={`ml-auto size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`} />}
+      </button>
+      {showSummary && (
+        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-base)] whitespace-pre-wrap">
+          {showSummary}
+          {shouldCollapse && !expanded && (
+            <button type="button" onClick={() => setExpanded(true)} className="ml-1 cursor-pointer text-[var(--text-interactive-base)] hover:underline">
+              show more
+            </button>
+          )}
+        </div>
+      )}
+      {recent && (
+        <div className="border-t border-[var(--border-weak-base)] bg-[var(--surface-inset-base)] px-2.5 py-2">
+          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-[var(--text-weaker)]">Recent context</div>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[var(--text-weak)]">{recent}</pre>
+        </div>
+      )}
     </div>
   );
 }

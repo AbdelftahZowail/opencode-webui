@@ -181,15 +181,16 @@ install). They register against a small vocabulary of **kinds**:
 | --- | --- | --- |
 | `region` | renders into any `<Slot region="…">` marker in core markup | generated table: `bun run regions` |
 | `command` | palette action (`Extension commands` group) — add `keybind:"ctrl+shift+k"` for global hotkey | palette (⌘/ctrl-K) + keybind |
+| `slash` | UI-only slash entry for Composer `/name` (local `run(args,{sessionID})`; engine slash via engine plugin + `GET /api/command`) | Composer `/` autocomplete |
+| `message` | full replacement for any message type (`type:"system"\|"synthetic"\|"shell"\|…\|"*"`, `render({message, sessionID})`) — first non-null wins, else core `renderMessageBody` | `MessageItem` per message |
 | `message.decoration` | per-message extras (`render({ messageID, message }) => node \| null`) | under every message row |
 | `message.part` | inject after each text/tool/reasoning part inside a message | inside `MessageItem` per part |
+| `tool.renderer` | custom card for a specific tool name | `ToolCard` per tool |
 | `contextMenu` | right-click item `target:"message"\|"session"\|"file"` | context menu |
-| `hook` | intercept `session.prompt` (mutate `ctx.text`), observe `store.dispatch` | store middleware |
+| `hook` | intercept `session.prompt` (mutate `ctx.text`), `message.render` (mutate `ctx.message`), `store.dispatch` (observe) — `event:string` open so new seams need no registry bump | store + `MessageItem` + `Composer` |
 | `page` | full surface at auto-route `/ext/{id}` | sidebar links + direct URL |
-| `tool.renderer` | custom card for a tool name | tool cards |
 | `settings` | titled section inside Settings › Extensions | Settings dialog |
 | toasts | `window.__opencodeUI.notify({title, variant})` | bottom-right stack, 3s |
-| legacy slots (`sidebar`, `footer`, `composer.replace`) | normalized onto regions internally | unchanged |
 
 - **Add a feature**: create `ui-extensions/<name>/index.tsx`, call
   `register({ kind, ... })`, export its `id`, keep the trailing

@@ -116,6 +116,7 @@ export interface ShellMessage extends MessageBase {
   command: string;
   status: "running" | "exited" | "timeout" | "killed";
   exit?: number;
+  output?: { output: string; cursor: number; size: number; truncated: boolean };
 }
 
 export interface AgentSelectedMessage extends MessageBase {

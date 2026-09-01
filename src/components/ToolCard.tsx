@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import type { MessageInfo, ToolPart, ToolState } from "../api/types";
-import { getToolRenderer } from "../extensions/registry";
+import { getToolRenderer, Slot } from "../extensions/registry";
 import { selectSession, useStore } from "../store";
 import { getPrefs, subscribePrefs } from "../prefs";
 import { DiffView } from "./DiffView";
@@ -54,7 +54,10 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
   const streamingText = state.status === "streaming" ? state.input : undefined;
 
   const props: ToolProps = { part, state, stateKey, input, meta, output, error, streamingText };
+  const toolBefore = <Slot region="tool.before" part={part} />;
+  const toolAfter = <Slot region="tool.after" part={part} />;
 
+  const core = (() => {
   switch (part.name) {
     case "edit":
       return <EditTool {...props} />;
@@ -135,6 +138,8 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
     default:
       return <GenericTool {...props} name={part.name} />;
   }
+  })();
+  return <>{toolBefore}{core}{toolAfter}</>;
 }
 
 interface ToolProps {

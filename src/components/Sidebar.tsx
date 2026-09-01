@@ -911,6 +911,7 @@ function SessionRow({
 
   return (
     <SessionContextMenu sessionID={id}>
+      <Slot region="sidebar.session.before" sessionID={id} />
       <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
         {/* Hover/focus warms the transcript cache so the click paints instantly. */}
         <a
@@ -978,6 +979,7 @@ function SessionRow({
         )}
       </div>
     </div>
+      <Slot region="sidebar.session.after" sessionID={id} />
     </SessionContextMenu>
   );
 }

@@ -10,21 +10,22 @@ import { enabled } from "../../ui-extensions/config";
  * Kinds (every one gated per-id by `enabled` in config.ts):
  *  - "region"              — markup rendered wherever a `<Slot region="…"/>`
  *                            marker sits; session/message/part ctx flows in.
- *                            Legacy `slot:"sidebar"/"footer"` inputs are
- *                            normalized into the regions "extension.sidebar"
- *                            /"extension.footer" on register().
  *  - "command"             — command-palette entries (title + run, order).
+ *  - "slash"               — UI-only slash entry for Composer `/name` (local run, not engine; engine slash via engine plugin + GET /api/command).
  *  - "message.decoration"  — extra UI attached to a transcript message.
+ *  - "message.part"        — injection after each text/tool/reasoning part.
+ *  - "message"             — full replacement for a message type (like
+ *                            tool.renderer for tools); first non-null render
+ *                            wins, fallback is core renderMessageBody.
+ *  - "hook"                — intercept/observe (known: store.dispatch,
+ *                            session.prompt, message.render; event is open string so new seams need no registry bump).
  *  - "page"                — a full page; App routes `/ext/{id}` implicitly
  *                            for every registered page (no path is stored).
- *  - legacy slot shapes    — `composer.replace` and `tool.renderer` stay
- *                            distinct stored kinds so SlotOutlet and
- *                            getToolRenderer behave exactly as before.
+ *  - "tool.renderer"       — custom card for a specific tool name.
+ *  - "settings"            — titled section inside Settings › Extensions.
  */
 
-export type RenderSlot = "sidebar" | "footer" | "composer.replace";
-
-/** Context handed to region/command/page renderers; all fields optional. */
+/** Context handed to region/command/page/slash renderers; all fields optional. */
 export interface ExtensionContext {
   sessionID?: string;
   messageID?: string;
@@ -53,6 +54,15 @@ export interface CommandExtension {
   keybind?: string;
 }
 
+export interface SlashExtension {
+  kind: "slash";
+  id: string;
+  name: string;
+  description?: string;
+  aliases?: string[];
+  run: (args: string, ctx: ExtensionContext) => void | Promise<void>;
+}
+
 export interface MessagePartDecorationExtension {
   kind: "message.part";
   id: string;
@@ -71,7 +81,7 @@ export interface ContextMenuExtension {
 export interface HookExtension {
   kind: "hook";
   id: string;
-  event: "store.dispatch" | "session.prompt" | "message.render";
+  event: string;
   handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void>;
 }
 
@@ -102,19 +112,6 @@ export interface SettingsExtension {
   render: () => ReactNode;
 }
 
-interface SlotExtension {
-  id: string;
-  slot: RenderSlot;
-  render: () => ReactNode;
-}
-
-/** Legacy composer replacement — kept whole so SlotOutlet behavior is unchanged. */
-interface ComposerReplaceExtension {
-  kind: "composer.replace";
-  id: string;
-  render: () => ReactNode;
-}
-
 export interface ToolRendererExtension {
   kind: "tool.renderer";
   id: string;
@@ -122,30 +119,40 @@ export interface ToolRendererExtension {
   render: (part: ToolPart) => ReactNode;
 }
 
-/** What register() accepts: first-class kinds plus the legacy slot shapes. */
+export interface MessageExtension {
+  kind: "message";
+  id: string;
+  /** Message type this renderer handles; "*" matches any type. Defaults to "*". */
+  type?: MessageInfo["type"] | "*";
+  render: (ctx: { message: MessageInfo; sessionID?: string }) => ReactNode | null;
+}
+
+/** What register() accepts: first-class kinds only (no legacy slot shapes). */
 export type ExtInput =
   | { kind: "region"; id: string; region: string; render: (ctx: ExtensionContext) => ReactNode }
   | { kind: "command"; id: string; title: string; run: (ctx: ExtensionContext) => void; order?: number; keybind?: string }
+  | { kind: "slash"; id: string; name: string; description?: string; aliases?: string[]; run: (args: string, ctx: ExtensionContext) => void | Promise<void> }
   | { kind: "message.decoration"; id: string; render: (ctx: MessageDecorationCtx) => ReactNode | null }
   | { kind: "message.part"; id: string; render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null }
+  | { kind: "message"; id: string; type?: MessageInfo["type"] | "*"; render: (ctx: { message: MessageInfo; sessionID?: string }) => ReactNode | null }
   | { kind: "contextMenu"; id: string; target: "message" | "session" | "file"; label: string; run: (ctx: ExtensionContext) => void; order?: number }
-  | { kind: "hook"; id: string; event: "store.dispatch" | "session.prompt" | "message.render"; handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void> }
+  | { kind: "hook"; id: string; event: string; handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void> }
   | { kind: "page"; id: string; title: string; description?: string; render: (ctx: ExtensionContext) => ReactNode }
   | { kind: "settings"; id: string; title: string; description?: string; render: () => ReactNode }
-  | { id: string; slot: "sidebar" | "footer" | "composer.replace"; render: () => ReactNode }
-  | { id: string; slot: "tool.renderer"; toolName: string; render: (part: ToolPart) => ReactNode };
+  | { kind: "tool.renderer"; id: string; toolName: string; render: (part: ToolPart) => ReactNode };
 
 /** Internal storage: every input normalized into one discriminated union. */
 type StoredExt =
   | RegionExtension
   | CommandExtension
+  | SlashExtension
   | MessageDecorationExtension
   | MessagePartDecorationExtension
+  | MessageExtension
   | ContextMenuExtension
   | HookExtension
   | PageExt
   | SettingsExtension
-  | ComposerReplaceExtension
   | ToolRendererExtension;
 
 const registry: StoredExt[] = [];
@@ -171,7 +178,7 @@ function isIdEnabled(id: string): boolean {
  * Registry mutations are observable so extension hot updates repaint
  * WITHOUT a page reload: an edited (self-accepting) extension module
  * re-registers with the same id, `register()` swaps it in and bumps the
- * version, and every mounted SlotOutlet/Slot re-reads the fresh render fns.
+ * version, and every mounted Slot re-reads the fresh render fns.
  */
 let registryVersion = 0;
 const listeners = new Set<() => void>();
@@ -216,8 +223,6 @@ export function enableRuntimeIds(ids: string[]) {
 export function disableRuntimeIds(ids: string[]) {
   const drop = new Set(ids);
   for (const id of drop) enabledSet.delete(id);
-  // Ancestry-aware sweep: entries whose id (or every dot-ancestor) lost its
-  // gating go away immediately.
   let removed = false;
   for (let i = registry.length - 1; i >= 0; i--) {
     if (!isIdEnabled(registry[i]!.id)) {
@@ -238,55 +243,34 @@ function pageRoute(id: string): string {
   return `/ext/${id}`;
 }
 
-/**
- * Normalizes any ExtInput into its stored kind. First-class `kind` inputs
- * already match their stored shape verbatim; only the legacy slot shapes
- * change: sidebar/footer become regions under the reserved "extension.*"
- * namespace (their render ignores the ctx), composer.replace and
- * tool.renderer keep their shape behind an explicit kind.
- */
-function normalize(ext: ExtInput): StoredExt {
-  if ("slot" in ext) {
-    if (ext.slot === "tool.renderer") {
-      return { kind: "tool.renderer", id: ext.id, toolName: ext.toolName, render: ext.render };
-    }
-    if (ext.slot === "composer.replace") {
-      return { kind: "composer.replace", id: ext.id, render: ext.render };
-    }
-    const legacyRender = ext.render;
-    return { kind: "region", id: ext.id, region: `extension.${ext.slot}`, render: () => legacyRender() };
-  }
-  return ext;
-}
-
 export function register(ext: ExtInput) {
   const existing = registry.findIndex((e) => e.id === ext.id);
   if (existing !== -1) {
-    // Same-id re-registration is what Vite HMR does when an edited
-    // extension module re-executes: REPLACE, so slots serve the fresh
-    // render closure instead of silently keeping the stale first-load one.
-    // Applies to EVERY kind.
-    registry[existing] = normalize(ext);
+    registry[existing] = ext as StoredExt;
     notifyRegistryChange();
     return;
   }
-  const stored = normalize(ext);
-  if (stored.kind === "page") {
-    // Pages own the implicit route `/ext/{id}` (App routes it). Refuse a
-    // second page whose derived route would collide rather than let one
-    // page silently shadow another.
-    const route = pageRoute(stored.id);
+  if (ext.kind === "page") {
+    const route = pageRoute(ext.id);
     const clash = registry.find(
-      (e) => e.kind === "page" && e.id !== stored.id && pageRoute(e.id) === route,
+      (e) => e.kind === "page" && e.id !== ext.id && pageRoute(e.id) === route,
     );
     if (clash) {
       console.warn(
-        `[extensions] page "${stored.id}" rejected: route ${route} is already taken by page "${clash.id}"`,
+        `[extensions] page "${ext.id}" rejected: route ${route} is already taken by page "${clash.id}"`,
       );
       return;
     }
   }
-  registry.push(stored);
+  if (ext.kind === "slash") {
+    const name = ext.name.toLowerCase();
+    if (!/^[a-z0-9_-]+$/.test(name)) {
+      console.warn(`[extensions] slash "${ext.id}" rejected: name "${ext.name}" must match /^[a-z0-9_-]+$/`);
+      return;
+    }
+  }
+  registry.push(ext as StoredExt);
+  notifyRegistryChange();
 }
 
 export function getRegions(
@@ -308,6 +292,12 @@ export function getCommands(): { id: string; title: string; run: (ctx: Extension
         (a.order ?? DEFAULT_COMMAND_ORDER) - (b.order ?? DEFAULT_COMMAND_ORDER) ||
         a.title.localeCompare(b.title),
     );
+}
+
+export function getSlashCommands(): SlashExtension[] {
+  return registry.filter(
+    (e): e is SlashExtension => e.kind === "slash" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+  );
 }
 
 export function getMessageDecorations(): {
@@ -359,29 +349,12 @@ export function getContextMenus(target: ContextMenuExtension["target"]): {
     .sort((a, b) => (a.order ?? 100) - (b.order ?? 100) || a.label.localeCompare(b.label));
 }
 
-export function getHooks(event: HookExtension["event"]): HookExtension[] {
+export function getHooks(event: string): HookExtension[] {
   return registry.filter((e): e is HookExtension => e.kind === "hook" && e.event === event && (enabledSet.has(e.id) || isIdEnabled(e.id)));
 }
 
 export function getPage(id: string): PageExt | undefined {
   return registry.find((e): e is PageExt => e.kind === "page" && e.id === id && (enabledSet.has(e.id) || isIdEnabled(e.id)));
-}
-
-export function getSlot(slot: RenderSlot): SlotExtension[] {
-  if (slot === "composer.replace") {
-    return registry
-      .filter(
-        (e): e is ComposerReplaceExtension =>
-          e.kind === "composer.replace" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-      )
-      .map((e) => ({ id: e.id, slot, render: () => e.render() }));
-  }
-  // sidebar/footer live in the registry as regions "extension.<slot>" —
-  // project them back to the legacy slot shape for SlotOutlet.
-  const region = `extension.${slot}`;
-  return registry
-    .filter((e): e is RegionExtension => e.kind === "region" && e.region === region && (enabledSet.has(e.id) || isIdEnabled(e.id)))
-    .map((e) => ({ id: e.id, slot, render: () => e.render({}) }));
 }
 
 export function getToolRenderer(toolName: string): ToolRendererExtension | undefined {
@@ -391,20 +364,13 @@ export function getToolRenderer(toolName: string): ToolRendererExtension | undef
   );
 }
 
-/** Renders the extension at a slot, falling back to `fallback` when none. */
-export function SlotOutlet({ slot, fallback }: { slot: RenderSlot; fallback?: ReactNode }) {
-  // Tracks registry swaps (extension hot updates) without any reload.
-  useSyncExternalStore(subscribeRegistry, () => registryVersion);
-  const items = getSlot(slot);
-  if (items.length === 0) return fallback ?? null;
-  return (
-    <>
-      {items.map((e) => (
-        <SlotErrorBoundary key={e.id} id={e.id}>
-          <div>{e.render()}</div>
-        </SlotErrorBoundary>
-      ))}
-    </>
+export function getMessageRenderer(type: MessageInfo["type"]): MessageExtension | undefined {
+  const exact = registry.find(
+    (e): e is MessageExtension => e.kind === "message" && (e.type ?? "*") === type && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+  );
+  if (exact) return exact;
+  return registry.find(
+    (e): e is MessageExtension => e.kind === "message" && (e.type ?? "*") === "*" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
   );
 }
 
