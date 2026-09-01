@@ -22,7 +22,7 @@ import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   guardRequest,
@@ -45,6 +45,20 @@ import {
 } from "./userExtensions";
 
 const PROXY_PORT = Number(process.env.WEBUI_PROXY_PORT ?? 4097);
+// Client headers never forwarded to the engine: transport (recomputed by Bun
+// from the proxied request), identity (must WIN over anything the client
+// sends), and credentials the browser has no business relaying.
+const FORBIDDEN_CLIENT_HEADERS = new Set([
+  "host",
+  "connection",
+  "upgrade",
+  "accept-encoding",
+  "authorization",
+  "cookie",
+  "content-length",
+  "expect",
+  "proxy-authorization",
+]);
 const HOST = process.env.WEBUI_HOST ?? "127.0.0.1";
 // Bun binds 0.0.0.0 by default; keep the safe loopback default and only pass
 // through what the operator actually asked for ("localhost" binds 127.0.0.1).
@@ -390,7 +404,15 @@ const server: Server<Record<string, unknown>> = Bun.serve({
   // socket timer — so disable it.
   idleTimeout: 0,
   async fetch(req, bunServer) {
-    const url = new URL(req.url);
+    // A malformed Host that passes the loopback guard can still make
+    // `new URL(req.url)` throw (e.g. `localhost:99999`); an unhandled throw
+    // here renders Bun's error page WITH the server source — never leak it.
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return new Response("bad request", { status: 400 });
+    }
     const method = req.method;
     const path = url.pathname;
 
@@ -517,13 +539,18 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           signal: req.signal,
           headers: {
             ...headers,
+            // Forward only benign client headers. Service.headers must WIN —
+            // spreading client headers over them let a client override the
+            // engine credential (e.g. its own `authorization`). Also drop
+            // spoofable/transport headers the engine should never see.
             ...Object.fromEntries(
-              [...req.headers.entries()].filter(
-                ([k]) =>
-                  !["host", "connection", "upgrade", "accept-encoding"].includes(
-                    k.toLowerCase(),
-                  ),
-              ),
+              [...req.headers.entries()].filter(([k]) => {
+                const name = k.toLowerCase();
+                if (FORBIDDEN_CLIENT_HEADERS.has(name)) return false;
+                return (
+                  !name.startsWith("x-forwarded-") && !name.startsWith("x-opencode-")
+                );
+              }),
             ),
             // Force identity from the engine: it brotli/gzip-compresses at
             // least the experimental session-log endpoint with a stream the
@@ -562,9 +589,22 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     const isDevCheckout = existsSync(join(APP_ROOT, "vite.config.ts"));
     if (Bun.env.NODE_ENV === "production" || (hasDist && !isDevCheckout)) {
       if (method === "GET" || method === "HEAD") {
-        let filePath = decodeURIComponent(path);
+        // decodeURIComponent throws on malformed escapes (e.g. "/%") — 400,
+        // never an unhandled throw.
+        let filePath: string;
+        try {
+          filePath = decodeURIComponent(path);
+        } catch {
+          return new Response("bad request", { status: 400 });
+        }
         if (filePath === "/") filePath = "/index.html";
-        const file = Bun.file(DIST_DIR + filePath.slice(1));
+        // Confine to dist/: a decoded "/..%2f" must not escape the static
+        // root (arbitrary file read = secret.key = cookie forgery).
+        const resolved = resolve(DIST_DIR, "." + filePath);
+        if (!resolved.startsWith(resolve(DIST_DIR))) {
+          return new Response("not found", { status: 404 });
+        }
+        const file = Bun.file(resolved);
         if (await file.exists()) return new Response(file);
         const index = Bun.file(DIST_DIR + "index.html");
         if (await index.exists()) return new Response(index);

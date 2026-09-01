@@ -329,7 +329,8 @@ export function guardRequest(req: Request, configuredHost: string): Response | n
   if (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH") {
     const origin = req.headers.get("origin");
     // No Origin = curl/scripts/health checks — allowed. "null" = sandboxed
-    // context, treat as untrusted. Same-origin = pass.
+    // context — UNTRUSTED (a sandboxed iframe can send it); reject rather
+    // than skip. Same-origin = pass.
     if (origin && origin !== "null") {
       const proto =
         firstHeaderValue(req, "x-forwarded-proto") ??
@@ -337,6 +338,8 @@ export function guardRequest(req: Request, configuredHost: string): Response | n
       const expected = `${proto}://${effectiveHost}`.toLowerCase();
       const actual = origin.replace(/\/+$/, "").toLowerCase();
       if (actual !== expected) return forbidden("cross-origin request blocked");
+    } else if (origin === "null") {
+      return forbidden("null origin rejected");
     }
   }
   return null;
