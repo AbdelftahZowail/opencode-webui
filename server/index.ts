@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 /**
  * opencode-webui proxy server.
  *
@@ -8,19 +9,50 @@
  *
  * Dev flow:  vite (5173) --/api--> this server (4097) --> opencode service
  * Prod flow: this server (4097) serves dist/ + proxies /api
+ *
+ * Access control (server/auth.ts): every route except the login round-trip
+ * requires a session cookie. WEBUI_PASSWORD sets the password; unset means a
+ * strong passphrase is generated and printed once — but only on a loopback
+ * bind, because a wildcard bind without a password refuses to start. The
+ * browser never holds service credentials, and neither the password nor
+ * session tokens are ever logged.
  */
 
 import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import {
+  guardRequest,
+  handleLogin,
+  isAuthed,
+  isLoopbackHostname,
+  loadSecret,
+  loginPageResponse,
+  logoutResponse,
+  peerIP,
+  resolveAuthPolicy,
+  unauthorizedResponse,
+} from "./auth";
+import { syncSkill } from "./skillSync";
+import {
+  discoverUserUIEntries,
+  globalUserExtensionsDir,
+  warnOnce,
+  type UIEntry,
+} from "./userExtensions";
 
 const PROXY_PORT = Number(process.env.WEBUI_PROXY_PORT ?? 4097);
+const HOST = process.env.WEBUI_HOST ?? "127.0.0.1";
+// Bun binds 0.0.0.0 by default; keep the safe loopback default and only pass
+// through what the operator actually asked for ("localhost" binds 127.0.0.1).
+const BIND_HOST = HOST === "localhost" ? "127.0.0.1" : HOST;
 const DIST_DIR = new URL("../dist/", import.meta.url).pathname;
 const APP_ROOT = new URL("../", import.meta.url).pathname;
 const DEBUG_LOG = process.env.WEBUI_DEBUG_LOG ?? "/tmp/webui-debug.log";
 const DEBUG = Bun.env.WEBUI_DEBUG === "1";
+const REPORT_REPO = process.env.WEBUI_REPORT_REPO ?? "AbdelftahZowail/opencode-webui";
 
 function dbg(...args: unknown[]) {
   if (!DEBUG) return;
@@ -179,12 +211,15 @@ async function startEventRecorder() {
 //   GET /api/webui/extensions                -> { data: [{ id, url, source }] }
 //   GET /api/webui/extensions/:id/bundle.js  -> text/javascript, no-cache
 //
-// Both routes ride the same service auth as every other /api call (the
+// Both routes ride the same session auth as every other /api call (the
 // upstream plugin list is fetched with Service.headers) and register BEFORE
 // the generic /api passthrough below. `source` in the listing is the bundled
 // UI entry path; `url`'s ?v= is that file's mtime so edits bust caches.
 // v1 limitation: package/builtin/sdk sources have nothing on disk to bundle
 // and are ignored.
+//
+// USER extension dirs (server/userExtensions.ts) merge into the same
+// manifest below — same pipeline, `source: "user:<path>"`.
 // ---------------------------------------------------------------------------
 
 type PluginSource =
@@ -199,8 +234,6 @@ type PluginInfo = {
   status: "active" | "failed";
   error?: string;
 };
-
-type UIEntry = { id: string; entry: string; mtimeMs: number };
 
 const EXTENSION_LIST_TTL_MS = 5_000;
 let uiEntryCache: { at: number; entries: UIEntry[] } | null = null;
@@ -254,6 +287,26 @@ async function discoverUIEntries(): Promise<UIEntry[]> {
   return entries;
 }
 
+/**
+ * Plugin UI entries + user-dir entries, plugin ids winning collisions (a
+ * user folder may never shadow a plugin's UI — that's warned about once).
+ */
+async function discoverAllUIEntries(): Promise<UIEntry[]> {
+  const pluginEntries = await discoverUIEntries();
+  const userEntries = discoverUserUIEntries();
+  if (userEntries.length === 0) return pluginEntries;
+  const ids = new Set(pluginEntries.map((e) => e.id));
+  const merged = [...pluginEntries];
+  for (const user of userEntries) {
+    if (ids.has(user.id)) {
+      warnOnce(`collide:${user.id}`, `user extension "${user.id}" skipped — a plugin already owns that id`);
+      continue;
+    }
+    merged.push(user);
+  }
+  return merged;
+}
+
 /** Bundled JS for a UI entry, cached by mtime so an edit costs one rebuild. */
 async function bundleUIEntry(entry: string): Promise<string> {
   const mtimeMs = statSync(entry).mtimeMs;
@@ -291,8 +344,38 @@ async function bundleUIEntry(entry: string): Promise<string> {
   return js;
 }
 
+// ---------------------------------------------------------------------------
+// Boot: CLI flag → auth policy → skill sync → serve → banner.
+// ---------------------------------------------------------------------------
+
+/** `--install-skill`: copy the skill and exit without starting the server. */
+if (process.argv.includes("--install-skill")) {
+  const result = await syncSkill();
+  if (result.ok) console.log(`[webui] skill installed at ${result.target}`);
+  else console.error(`[webui] skill install failed: ${result.reason}`);
+  process.exit(result.ok ? 0 : 1);
+}
+
+// Exits with a clear message when a wildcard bind has no WEBUI_PASSWORD.
+const AUTH = resolveAuthPolicy(HOST);
+const SECRET = loadSecret();
+const SKILL = await syncSkill(); // best-effort — never blocks the banner below it
+
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+const PKG_VERSION = readVersion();
+
 const server: Server<Record<string, unknown>> = Bun.serve({
   port: PROXY_PORT,
+  hostname: BIND_HOST,
   // Bun's default idleTimeout (10s) kills any socket silent for 10s. The
   // engine heartbeats /api/event every 15s, so an idle session's connection
   // is guaranteed to die before the next heartbeat — that WAS the "SSE
@@ -302,10 +385,25 @@ const server: Server<Record<string, unknown>> = Bun.serve({
   // owned by engine heartbeats + browser fuse + req.signal aborts — not a
   // socket timer — so disable it.
   idleTimeout: 0,
-  async fetch(req) {
+  async fetch(req, bunServer) {
     const url = new URL(req.url);
     const method = req.method;
     const path = url.pathname;
+
+    // DNS-rebinding + cross-origin guard — before ANY route, login included.
+    const guarded = guardRequest(req, HOST);
+    if (guarded) return guarded;
+
+    // The unauthenticated surface: login page, login POST, logout.
+    if (method === "GET" && path === "/login") return loginPageResponse(url);
+    if (method === "POST" && path === "/api/auth/login") {
+      return handleLogin(req, peerIP(req, bunServer), SECRET, AUTH.digest);
+    }
+    if (method === "GET" && path === "/api/auth/logout") return logoutResponse();
+
+    // Everything below — /api/* (JSON 401), pages, dist/ static, SSE, and
+    // WebSocket upgrades — requires a valid session cookie.
+    if (!isAuthed(req, SECRET)) return unauthorizedResponse(url);
 
     if (method === "GET" && path === "/api/webui/status") {
       try {
@@ -317,6 +415,11 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           { status: 503 },
         );
       }
+    }
+
+    // Proxy metadata: app version + where to report issues.
+    if (method === "GET" && path === "/api/webui/config") {
+      return Response.json({ version: PKG_VERSION, reportRepo: REPORT_REPO });
     }
 
     if (method === "POST" && path === "/api/debug") {
@@ -348,15 +451,15 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       return Response.json({ data: events });
     }
 
-    // Plugin web-UI extensions — must match before the generic /api proxy.
+    // Plugin + user web-UI extensions — must match before the generic /api proxy.
     if (method === "GET" && path === "/api/webui/extensions") {
-      // discoverUIEntries never throws; failures collapse to { data: [] }.
-      const entries = await discoverUIEntries();
+      // discoverAllUIEntries never throws; upstream failures collapse to { data: [] }.
+      const entries = await discoverAllUIEntries();
       dbg("extensions list:", entries.length, "ui entr(ies)");
       return Response.json({
         data: entries.map((e) => ({
           id: e.id,
-          source: e.entry,
+          source: e.source ?? e.entry,
           url: `/api/webui/extensions/${encodeURIComponent(e.id)}/bundle.js?v=${e.mtimeMs}`,
         })),
       });
@@ -367,7 +470,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       try {
         // Resolve through the CURRENT discovery result so removed/expired
         // plugins 404 instead of serving a stale bundle.
-        const found = (await discoverUIEntries()).find((e) => e.id === id);
+        const found = (await discoverAllUIEntries()).find((e) => e.id === id);
         if (!found || !existsSync(found.entry)) {
           return Response.json({ error: `unknown extension: ${id}` }, { status: 404 });
         }
@@ -502,5 +605,18 @@ const server: Server<Record<string, unknown>> = Bun.serve({
   },
 });
 
-console.log(`[webui] proxy listening on http://127.0.0.1:${server.port}`);
+// First-boot banner — the entire onboarding. The generated password is
+// printed exactly once and never logged anywhere else.
+const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST) ? "localhost" : HOST;
+console.log(
+  [
+    `[webui] ready → http://${displayHost}:${server.port}`,
+    `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
+    `[webui] same sessions as your opencode TUI — it's the same engine`,
+    `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/main.tsx`,
+    SKILL.ok
+      ? `[webui] agent skill installed at ${SKILL.target} (auto-synced each boot)`
+      : `[webui] agent skill NOT synced: ${SKILL.reason}`,
+  ].join("\n"),
+);
 void startEventRecorder();
