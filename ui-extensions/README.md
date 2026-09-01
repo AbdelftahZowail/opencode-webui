@@ -185,10 +185,11 @@ changes, run `bun run preview` (localhost:5174, proxy :4098).
 Extension entries end with `if (import.meta.hot) import.meta.hot.accept();` and
 export their `id` — keep both. Editing an extension hot-swaps it live (same-id
 registry swap, slots repaint); ADDING a folder is hot too (`index.ts`
-re-discovers without a reload). DELETING a folder still costs one coalesced
-full reload — Vite can't re-fetch a deleted module, so removing an extension
-is the one lifecycle step that reloads. Flipping `config.ts` also reloads.
-Slots removed by an edit disappear cleanly on that next reload.
+re-discovers without a reload). DELETING a folder is hot too: Vite accepts the
+removal at the `index.ts` HMR boundary and `pruneExtensions` drops the slots
+without a reload (proven by `scripts/uitest/extensions-check.ts` Phase C).
+Flipping `config.ts` still reloads (it is imported by core). Slots removed by
+an edit disappear cleanly and instantly.
 
 ## Region markers
 

@@ -195,7 +195,8 @@ install). They register against a small vocabulary of **kinds**:
 - **Add a feature**: create `ui-extensions/<name>/index.tsx`, call
   `register({ kind, ... })`, export its `id`, keep the trailing
   `import.meta.hot.accept()` line. Edits hot-swap live; adding a folder is
-  hot; DELETING a folder costs one coalesced reload.
+  hot; DELETING a folder is hot too (Vite 8 prunes at the HMR boundary — no
+  reload; proven by `scripts/uitest/extensions-check.ts`).
 - **Disable**: remove its id from the `enabled` list in
   `ui-extensions/config.ts`.
 - **Full app access**: extensions are the same build — they can use
