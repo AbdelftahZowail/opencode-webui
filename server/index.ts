@@ -605,9 +605,20 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           return new Response("not found", { status: 404 });
         }
         const file = Bun.file(resolved);
-        if (await file.exists()) return new Response(file);
+        if (await file.exists()) {
+          // Hashed assets are immutable; anything NOT hash-named (index.html,
+          // SPA fallbacks, favicon) must be revalidated — a cached index.html
+          // pins the browser to a stale bundle after every update.
+          const immutable = /-[A-Za-z0-9_-]{8}\.[a-z0-9]+$/.test(filePath);
+          return new Response(file, {
+            headers: {
+              "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-store",
+            },
+          });
+        }
         const index = Bun.file(DIST_DIR + "index.html");
-        if (await index.exists()) return new Response(index);
+        if (await index.exists())
+          return new Response(index, { headers: { "cache-control": "no-store" } });
       }
       return new Response("not found", { status: 404 });
     }

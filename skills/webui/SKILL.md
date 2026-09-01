@@ -11,7 +11,7 @@ service credentials. One port for UI + `/api/*`: http://localhost:4097
 (`WEBUI_PROXY_PORT`).
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 1.0.5 (matches the `v1.0.5` git tag —
+- **This skill's version**: 1.0.6 (matches the `v1.0.6` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -24,12 +24,12 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/ui-extensions/README.md | Full authoring guide — the source of truth for kinds/hooks/regions |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/src/extensions/registry.tsx | The slot registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/src/components/Composer.tsx | Where slash entries / prompt hooks / composer regions live |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/src/components/MessageItem.tsx | Where message/message.decoration/message.part render |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/src/lib/composerHandoff.ts | Type-anywhere → composer behavior (if your extension competes for keys) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.5/src/store.ts | The store — actions useStore exposes to extensions |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/ui-extensions/README.md | Full authoring guide — the source of truth for kinds/hooks/regions |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/src/extensions/registry.tsx | The slot registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/src/components/Composer.tsx | Where slash entries / prompt hooks / composer regions live |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/src/components/MessageItem.tsx | Where message/message.decoration/message.part render |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/src/lib/composerHandoff.ts | Type-anywhere → composer behavior (if your extension competes for keys) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.6/src/store.ts | The store — actions useStore exposes to extensions |
 
 ## Environment
 
