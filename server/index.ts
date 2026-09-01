@@ -23,6 +23,7 @@ import type { Server } from "bun";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   guardRequest,
   handleLogin,
@@ -48,8 +49,11 @@ const HOST = process.env.WEBUI_HOST ?? "127.0.0.1";
 // Bun binds 0.0.0.0 by default; keep the safe loopback default and only pass
 // through what the operator actually asked for ("localhost" binds 127.0.0.1).
 const BIND_HOST = HOST === "localhost" ? "127.0.0.1" : HOST;
-const DIST_DIR = new URL("../dist/", import.meta.url).pathname;
-const APP_ROOT = new URL("../", import.meta.url).pathname;
+// fileURLToPath, not .pathname — .pathname yields "/C:/..." on Windows and
+// breaks every join; inside a --compile binary this stays a virtual /$bunfs
+// path that scripts/embed-shim.ts maps onto the embedded assets.
+const DIST_DIR = fileURLToPath(new URL("../dist/", import.meta.url));
+const APP_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DEBUG_LOG = process.env.WEBUI_DEBUG_LOG ?? "/tmp/webui-debug.log";
 const DEBUG = Bun.env.WEBUI_DEBUG === "1";
 const REPORT_REPO = process.env.WEBUI_REPORT_REPO ?? "AbdelftahZowail/opencode-webui";

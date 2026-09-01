@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { fileURLToPath } from "node:url";
 /**
  * Regenerates skills/webui/SKILL.md from ui-extensions/README.md.
  *
@@ -16,7 +17,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SOURCE = join(ROOT, "ui-extensions", "README.md");
 const TARGET = join(ROOT, "skills", "webui", "SKILL.md");
 

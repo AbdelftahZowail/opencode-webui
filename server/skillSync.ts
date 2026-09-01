@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * Skill auto-sync: the repo's skills/webui/SKILL.md is the agent-side manual
  * for driving this webui. It is copied into the user's opencode skill dir on
@@ -17,7 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /** Lives next to the server source so it works from any cwd. */
-const SOURCE = new URL("../skills/webui/SKILL.md", import.meta.url).pathname;
+const SOURCE = fileURLToPath(new URL("../skills/webui/SKILL.md", import.meta.url));
 
 export function skillTargetPath(): string {
   const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { fileURLToPath } from "node:url";
 // Diff the committed OpenAPI snapshot (docs/reference/openapi.json) against
 // the live service. Prints a human summary and exits 1 on drift (CI mode).
 //   bun run scripts/diff-openapi.ts            # pretty summary to stdout
@@ -6,7 +7,7 @@
 //   bun run scripts/diff-openapi.ts --check    # exit 1 if added/removed/modified
 import { Service } from "@opencode-ai/client/service";
 
-const SNAP_PATH = new URL("../docs/reference/openapi.json", import.meta.url).pathname;
+const SNAP_PATH = fileURLToPath(new URL("../docs/reference/openapi.json", import.meta.url));
 const asJson = process.argv.includes("--json");
 const check = process.argv.includes("--check");
 

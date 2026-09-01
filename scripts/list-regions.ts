@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { fileURLToPath } from "node:url";
 /**
  * Regenerates the "Region markers" table in ui-extensions/README.md by
  * scanning src .tsx files for <Slot region="..."> placements. Keeps the
@@ -9,7 +10,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const glob = new Bun.Glob("**/*.tsx");
 const rows: { region: string; where: string }[] = [];

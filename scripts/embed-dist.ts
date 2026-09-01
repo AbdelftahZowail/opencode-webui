@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * Generates scripts/generated/assets.ts — the embedded-asset manifest used by
  * `bun build --compile` (driven by scripts/build-binary.sh).
@@ -13,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-const repoRoot = new URL("..", import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(repoRoot, "dist");
 const outDir = join(repoRoot, "scripts", "generated");
 const outFile = join(outDir, "assets.ts");

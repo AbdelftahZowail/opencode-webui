@@ -33,7 +33,10 @@ const realFile = Bun.file.bind(Bun);
 (process.env as Record<string, string | undefined>)["NODE_ENV"] = "production";
 
 (Bun as { file: unknown }).file = (input: string | URL) => {
-  const path = typeof input === "string" ? input : input.pathname;
+  // fileURLToPath (used by the server on win32) produces backslash paths even
+  // for the virtual /$bunfs locations — normalize before matching.
+  const raw = typeof input === "string" ? input : input.pathname;
+  const path = raw.replace(/\\/g, "/");
   if (path.startsWith(BUNFS_DIST)) {
     const hit = embeddedDist["/" + path.slice(BUNFS_DIST.length)];
     if (hit) return realFile(hit);
