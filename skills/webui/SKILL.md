@@ -1,59 +1,122 @@
 ---
 name: webui
-description: Use when the user asks to customize, extend, or fix the opencode-webui frontend (the web UI for OpenCode v2) — layout changes, new panels, styling, chat/message rendering, permission or form dialogs, or wiring new OpenCode API resources into the UI. Loads the project's AGENTS.md guide as the source of truth.
+description: opencode-webui — the browser frontend for the OpenCode engine. Load when the user mentions the webui/web frontend, asks about webui extensions, or wants to report a webui bug (/report does it).
 ---
 
-# opencode-webui
+# OpenCode webui (opencode-webui)
 
-A web frontend for the OpenCode v2 engine (the engine is the background
-`opencode` service; this project is only a client of its HTTP API).
+The browser frontend for the OpenCode engine — same engine, same sessions as
+the `opencode` TUI, with a Bun proxy in front so the browser never holds
+service credentials. One port for UI + `/api/*`: http://localhost:4097
+(`WEBUI_PROXY_PORT`).
 
-## Before doing anything
+## Environment
 
-1. **Read `/home/zowail/opencode-webui/AGENTS.md`** — it is the authoritative
-   guide: architecture (Bun proxy → service), where every file lives, the
-   hot-reload contract, editing rules, and the feature roadmap.
-2. If the task touches the API contract layer (`src/api/types.ts`,
-   `src/api/client.ts`), get the current OpenAPI spec first and diff against
-   it — never guess field names:
-   `bun run scripts/fetch-openapi.ts` writes live `GET /openapi.json` (via
-   `Service.ensure()` like the proxy) to `docs/reference/openapi.json`; then
-   `bun run scripts/diff-openapi.ts` shows drift and `git diff docs/reference/openapi.json` is the raw contract diff.
-   See `docs/coverage.md` for the full have / don't-have / why map.
-3. Run `bun run typecheck` after any change; the project must stay clean.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WEBUI_PASSWORD` | generated on first boot, printed once | Shared login passphrase. |
+| `WEBUI_HOST` | `127.0.0.1` | Bind address — a wildcard is refused without a password. |
+| `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
+| `WEBUI_DEBUG` | unset | `1` — server/proxy debug logs to stdout. |
+| `WEBUI_DEBUG_LOG` | `/tmp/webui-debug.log` | File the frontend log sink (`POST /api/debug`) appends to. |
 
-## Key facts to remember
+## What you can do for the user
 
-- **Do not restart the opencode service.** UI work only edits files under
-  `src/`, `ui-extensions/` and `server/`; Vite HMR applies UI changes
-  instantly, and the proxy auto-restarts on server edits.
-- **New UI features go in `ui-extensions/`** (plain React, registered
-  against stable slots: `sidebar`, `footer`, `composer.replace`,
-  `tool.renderer`) — NOT new hardcoded places in core components. Read
-  `ui-extensions/README.md` first; `ui-extensions/index.ts` is the wiring
-  file. Adding a slot is a core change — update the registry, the app
-  render point, and both docs.
-- **The browser never sees service credentials** — everything goes through
-  the proxy in `server/index.ts`. Keep it that way.
-- **State lives only in `src/store.ts`** (event reducer + actions). UI
-  components read with `useStore((s) => ...)` and call actions; one-shot
-  catalog fetches (models/agents/commands/skills) are the only direct API
-  calls in components.
-- **The chat UI is event-driven**: history from the messages endpoint,
-  live output from the `/api/event` SSE stream. Adding a new kind of live
-  rendering means handling its event type in the store's `handleEvent`.
+- **File a webui bug** — the composer ships a built-in `/report` command that
+  bundles diagnostics (build version, user agent, enabled extension ids, error
+  ring) into a prefilled GitHub issue for AbdelftahZowail/opencode-webui (see
+  Reporting bugs below).
+- **Explain the extension system** from the tables below — they are extracted
+  verbatim from the authoring guide (`ui-extensions/README.md`), which is the
+  source of truth.
+- **Author a user-dir extension** for the user — a folder, no build step, no
+  restart.
 
-## Keeping the API current
+### Minimal user-dir extension
 
-- **Snapshot:** `docs/reference/openapi.json` is the versioned "last covered" spec (111 paths as of this doc). Live is whatever `Service.ensure()` returns — check drift with `bun run scripts/diff-openapi.ts`.
-- **Weekly / after upstream update:** `bun run scripts/fetch-openapi.ts` → review `git diff` → run `bun run scripts/diff-openapi.ts --check` in CI → add missing client methods/types (`src/api/client.ts:368`, `src/api/types.ts:1`) → decide UI or mark as client-only with a reason row in `docs/coverage.md:1` → update `AGENTS.md:31` / `HANDOFF.md` if user-visible → `bun run typecheck`.
-- **Dual stack:** new build docs ship an optional Effect variant (`@opencode-ai/client/effect`, `packages/plugin/src/v2/effect`, `@opencode-ai/sdk@dev` Effect API). Webapp stays Promise (`server/index.ts:13` + `src/api/client.ts:113`). Same OpenAPI — no code change required. Refs: `docs/coverage.md#dual-stack`.
+Drop a folder — `~/.config/opencode/webui-extensions/<name>/main.tsx`
+(per-user) or `<project>/.opencode/webui-extensions/<name>/main.tsx`
+(per-project). The proxy bundles it and the page loads it within a poll cycle
+(~8s); toggle per extension in Settings › Extensions. Runtime extensions reach
+the app ONLY through the versioned `window.__opencodeUI` bridge (`register`,
+`react`, `useStore`, `api`, `notify`, `getHooks`):
 
-## Common tasks
+```tsx
+// ~/.config/opencode/webui-extensions/hello/main.tsx
+const { register, react } = window.__opencodeUI;
 
-- "Change the look of X" → Tailwind classes in `src/components/`.
-- "Add a panel for Y" → an extension: folder in `ui-extensions/`, one line
-  in `ui-extensions/index.ts`, `register({ id, slot, render })`. Preview on
-  the dev page (5173) or `bun run preview` (5174) before shipping.
-- "Wire up a new API resource" → add types + client function first, then a
-  component, then a roadmap checkmark in AGENTS.md and a row in `docs/coverage.md`.
+register({
+  kind: "region",
+  id: "hello",
+  region: "footer",
+  render: () => react.createElement("span", null, "hello from a user extension"),
+});
+```
+
+## Extension kinds (the contract)
+
+| Kind | What it does | Where it surfaces |
+| --- | --- | --- |
+| `region` | render into any `<Slot region="…">` marker placed by core (see generated table below) | wherever core placed a `<Slot>` |
+| `command` | entry in the palette's "Extension commands" group (`run({ sessionID })`; `keybind` like `ctrl+shift+k` for global hotkey) | command palette (⌘/ctrl-K) + keybind |
+| `slash` | **UI-only** slash entry for Composer `/name` (local `run(args,{sessionID})`; not engine) | Composer autocomplete (`/` menu) |
+| `message` | full replacement for any message type (`type:"system"\|"synthetic"\|"shell"\|"compaction"\|"user"\|"assistant"\|…\|"*"`, `render({message, sessionID}) => node\|null`); first non-null wins, else core `renderMessageBody` | `MessageItem` per message |
+| `message.decoration` | small extras under message rows; `render({ messageID, message }) => node\|null` | under every message row |
+| `message.part` | inject after *each* part (text/tool/reasoning) inside a message; `render({messageID, message, part, partIndex})` | inside `MessageItem` per part |
+| `tool.renderer` | custom card for a specific tool name (`toolName:"bash"\|"edit"\|…`, `render(part)`) | `ToolCard` per tool call |
+| `contextMenu` | right-click menu item (`target:"message"\|"session"\|"file"`, `label`, `run`, `order`) | context menu |
+| `hook` | intercept/behavior (`event:string`, `handler(ctx,next)`) — see Hook events below | store / Composer / MessageItem |
+| `page` | full surface at `/ext/{id}` (route derived from the id) | sidebar links + direct URL |
+| `settings` | titled section inside Settings › Extensions (`render: () => ReactNode`) | Settings dialog |
+
+### Hook events
+
+| Event | `ctx` shape | When |
+| --- | --- | --- |
+| `session.prompt` | `{ text: string, sessionID: string }` — mutate `ctx.text` to transform; call `next()` to continue | Composer `submit` before `POST /api/session/{id}/prompt` |
+| `message.render` | `{ message: MessageInfo, sessionID?: string }` — mutate `ctx.message` (shallow clone) before render | `MessageItem` before `message` renderer |
+| `store.dispatch` | `{ action, ... }` | store middleware observer |
+
+## Regions (render points)
+
+| Region | Render point |
+| --- | --- |
+| `app.header` | `src/App.tsx:238` |
+| `composer.above` | `src/components/Composer.tsx:932` |
+| `composer.below` | `src/components/Composer.tsx:1252` |
+| `composer.toolbar` | `src/components/Composer.tsx:1240` |
+| `footer` | `src/App.tsx:303` |
+| `header.session.actions` | `src/components/Conversation.tsx:572` |
+| `header.session.before` | `src/components/Conversation.tsx:520` |
+| `message.after` | `src/components/MessageItem.tsx:258` |
+| `message.before` | `src/components/MessageItem.tsx:239` |
+| `sidebar` | `src/components/Sidebar.tsx:682` |
+| `sidebar.session.after` | `src/components/Sidebar.tsx:982` |
+| `sidebar.session.before` | `src/components/Sidebar.tsx:914` |
+| `tool.after` | `src/components/ToolCard.tsx:58` |
+| `tool.before` | `src/components/ToolCard.tsx:57` |
+| `transcript.above` | `src/components/Conversation.tsx:128` |
+| `transcript.below` | `src/components/Conversation.tsx:155` |
+| `transcript.empty` | `src/components/Conversation.tsx:434` |
+
+## Add / remove / disable (app repo)
+
+| Action | How |
+| --- | --- |
+| Add | Create `ui-extensions/<name>/`, add one import to `ui-extensions/index.ts`. Appears instantly via HMR. |
+| Remove | Delete the import line and the folder. |
+| Disable | Remove its id from the `enabled` list in `ui-extensions/config.ts` — one line, applies instantly via HMR, no reload. |
+
+The `enabled` list in `ui-extensions/config.ts` is the runtime switch: only
+ids listed there are rendered, even if the code is bundled. (A settings-panel
+UI could drive the same list later — the mechanism is already in place.)
+
+## Reporting bugs
+
+`/report` in the composer files a prefilled GitHub issue against
+AbdelftahZowail/opencode-webui with a diagnostics bundle (build version, user
+agent, enabled extension ids, window error ring). `--agent` hands the same
+bundle to the session agent instead: when the user asks you to file it and
+`gh` is authenticated, create the issue yourself from the bundle — the webui
+never holds GitHub credentials. The engine's built-in `/report` skill is a
+different thing (different repo, different diagnostics).
