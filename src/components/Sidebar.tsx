@@ -406,7 +406,10 @@ export function Sidebar() {
           {sidebarCollapsed ? (
             <span className="font-mono text-xs font-semibold text-foreground" title="OpenCode">OC</span>
           ) : (
-            <span className="truncate text-sm font-semibold text-foreground">OpenCode</span>
+            <>
+              <span className="truncate text-sm font-semibold text-foreground">OpenCode</span>
+              <WebUIVersion />
+            </>
           )}
         </div>
         {sidebarCollapsed ? (
@@ -710,6 +713,30 @@ export function Sidebar() {
 }
 
 type SessionGroup = { name: string; list: SessionInfo[] };
+
+/** One-shot fetch of the proxy's app version (`GET /api/webui/config`),
+ * rendered as a muted `v1.0.4` next to the connection dot in the header. */
+function WebUIVersion() {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/webui/config")
+      .then((r) => (r.ok ? (r.json() as Promise<{ version?: string }>) : null))
+      .then((cfg) => {
+        if (!cancelled && cfg?.version) setVersion(cfg.version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (!version) return null;
+  return (
+    <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]" title={`webui v${version}`}>
+      v{version}
+    </span>
+  );
+}
 
 /**
  * Instant, offline draft open — no network, so no busy gate. Keeps the
