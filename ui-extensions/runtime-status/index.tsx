@@ -12,7 +12,6 @@ function RuntimeStatus() {
 
   return (
     <footer className="flex min-h-7 items-center justify-end gap-3 border-t border-[var(--border-weak-base)] bg-[var(--background-base)] px-3 py-1 font-mono text-[10px] text-[var(--text-weaker)]">
-      <span className="hidden sm:inline">webui extension</span>
       <span
         className="inline-flex items-center gap-1.5"
         title={online ? "Connected to the OpenCode service" : "Waiting for the OpenCode service"}

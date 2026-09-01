@@ -406,10 +406,7 @@ export function Sidebar() {
           {sidebarCollapsed ? (
             <span className="font-mono text-xs font-semibold text-foreground" title="OpenCode">OC</span>
           ) : (
-            <>
-              <span className="truncate text-sm font-semibold text-foreground">OpenCode</span>
-              <WebUIVersion />
-            </>
+            <span className="truncate text-sm font-semibold text-foreground">OpenCode</span>
           )}
         </div>
         {sidebarCollapsed ? (
@@ -829,6 +826,7 @@ function SidebarFooter({
           <SettingsIcon className="size-3" />
           Settings
         </button>
+        <WebUIVersion />
         {/* Extension pages: native /ext/{id} anchors styled like the footer
             links above; hidden entirely when no pages are registered. */}
         <ExtensionPagesNav />
