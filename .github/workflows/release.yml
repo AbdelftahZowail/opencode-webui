@@ -71,6 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             release/*.tar.gz release/SHA256SUMS.txt \
             --title "opencode-webui $GITHUB_REF_NAME" \
             --generate-notes
