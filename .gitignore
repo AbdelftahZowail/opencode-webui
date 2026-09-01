@@ -1,4 +1,6 @@
 node_modules/
 dist/
+release/
+scripts/generated/
 *.log
 .DS_Store

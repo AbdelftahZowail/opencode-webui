@@ -1,8 +1,33 @@
 {
   "name": "opencode-webui",
-  "private": true,
+  "description": "Web UI for the OpenCode coding agent — chat, streaming, tool cards, and extensions over the OpenCode engine's HTTP API.",
+  "private": false,
   "type": "module",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AbdelftahZowail/opencode-webui.git"
+  },
+  "keywords": [
+    "opencode",
+    "webui",
+    "ai",
+    "agent",
+    "bun"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "bin": {
+    "opencode-webui": "./server/index.ts"
+  },
+  "files": [
+    "dist",
+    "server",
+    "skills",
+    "ui-extensions/README.md"
+  ],
   "scripts": {
     "dev": "bun run scripts/dev.ts",
     "dev:web": "vite",
@@ -12,7 +37,9 @@
     "start": "NODE_ENV=production bun run server/index.ts",
     "typecheck": "tsc --noEmit",
     "regions": "bun run scripts/list-regions.ts",
-    "check:swap": "bun run scripts/uitest/swap-ready.ts"
+    "gen:skill": "bun run scripts/gen-skill.ts",
+    "check:swap": "bun run scripts/uitest/swap-ready.ts",
+    "prepublishOnly": "bun run typecheck && bun run gen:skill && bun run build"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
