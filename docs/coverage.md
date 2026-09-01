@@ -88,7 +88,7 @@ or embedding via SDK would pick one style; webapp contributors ignore it. Doc re
 1. `bun run scripts/fetch-openapi.ts` → review `git diff docs/reference/openapi.json`.
 2. Add missing client methods + types in `src/api/client.ts` / `src/api/types.ts` (one per endpoint, additive-only).
 3. Decide UI: add a component/extension, or mark here as **client-only with reason** (don't leave a gap without a reason row).
-4. Update this file + `AGENTS.md:155` roadmap table + `HANDOFF.md` if the feature is user-visible.
+4. Update this file if the feature is user-visible.
 5. `bun run typecheck` must stay green. No new deps without justification (`AGENTS.md:117`).
 
 ## How to run the check
