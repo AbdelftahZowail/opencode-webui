@@ -97,7 +97,9 @@ export type AuthPolicy = {
 /**
  * Resolve the password policy at boot. WEBUI_PASSWORD wins; on a wildcard
  * bind with none set we REFUSE to start rather than expose an unauthenticated
- * proxy to the network. Loopback binds get a generated passphrase.
+ * proxy to the network. Loopback binds get a generated passphrase that is
+ * GENERATED ONCE and then persisted (0600) next to the HMAC secret, so
+ * restarts keep working without a new password to hunt for in logs.
  */
 export function resolveAuthPolicy(host: string): AuthPolicy {
   const fromEnv = process.env.WEBUI_PASSWORD;
@@ -108,8 +110,29 @@ export function resolveAuthPolicy(host: string): AuthPolicy {
     console.error(`[webui] refusing ${host} without WEBUI_PASSWORD — set it or keep the loopback bind`);
     process.exit(1);
   }
-  const generated = generatePassphrase();
+  const generated = loadOrGeneratePassword();
   return { digest: createHash("sha256").update(generated, "utf8").digest(), generated };
+}
+
+/** State dir shared with the HMAC secret (created by loadSecret). */
+const STATE_DIR = join(stateBaseDir(), "opencode-webui");
+const PASSWORD_FILE = join(STATE_DIR, "generated-password");
+
+function loadOrGeneratePassword(): string {
+  try {
+    const existing = readFileSync(PASSWORD_FILE, "utf8").trim();
+    if (existing.length >= 16) return existing;
+  } catch {
+    /* first boot — generate below */
+  }
+  const password = generatePassphrase();
+  try {
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(PASSWORD_FILE, password + "\n", { mode: 0o600 });
+  } catch {
+    /* unwritable state dir — password still works for this boot */
+  }
+  return password;
 }
 
 export function verifyPassword(input: string, digest: Buffer): boolean {
