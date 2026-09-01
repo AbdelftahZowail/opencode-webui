@@ -310,8 +310,20 @@ export function FileExplorer({
         if (selectedRef.current?.path !== entry.path) return;
         setPreview({ error: errMsg(e), loading: false });
       });
+    // vcs/base infers the review base (branch creation history); pass its ref
+    // to the diff so ambiguous Git history doesn't 400. Null ⇒ engine default.
     void api
-      .vcsDiff("working", locationDir ? { directory: locationDir } : undefined, 3)
+      .vcsBase(locationDir ? { directory: locationDir } : undefined)
+      .then((r) => r.data)
+      .catch(() => null)
+      .then((base) =>
+        api.vcsDiff(
+          "working",
+          locationDir ? { directory: locationDir } : undefined,
+          3,
+          base?.ref ?? null,
+        ),
+      )
       .then((res) => {
         if (selectedRef.current?.path !== entry.path) return;
         const hit = res.data.find((d) => sameFile(d.file, entry.path));

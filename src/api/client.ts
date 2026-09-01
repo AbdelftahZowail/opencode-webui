@@ -60,6 +60,12 @@ export interface VcsDiffFile {
   status: "added" | "deleted" | "modified";
 }
 
+export interface VcsBase {
+  name: string;
+  ref: string;
+  source: "reflog" | "default";
+}
+
 export interface ShellInfo {
   id: string;
   status: "running" | "exited" | "timeout" | "killed";
@@ -686,10 +692,17 @@ export const api = {
   // vcs
   vcsStatus: (location?: VcsLocation) =>
     request<{ location: unknown; data: VcsFileStatus[] }>(`/api/vcs/status?${vcsQuery(location)}`),
-  vcsDiff: (mode: VcsMode, location?: VcsLocation, context?: number | null) =>
+  vcsDiff: (
+    mode: VcsMode,
+    location?: VcsLocation,
+    context?: number | null,
+    base?: string | null,
+  ) =>
     request<{ location: unknown; data: VcsDiffFile[] }>(
-      `/api/vcs/diff?${vcsQuery(location, { mode, context })}`,
+      `/api/vcs/diff?${vcsQuery(location, { mode, context, base })}`,
     ),
+  vcsBase: (location?: VcsLocation) =>
+    request<{ location: unknown; data: VcsBase | null }>(`/api/vcs/base?${vcsQuery(location)}`),
 
   // shell
   shellList: (location?: VcsLocation) =>
@@ -839,6 +852,8 @@ export const api = {
   configGet: () => request<ConfigEntry[]>("/api/config"),
   credentialPatch: (credentialID: string, label: string) =>
     patch<unknown>(`/api/credential/${credentialID}`, { label }),
+  credentialActivate: (credentialID: string) =>
+    post<unknown>(`/api/credential/${credentialID}/activate`, undefined),
   credentialDelete: (credentialID: string) =>
     request<unknown>(`/api/credential/${credentialID}`, { method: "DELETE" }),
 

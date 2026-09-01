@@ -25,10 +25,10 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | inbox/steering | `GET /api/session/{id}/inbox`, `DELETE inbox/{id}`, `POST steer/queue` | `inboxList/Queue/Steer/Delete`, `inboxPrompt`, `prompt/promptWithFiles` (optional `delivery`) | Explicit STEER vs QUEUE system: busy sends become tracked inbox rows in `QueueStrip` (toggle/send-now/cancel), reconciled by `session.inbox.*` events + poll; queue-drain failsafe on turn end. `InboxPanel` unchanged |
 | revert | `POST revert/stage`, `POST revert/clear`, `POST revert/commit` | `revertStage/Clear/Commit` | `/undo` `/redo`, `applyRevertView` cut of transcript |
 | agent/model/command/skill catalog | `GET /api/agent`, `GET /api/agent/{id}`, `GET /api/model`, `GET /api/model/default`, `GET /api/command`, `GET /api/skill` | `agents`, `models`, `commands`, `skills` | Pickers (`Pickers.tsx`), command palette, skill picker, variants |
-| provider/integration/credential | `GET /api/provider`, `GET /api/provider/{id}`, `GET /api/integration`, `POST connect/key|oauth|command`, `PATCH/DELETE /api/credential/{id}` | `providerList/Get`, `integration*`, `credentialPatch/Delete` | Settings → Providers/Integrations/Credentials |
+| provider/integration/credential | `GET /api/provider`, `GET /api/provider/{id}`, `GET /api/integration`, `POST connect/key|oauth|command`, `PATCH/DELETE/POST-activate /api/credential/{id}` | `providerList/Get`, `integration*`, `credentialPatch/Delete/Activate` | Settings → Providers/Integrations/Credentials (activate button on each stored credential) |
 | mcp/plugin | `GET/PUT/DELETE /api/mcp*`, `POST connect/disconnect`, `GET resource`, `GET /api/plugin` | `mcpList/Put/Delete/Connect/Disconnect/Resource`, `pluginList` | Settings → MCP / Plugins |
 | filesystem/location/project | `GET /api/fs/read/*`, `GET /api/fs/list`, `GET /api/fs/find`, `GET /api/location`, `GET /api/project`, `GET /api/project/current` | `fsRead/ReadBytes/List/Find`, `location`, `project*` | FileExplorer, workspace picker, path chips |
-| vcs | `GET /api/vcs`, `GET /api/vcs/status`, `GET /api/vcs/diff`, `GET /api/vcs/branches` | `vcsStatus/Diff`, `vcsQuery` helper | FileExplorer diff, VCS status badge |
+| vcs | `GET /api/vcs`, `GET /api/vcs/status`, `GET /api/vcs/diff` (+ `base` param), `GET /api/vcs/branches`, `GET /api/vcs/base` | `vcsStatus/Diff/Base`, `vcsQuery` helper | FileExplorer diff (infers the review base via `vcsBase` and passes its `ref` to `vcsDiff`, so ambiguous Git history doesn't need an explicit base), VCS status badge |
 | pty/shell | `GET/POST /api/pty`, `GET/PUT/DELETE /api/pty/{id}`, `POST connect-token`, `GET connect`, `GET/POST /api/shell*` | `pty*`, `shell*` | Shell panel, `TerminalView.tsx` (xterm) via websocket proxy |
 | websearch/config | `GET /api/websearch/provider`, `POST /api/websearch`, `GET /api/config` | `websearch*`, `configGet` | Settings → WebSearch / Config |
 | worktree | `GET/POST/DELETE /api/worktree/{projectID}`, `POST refresh` | (proxied, not yet wrapped) | surfaced via workspace selection |
@@ -42,6 +42,7 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | `GET /api/reference` | `v2.reference.list` | `api.referenceList` | Engine reference bookkeeping (local/git references) — opaque internals, no user action. |
 | `GET /api/debug/location`, `DELETE /api/debug/location` | `v2.debug.location.*` | proxied only | Debug — evict loaded location. |
 | `GET /api/experimental/session/{id}/log` | `v2.session.log` | `api.sessionLogHead` | Engine's DURABLE per-session event log with an aggregate-seq cursor. Spike-verified (2026-08-31, `scripts/uitest/spike-v2-log.ts`): durable across process lifetimes (an 8-day-old session serves its head seq), `follow=false` returns a `log.synced` head marker for ANY `after`, but `follow=true` streams ZERO bytes on beta-18684 — no replay, no tail. Wired as dormant cursor tracking (`store.logHeadSeq`, probed on adopt/reconnect); the proxy recorder remains the catch-up channel until a build ships a working follow. |
+| `POST /api/rpc/{rpcID}/{method}` | `v2.rpc.call` | proxied only | Generic RPC passthrough — call any registered engine method by id (`Rpc.Input` → `Rpc.Output`). Escape hatch; no UI action exists. Revisit if the engine documents callable methods. |
 | `GET /api/experimental/migration/v1` | `v2.experimental.migration.v1.status` | proxied only | V1 migration status. |
 | `POST /api/experimental/integration/wellknown` | `v2.experimental.integration.wellknown.add` | integration well-known | Experimental integration discovery. |
 | `POST /api/session/{id}/view` | `v2.session.view {idle}` | (add on next client pass) | Marks viewer's idle transition as viewed — spike-verified accepted (204) but with no observable effect on this build, and the §4.4 active-map lag it would address did NOT reproduce (session left `/session/active` within one poll of `wait` resolving). Wire if we add viewed/idle badges or the lag returns. |
@@ -54,10 +55,23 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | --- | --- | --- |
 | persistent-pty | `GET/POST /api/experimental/persistent-pty/*`, `GET/POST /api/experimental/session/{id}/terminal` | Prototype persistent PTY (`server.experimental.persistentPty.*`) — keep `src/api/client.ts:642` location-scoped `pty` as canonical; revisit if promoted from experimental. |
 
-## What changed vs last snapshot (99 → 115 paths)
+## What changed vs last snapshot (115 → 116 paths)
+
+Snapshot `docs/reference/openapi.json` at `2026-08-31` was 115 paths.
+Refreshed to 116 (live as of 2026-09-01):
+
+- Added 115 → 116: `POST /api/rpc/{rpcID}/{method}` (`v2.rpc.call`) — generic
+  RPC passthrough into the engine (call any registered method by id, `Rpc.Input →
+  Rpc.Output`). Documented as proxied-only below; no UI action exists for it.
+- Implemented from the previous 111 → 115 batch: `GET /api/vcs/base` (client +
+  wired into FileExplorer diff) and `POST /api/credential/{id}/activate`
+  (client + activate button in Settings → Integrations). Still unimplemented:
+  the experimental persistent-pty/terminal routes (see the experimental table).
+
+## Previous snapshot change (99 → 115)
 
 Snapshot `docs/reference/openapi.json` at `2026-08-16` was 99 paths (`@opencode-ai/client@0.0.0-next-17444`).
-Refreshed to 111 (`2026-08-26`), then to 115 (live as of 2026-08-31):
+Refreshed to 111 (`2026-08-26`), then to 115 (2026-08-31):
 
 - Added 111 → 115: `POST /api/credential/{id}/activate`, `POST /api/experimental/persistent-pty/handoff`,
   `GET /api/experimental/session/{id}/terminal/read`, `GET /api/vcs/base`. None surfaced in the webapp yet.

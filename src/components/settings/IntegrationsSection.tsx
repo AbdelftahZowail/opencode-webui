@@ -8,6 +8,9 @@ import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogFooter, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { CopyButton, Empty, ErrorNote, SectionHeader, inputCls, useAsync } from "./shared";
 import { registerPoller } from "../../lib/scheduler";
+import { notify } from "../../lib/notify";
+
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const dialogCls =
   "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 text-sm text-popover-foreground duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95";
@@ -404,6 +407,22 @@ export function IntegrationsSection() {
                           <span className="font-mono text-[10px] text-[var(--text-weaker)]">
                             {c.id}
                           </span>
+                        )}
+                        {c.type === "credential" && (
+                          <button
+                            type="button"
+                            className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:bg-[var(--surface-raised-base-hover)] hover:text-[var(--text-strong)]"
+                            onClick={() => {
+                              void api
+                                .credentialActivate(c.id)
+                                .then(refresh)
+                                .catch((e: unknown) =>
+                                  notify({ title: "Activate failed", description: errMsg(e), variant: "destructive" }),
+                                );
+                            }}
+                          >
+                            activate
+                          </button>
                         )}
                       </div>
                     ))}

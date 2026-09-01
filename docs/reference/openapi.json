@@ -9350,6 +9350,134 @@
         "summary": "List skills"
       }
     },
+    "/api/rpc/{rpcID}/{method}": {
+      "post": {
+        "tags": [
+          "rpc"
+        ],
+        "operationId": "v2.rpc.call",
+        "parameters": [
+          {
+            "name": "rpcID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "method",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "style": "deepObject",
+            "explode": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Rpc.Output",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rpc.Output"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "RpcError | InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RpcErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "RpcInternalError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RpcInternalErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Dispatch a method to the currently registered RPC at the requested location.",
+        "summary": "Call a plugin RPC",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Rpc.Input"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/event": {
       "get": {
         "tags": [
@@ -9490,7 +9618,7 @@
             }
           }
         },
-        "description": "Subscribe to native event payloads for the server. Volatile by contract: a slow consumer overflows and fails the stream, and events during disconnection are missed.",
+        "description": "Subscribe to native events and plugin RPC events across all server locations. Volatile by contract: a slow consumer overflows and fails the stream, and events during disconnection are missed.",
         "summary": "Subscribe to events"
       }
     },
@@ -14051,44 +14179,50 @@
           }
         ]
       },
-      "Plugin.Info": {
+      "Plugin.Features": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "tui": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "rpc": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Plugin.State": {
         "anyOf": [
           {
             "type": "object",
             "properties": {
-              "id": {
-                "type": "string"
-              },
-              "source": {
-                "$ref": "#/components/schemas/Plugin.Source"
-              },
               "status": {
                 "type": "string",
                 "enum": [
                   "active"
                 ]
-              },
-              "tui": {
-                "type": "boolean"
               }
             },
             "required": [
-              "id",
-              "source",
-              "status",
-              "tui"
+              "status"
             ],
             "additionalProperties": false
           },
           {
             "type": "object",
             "properties": {
-              "id": {
-                "type": "string"
-              },
-              "source": {
-                "$ref": "#/components/schemas/Plugin.Source"
-              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -14097,20 +14231,38 @@
               },
               "error": {
                 "type": "string"
-              },
-              "tui": {
-                "type": "boolean"
               }
             },
             "required": [
-              "source",
               "status",
-              "error",
-              "tui"
+              "error"
             ],
             "additionalProperties": false
           }
         ]
+      },
+      "Plugin.Info": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Plugin.Source"
+          },
+          "features": {
+            "$ref": "#/components/schemas/Plugin.Features"
+          },
+          "state": {
+            "$ref": "#/components/schemas/Plugin.State"
+          }
+        },
+        "required": [
+          "source",
+          "features",
+          "state"
+        ],
+        "additionalProperties": false
       },
       "Session.ForkBoundary": {
         "anyOf": [
@@ -19191,6 +19343,86 @@
         ],
         "additionalProperties": false
       },
+      "Rpc.Input": {
+        "type": "object",
+        "properties": {
+          "input": {}
+        },
+        "additionalProperties": false
+      },
+      "Rpc.Output": {
+        "type": "object",
+        "properties": {
+          "output": {}
+        },
+        "additionalProperties": false
+      },
+      "RpcErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": [
+              "RpcError"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "_tag",
+          "type",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "RpcInternalErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": [
+              "RpcInternalError"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "rpc.internal",
+              "rpc.invalid_output"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "_tag",
+          "type",
+          "message"
+        ],
+        "additionalProperties": false
+      },
       "V2EventEncoded": {
         "type": "string",
         "contentMediaType": "application/json"
@@ -21057,6 +21289,10 @@
     {
       "name": "skill",
       "description": "Experimental skill routes."
+    },
+    {
+      "name": "rpc",
+      "description": "Plugin RPC routes."
     },
     {
       "name": "event",
