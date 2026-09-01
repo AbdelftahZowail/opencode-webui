@@ -74,4 +74,8 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             release/*.tar.gz release/SHA256SUMS.txt \
             --title "opencode-webui $GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+          || gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            release/*.tar.gz release/SHA256SUMS.txt
