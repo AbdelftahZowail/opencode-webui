@@ -86,6 +86,22 @@ register({
 });
 ```
 
+## Sandbox (iterate without touching the user's webui)
+
+A second, private instance for authoring/testing user extensions — no repo
+needed. Start it the same way the package runs, plus `sandbox`:
+`bunx opencode-webui sandbox` (or `./opencode-webui-<target> sandbox`).
+It binds `127.0.0.1:4099` — loopback-only, NO password (a non-loopback
+sandbox is refused) — and loads extensions from an ISOLATED scratch dir
+(`~/.local/state/opencode-webui/sandbox-extensions/<name>/main.tsx`), so WIP
+is invisible to the user's main instance. Same engine, same sessions as the
+main instance. Workflow: write the extension in the scratch dir → watch it
+load in the sandbox within its poll cycle (~8s) → fix until right → then copy
+the folder into `~/.config/opencode/webui-extensions/<name>/` to ship it to
+the user (or `<project>/.opencode/webui-extensions/<name>/` for one project).
+Do not write user extensions directly into the real dirs while iterating —
+that exposes WIP to the user's browser immediately.
+
 ## Extension kinds (the contract)
 
 | Kind | What it does | Where it surfaces |

@@ -24,11 +24,17 @@ export type UIEntry = { id: string; entry: string; mtimeMs: number; source?: str
 export const USER_EXT_LIST_TTL_MS = 5_000;
 
 export function globalUserExtensionsDir(): string {
+  // WEBUI_EXTENSION_DIR replaces BOTH roots (global + project) with one
+  // directory — the sandbox sets this to its scratch dir so WIP extensions
+  // stay invisible to the main instance until copied out.
+  const override = process.env.WEBUI_EXTENSION_DIR;
+  if (override && override.length > 0) return override;
   const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
   return join(base, "opencode", "webui-extensions");
 }
 
-export function projectUserExtensionsDir(): string {
+export function projectUserExtensionsDir(): string | null {
+  if (process.env.WEBUI_EXTENSION_DIR) return null; // sandbox: scratch only
   return join(process.cwd(), ".opencode", "webui-extensions");
 }
 
@@ -55,6 +61,7 @@ export function discoverUserUIEntries(): UIEntry[] {
   const entries: UIEntry[] = [];
   const seen = new Set<string>();
   for (const root of [globalUserExtensionsDir(), projectUserExtensionsDir()]) {
+    if (!root) continue;
     let names: string[];
     try {
       names = readdirSync(root, { withFileTypes: true })

@@ -32,7 +32,7 @@
     "dev": "bun run scripts/dev.ts",
     "dev:web": "vite",
     "dev:server": "bun run --watch server/index.ts",
-    "preview": "bun run scripts/preview.ts",
+    "sandbox": "bun run scripts/sandbox.ts",
     "build": "vite build",
     "start": "NODE_ENV=production bun run server/index.ts",
     "typecheck": "tsc --noEmit",

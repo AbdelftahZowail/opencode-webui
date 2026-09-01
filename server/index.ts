@@ -20,11 +20,13 @@
 
 import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
+  SANDBOX,
   guardRequest,
   handleLogin,
   isAuthed,
@@ -43,6 +45,22 @@ import {
   warnOnce,
   type UIEntry,
 } from "./userExtensions";
+
+// `sandbox` argv — one command, every runtime: `bun run sandbox` (repo, the
+// script adds Vite), `bunx opencode-webui sandbox`, `./opencode-webui sandbox`
+// (compiled binary). Defaults live HERE so all three behave identically:
+// loopback bind, passwordless (WEBUI_SANDBOX), port 4099, and an ISOLATED
+// extension dir (scratch) — WIP extensions stay invisible to the main
+// instance until copied out. Explicit env wins over every default.
+if (process.argv.includes("sandbox")) {
+  process.env.WEBUI_SANDBOX ??= "1";
+  process.env.WEBUI_PROXY_PORT ??= "4099";
+  if (!process.env.WEBUI_EXTENSION_DIR) {
+    const state = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
+    process.env.WEBUI_EXTENSION_DIR = join(state, "opencode-webui", "sandbox-extensions");
+    mkdirSync(process.env.WEBUI_EXTENSION_DIR, { recursive: true, mode: 0o700 });
+  }
+}
 
 const PROXY_PORT = Number(process.env.WEBUI_PROXY_PORT ?? 4097);
 // Client headers never forwarded to the engine: transport (recomputed by Bun
@@ -428,8 +446,9 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     if (method === "GET" && path === "/api/auth/logout") return logoutResponse();
 
     // Everything below — /api/* (JSON 401), pages, dist/ static, SSE, and
-    // WebSocket upgrades — requires a valid session cookie.
-    if (!isAuthed(req, SECRET)) return unauthorizedResponse(url);
+    // WebSocket upgrades — requires a valid session cookie. A SANDBOX
+    // instance (loopback-only, passwordless) skips the gate entirely.
+    if (!SANDBOX() && !isAuthed(req, SECRET)) return unauthorizedResponse(url);
 
     if (method === "GET" && path === "/api/webui/status") {
       try {
@@ -673,7 +692,9 @@ const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST
 console.log(
   [
     `[webui] ready → http://${displayHost}:${server.port}`,
-    `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
+    SANDBOX()
+      ? `[webui] sandbox — loopback only, NO password; extensions (scratch): ${globalUserExtensionsDir()}`
+      : `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
     `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/main.tsx`,
     SKILL.ok

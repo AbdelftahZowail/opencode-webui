@@ -106,6 +106,15 @@ export function resolveAuthPolicy(host: string): AuthPolicy {
   if (fromEnv && fromEnv.length > 0) {
     return { digest: createHash("sha256").update(fromEnv, "utf8").digest() };
   }
+  if (process.env.WEBUI_SANDBOX === "1") {
+    // Sandbox mode: loopback-only, no password. The bind address is the
+    // guarantee — a non-loopback sandbox is a misconfiguration, refuse it.
+    if (!isLoopbackHostname(hostnameOf(host)) && !isLoopbackHostname(host)) {
+      console.error(`[webui] sandbox requires a loopback bind — refusing ${host}`);
+      process.exit(1);
+    }
+    return { digest: Buffer.alloc(0) };
+  }
   if (isWildcardHostname(hostnameOf(host))) {
     console.error(`[webui] refusing ${host} without WEBUI_PASSWORD — set it or keep the loopback bind`);
     process.exit(1);
@@ -214,6 +223,18 @@ export function isAuthed(req: Request, secret: Buffer): boolean {
   const token = getCookie(req, SESSION_COOKIE);
   if (!token) return false;
   return verifyToken(token, secret);
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox (passwordless loopback instance)
+
+/** True when this instance runs in SANDBOX mode: loopback-only bind, no
+ * password, full access for anything on the host (agents, scripts). Set via
+ * the `sandbox` argv or WEBUI_SANDBOX=1; a non-loopback bind is refused.
+ * A function, not a const: the `sandbox` argv block in index.ts runs before
+ * this module's constants (imports hoist), so this must read env lazily. */
+export function SANDBOX(): boolean {
+  return process.env.WEBUI_SANDBOX === "1";
 }
 
 export function getCookie(req: Request, name: string): string | undefined {

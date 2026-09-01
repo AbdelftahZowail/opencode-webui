@@ -34,6 +34,7 @@ Options:
 | `WEBUI_PASSWORD` | generated on first boot | Log in with this passphrase. Set it to pin your own instead of the generated one. |
 | `WEBUI_HOST` | `127.0.0.1` | Bind address. A wildcard (`0.0.0.0` / `::`) is refused without a password. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
+| `WEBUI_EXTENSION_DIR` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
 
 Sessions are shared with the `opencode` TUI — open a session in the TUI, continue it in the browser.
 
@@ -57,6 +58,26 @@ chmod +x opencode-webui-linux-x64
 
 Behind a reverse proxy (Caddy / nginx samples, incl. websocket + SSE timeouts):
 [docs/reverse-proxy.md](docs/reverse-proxy.md).
+
+## Sandbox
+
+A second, private instance for agents (or you) to test extensions and settings
+without touching your main webui — no clone, no build, works with the npm
+package and the prebuilt binaries:
+
+```sh
+bunx opencode-webui sandbox       # bun users
+./opencode-webui-linux-x64 sandbox  # binary users
+bun run sandbox                   # inside a repo checkout (adds Vite + HMR)
+```
+
+It binds `127.0.0.1:4099` — loopback only, **no password** (the bind address is
+the guarantee; a non-loopback sandbox is refused at startup) — attaches to your
+already-running opencode engine (same sessions, live), and loads extensions
+from an isolated scratch dir (`~/.local/state/opencode-webui/sandbox-extensions/`)
+instead of the real ones. Iterate there; "ship" = copy the folder into
+`~/.config/opencode/webui-extensions/` and the main instance picks it up
+within its poll cycle.
 
 ## The agent skill
 
@@ -85,7 +106,7 @@ session agent instead, so it can file it via `gh`.
 ```sh
 bun install
 bun run dev        # proxy (4097) + Vite (5173), HMR
-bun run preview    # isolated second instance (5174 / 4098) for WIP edits
+bun run sandbox    # isolated second instance (4099 / 5175, Vite in dev) — see Sandbox above
 bun run typecheck
 bun run build && bun start   # production: dist/ + API on 4097
 ```

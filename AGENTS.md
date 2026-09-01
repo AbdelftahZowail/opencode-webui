@@ -21,9 +21,15 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   and Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies `/api` to the
   proxy. HMR applies to every UI edit instantly — no refresh, no restart,
   and the opencode service is never restarted.
-- **Preview**: `bun run preview` starts a SECOND dev instance on dedicated
-  ports (Vite 5174, proxy 4098) — a fresh page for reviewing WIP edits
-  without touching the main app or production.
+- **Sandbox**: `bun run sandbox` (or `bunx opencode-webui sandbox` / the
+  binary's `sandbox` arg) starts a SECOND instance on `127.0.0.1:4099` —
+  loopback-only, passwordless (refused on a non-loopback bind), attaches to
+  the already-running engine, and loads extensions from an ISOLATED scratch
+  dir (`WEBUI_EXTENSION_DIR`, default
+  `~/.local/state/opencode-webui/sandbox-extensions/`). In a repo checkout it
+  also runs Vite (5175) with HMR — it replaced `bun run preview` as the one
+  second-instance mechanism. Iterate extensions there; "shipping" = copying
+  the folder into the real extension dir.
 - **Prod**: `bun run build && bun start`; the proxy serves `dist/` and the
   API on port 4097.
 
@@ -165,7 +171,8 @@ install). They register against a small vocabulary of **kinds**:
 ## Commands
 
 - `bun run dev` — proxy + Vite with HMR
-- `bun run preview` — second dev instance on 5174/4098 for reviewing WIP edits
+- `bun run sandbox` — isolated second instance: loopback-only, passwordless,
+  scratch extension dir; dev mode adds Vite on 5175. Replaced `bun run preview`.
 - `bun run typecheck` — `tsc --noEmit`
 - `bun run build && bun start` — production build, served on 4097
 - `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,

@@ -178,7 +178,21 @@ extension is just publishing a component library.
 The dev server (localhost:5173) is the preview: every edit hot-reloads there,
 and production (the built app on 4097) only changes when you run
 `bun run build && bun start`. For a second, isolated preview page of WIP
-changes, run `bun run preview` (localhost:5174, proxy :4098).
+changes, run `bun run sandbox` (localhost:5175, proxy :4099) — same loopback
+isolation whether you're in a repo checkout or running the installed package
+(`bunx opencode-webui sandbox`).
+
+### User-dir extensions: scratch first, ship by copy
+
+The sandbox works WITHOUT a repo checkout: loopback-only (`127.0.0.1:4099`),
+no password (the bind address is the guarantee; a non-loopback sandbox is
+refused), same engine/sessions as your main instance, and extensions load
+from an isolated scratch dir
+(`~/.local/state/opencode-webui/sandbox-extensions/`) instead of the real
+ones. Iterate there; "shipping" = copying the folder into
+`~/.config/opencode/webui-extensions/<name>/` (or the project's
+`.opencode/webui-extensions/<name>/`) — the main instance picks it up within
+its poll cycle.
 
 ### Hot reload
 
