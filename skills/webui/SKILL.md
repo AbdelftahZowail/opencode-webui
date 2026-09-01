@@ -10,6 +10,27 @@ the `opencode` TUI, with a Bun proxy in front so the browser never holds
 service credentials. One port for UI + `/api/*`: http://localhost:4097
 (`WEBUI_PROXY_PORT`).
 
+- **Repo**: https://github.com/AbdelftahZowail/opencode-webui
+- **This skill's version**: 1.0.4 (matches the `v1.0.4` git tag —
+  the file links below are pinned to it, so they always describe the code
+  this skill was generated with)
+- **A running instance exposes its version** at `GET /api/webui/config` →
+  `{ version, reportRepo }`, and on the page as `window.__opencodeUI.version`.
+
+## Source catalog (fetch, don't read local checkouts)
+
+Everything needed to author extensions is below; when a table isn't enough,
+fetch the exact file at the pinned tag instead of reading a local clone:
+
+| File | Purpose |
+| --- | --- |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/ui-extensions/README.md | Full authoring guide — the source of truth for kinds/hooks/regions |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/src/extensions/registry.tsx | The slot registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/src/components/Composer.tsx | Where slash entries / prompt hooks / composer regions live |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/src/components/MessageItem.tsx | Where message/message.decoration/message.part render |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/src/lib/composerHandoff.ts | Type-anywhere → composer behavior (if your extension competes for keys) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v1.0.4/src/store.ts | The store — actions useStore exposes to extensions |
+
 ## Environment
 
 | Variable | Default | Purpose |
@@ -32,14 +53,26 @@ service credentials. One port for UI + `/api/*`: http://localhost:4097
 - **Author a user-dir extension** for the user — a folder, no build step, no
   restart.
 
+### Dev extensions vs user extensions (two homes, one contract)
+
+| | Dev (app repo) | User (any machine) |
+| --- | --- | --- |
+| Where | `ui-extensions/<name>/` in the webui checkout | `~/.config/opencode/webui-extensions/<name>/main.tsx` (per-user) or `<project>/.opencode/webui-extensions/<name>/main.tsx` (per-project) |
+| How it loads | Bundled into the app build, listed in `ui-extensions/index.ts` | The proxy bundles it on the fly; page picks it up within ~8s |
+| On/off | `enabled` list in `ui-extensions/config.ts` | Settings › Extensions toggle |
+| API surface | Full app internals (imports, `useStore`, `api`) | ONLY the `window.__opencodeUI` bridge (`register`, `react`, `useStore`, `api`, `notify`, `getHooks`, `version`) |
+
+Authoring rules (kinds, hook events) are identical in both homes — the tables
+below apply to each.
+
 ### Minimal user-dir extension
 
 Drop a folder — `~/.config/opencode/webui-extensions/<name>/main.tsx`
 (per-user) or `<project>/.opencode/webui-extensions/<name>/main.tsx`
 (per-project). The proxy bundles it and the page loads it within a poll cycle
-(~8s); toggle per extension in Settings › Extensions. Runtime extensions reach
-the app ONLY through the versioned `window.__opencodeUI` bridge (`register`,
-`react`, `useStore`, `api`, `notify`, `getHooks`):
+`~8s` — see the dev-vs-user split above). Runtime extensions reach
+the app ONLY through the `window.__opencodeUI` bridge (`register`,
+`react`, `useStore`, `api`, `notify`, `getHooks`, `version`):
 
 ```tsx
 // ~/.config/opencode/webui-extensions/hello/main.tsx

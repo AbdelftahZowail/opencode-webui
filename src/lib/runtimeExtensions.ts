@@ -54,6 +54,22 @@ function ensureBridge() {
   if (!bridge.notify) bridge.notify = notify;
   if (!bridge.getHooks) bridge.getHooks = getHooks;
   if (!bridge.register) bridge.register = register;
+  if (!bridge.version) {
+    // App version + report repo, from the proxy — available to extensions
+    // (and anything else on the page) as window.__opencodeUI.version.
+    void fetch("/api/webui/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg: { version?: string; reportRepo?: string } | null) => {
+        if (!cfg) return;
+        const b = (window as unknown as Record<string, unknown>).__opencodeUI as Record<
+          string,
+          unknown
+        >;
+        if (cfg.version) b.version = cfg.version;
+        if (cfg.reportRepo) b.reportRepo = cfg.reportRepo;
+      })
+      .catch(() => {});
+  }
   w.__opencodeUI = bridge;
 }
 
