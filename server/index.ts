@@ -553,7 +553,14 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       }
     }
 
-    if (Bun.env.NODE_ENV === "production") {
+    // Serve the built frontend when it exists (npm package + compiled binary).
+    // Production binaries force NODE_ENV=production via embed-shim; npm users
+    // get dist/ in the tarball but run with NODE_ENV unset — detect an
+    // installed package (no src/ on disk) vs a dev checkout (vite owns the
+    // frontend). Dev with a stale dist/ still goes to vite for HMR.
+    const hasDist = existsSync(join(DIST_DIR, "index.html"));
+    const isDevCheckout = existsSync(join(APP_ROOT, "vite.config.ts"));
+    if (Bun.env.NODE_ENV === "production" || (hasDist && !isDevCheckout)) {
       if (method === "GET" || method === "HEAD") {
         let filePath = decodeURIComponent(path);
         if (filePath === "/") filePath = "/index.html";
