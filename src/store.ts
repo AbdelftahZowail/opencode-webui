@@ -350,6 +350,10 @@ export interface State {
   /** Sidebar search: scroll to this message after selecting its session. */
   highlightMessageID: string | null;
   highlightSessionID: string | null;
+  /** The case-insensitive substring that was matched in the highlighted message. */
+  highlightQuery: string | null;
+  /** Incremented on each highlight navigation so re-clicks on the same message re-fire. */
+  highlightTick: number;
   /** Pending edit — staged on click, committed only when the user sends. */
   pendingEdit: { sessionID: string; messageID: string; originalText: string } | null;
   /**
@@ -423,6 +427,8 @@ const initialState: State = {
   interruptArmed: false,
   highlightMessageID: null,
   highlightSessionID: null,
+  highlightQuery: null,
+  highlightTick: 0,
   pendingEdit: null,
   revertMarkers: {},
 };
@@ -3899,12 +3905,24 @@ export function setPendingWorkspace(directory: string | null) {
   setState({ pendingWorkspace: directory });
 }
 
-export function setHighlightMessage(sessionID: string, messageID: string) {
-  setState({ highlightSessionID: sessionID, highlightMessageID: messageID });
+export function setHighlightMessage(sessionID: string, messageID: string, query?: string) {
+  const normalized = (query ?? "").trim();
+  // Re-navigating to the same message/query still bumps the tick so the
+  // consumer can re-highlight (re-click on an already-selected hit).
+  const same =
+    state.highlightMessageID === messageID &&
+    state.highlightSessionID === sessionID &&
+    (state.highlightQuery ?? "") === normalized;
+  setState({
+    highlightSessionID: sessionID,
+    highlightMessageID: messageID,
+    highlightQuery: normalized || null,
+    highlightTick: same ? state.highlightTick + 1 : state.highlightTick + 1,
+  });
 }
 
 export function clearHighlightMessage() {
-  setState({ highlightSessionID: null, highlightMessageID: null });
+  setState({ highlightSessionID: null, highlightMessageID: null, highlightQuery: null });
 }
 
 /**

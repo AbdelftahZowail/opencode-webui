@@ -10,7 +10,7 @@ import { ActivityStrip } from "./components/ActivityStrip";
 import { CommandKeybinds } from "./components/CommandKeybinds";
 import { Toasts } from "./components/Toasts";
 import { Slot, getPage, getPages, subscribeRegistry } from "./extensions/registry";
-import { handCharToComposer } from "./lib/composerHandoff";
+import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { log } from "./lib/log";
 import { useHotkeys } from "./hooks/useHotkeys";
 import {
@@ -166,6 +166,11 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Paste-anywhere: mirrors type-anywhere for paste — a paste that would
+  // land on a non-editable surface goes to the composer instead, preserving
+  // both text and image attachment staging.
+  useEffect(() => setupPasteHandoff(), []);
 
   // ⌘F / Ctrl+F: jump to the sidebar's session search (the browser's own
   // find is shadowed while the app handles it). No-ops under overlays and

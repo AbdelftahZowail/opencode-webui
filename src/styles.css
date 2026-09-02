@@ -281,6 +281,22 @@ pre {
   }
 }
 
+/* Search highlight: text-level mark that glows on navigate then fades. */
+@keyframes search-highlight-pulse {
+  0% { background-color: color-mix(in oklch, var(--surface-warning-strong) 42%, transparent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--surface-warning-strong) 22%, transparent); }
+  15% { background-color: color-mix(in oklch, var(--surface-warning-strong) 36%, transparent); box-shadow: 0 0 0 2px color-mix(in oklch, var(--surface-warning-strong) 14%, transparent); }
+  100% { background-color: transparent; box-shadow: 0 0 0 0 transparent; }
+}
+[data-search-highlight="true"] {
+  border-radius: 3px;
+  padding: 0.5px 1px;
+  margin: -0.5px -1px;
+  animation: search-highlight-pulse 2.6s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-search-highlight="true"] { animation: none; background-color: color-mix(in oklch, var(--surface-warning-strong) 28%, transparent); }
+}
+
 /* Pane entrance: switching/focusing a conversation pane cross-fades the new
    transcript (opacity 0→1 + 4px rise, ~130ms ease-out) instead of hard-swapping
    it — GPU-only props so it never blocks paint. Pane roots carry .pane-surface. */

@@ -87,29 +87,114 @@ export function Conversation({
     void loadMessages(sessionID);
   }, [sessionID]);
 
-  // Scroll to highlightMessageID when Sidebar search navigates to a specific message.
+  // Scroll + text-level highlight when Sidebar search navigates to a specific message.
   const highlightID = useStore((s) => s.highlightMessageID);
   const highlightSID = useStore((s) => s.highlightSessionID);
+  const highlightQuery = useStore((s) => s.highlightQuery);
+  const highlightTick = useStore((s) => s.highlightTick);
   useEffect(() => {
     if (!highlightID || highlightSID !== sessionID) return;
-    let attempts = 0;
-    const tryScroll = () => {
-      const el = document.getElementById(`msg-${highlightID}`);
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.classList.add("ring-2", "ring-[var(--border-selected)]", "rounded-md");
-        setTimeout(() => el.classList.remove("ring-2", "ring-[var(--border-selected)]", "rounded-md"), 2000);
-        return true;
-      }
-      return false;
+
+    let cancelled = false;
+
+    const clearPrevious = () => {
+      document.querySelectorAll('[data-search-highlight="true"]').forEach((el) => {
+        const parent = el.parentNode;
+        if (!parent) return;
+        // Unwrap: replace the highlight span with its text content.
+        const text = document.createTextNode(el.textContent ?? "");
+        parent.replaceChild(text, el);
+        // Merge adjacent text nodes to keep DOM tidy.
+        (parent as Element).normalize?.();
+      });
     };
-    if (tryScroll()) return;
-    const iv = setInterval(() => {
-      attempts += 1;
-      if (tryScroll() || attempts > 20) clearInterval(iv);
-    }, 150);
-    return () => clearInterval(iv);
-  }, [sessionID, highlightID, highlightSID, messages]);
+
+    const highlightIn = (root: HTMLElement, query: string): HTMLElement | null => {
+      const qLower = query.toLowerCase();
+      if (!qLower) return null;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node: Text | null;
+      // Collect text nodes first so we can mutate safely.
+      const nodes: Text[] = [];
+      while ((node = walker.nextNode() as Text | null)) {
+        // Skip already-highlighted or hidden source nodes.
+        if ((node.parentElement as HTMLElement | null)?.closest('[data-search-highlight="true"]')) continue;
+        if (!node.nodeValue || node.nodeValue.trim() === "") continue;
+        nodes.push(node);
+      }
+      for (const textNode of nodes) {
+        const text = textNode.nodeValue ?? "";
+        const idx = text.toLowerCase().indexOf(qLower);
+        if (idx === -1) continue;
+        const before = text.slice(0, idx);
+        const match = text.slice(idx, idx + query.length);
+        const after = text.slice(idx + query.length);
+        const frag = document.createDocumentFragment();
+        if (before) frag.appendChild(document.createTextNode(before));
+        const mark = document.createElement("span");
+        mark.setAttribute("data-search-highlight", "true");
+        mark.textContent = match;
+        frag.appendChild(mark);
+        if (after) frag.appendChild(document.createTextNode(after));
+        textNode.parentNode?.replaceChild(frag, textNode);
+        return mark;
+      }
+      return null;
+    };
+
+    const tryScroll = (): boolean => {
+      const container = document.getElementById(`msg-${highlightID}`);
+      if (!container) return false;
+      clearPrevious();
+      // If we have a query, highlight the matched substring and scroll to it;
+      // otherwise fall back to scrolling the message block itself.
+      if (highlightQuery) {
+        const mark = highlightIn(container, highlightQuery);
+        if (mark) {
+          mark.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+          // Fade out then unwrap so the DOM returns to its original state.
+          setTimeout(() => {
+            const parent = mark.parentNode;
+            if (parent) {
+              const text = document.createTextNode(mark.textContent ?? "");
+              parent.replaceChild(text, mark);
+              (parent as Element).normalize?.();
+            }
+          }, 2800);
+          return true;
+        }
+      }
+      // Fallback: smooth scroll to the message and apply a subtle whole-message ring
+      // as a secondary cue when text-level match was not found.
+      container.scrollIntoView({ behavior: "smooth", block: "center" });
+      container.classList.add("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg");
+      setTimeout(() => container.classList.remove("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg"), 1800);
+      return true;
+    };
+
+    // RAF-scheduled retry loop: waits for React to mount the transcript
+    // (and for loadMessages to resolve) without the 150ms jitter of setInterval.
+    let raf = 0;
+    let tries = 0;
+    const maxTries = 60; // ~1s at 60fps; loadMessages may take longer
+    const tick = () => {
+      if (cancelled) return;
+      if (tryScroll()) return;
+      if (++tries >= maxTries) return;
+      raf = requestAnimationFrame(tick);
+    };
+    // First try on next frame so the DOM from the messages dependency has painted.
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      // Do not clearPrevious on unmount — let the highlight's own timer finish
+      // so the user sees the fade even if the component re-renders.
+    };
+    // messages ensures we re-attempt if the transcript was still loading;
+    // tick ensures re-click on the same hit (same ID, same query) re-fires.
+  }, [sessionID, highlightID, highlightSID, highlightQuery, highlightTick, messages]);
 
   return (
     <div className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
@@ -441,13 +526,32 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
         // Model-switched notes render like their agent/location
         // siblings (muted one-liner in MessageItem); dropping them
         // hid real history events.
-        for (const message of messages) {
+        for (let i = 0; i < messages.length; i++) {
+          const message = messages[i]!;
           const isAssistant = message.type === "assistant";
           const compact = isAssistant && prevAssistant;
           prevAssistant = isAssistant;
+          const next = messages[i + 1] as MessageInfo | undefined;
+          const isTail = isAssistant && next?.type !== "assistant";
+          let responseText: string | undefined;
+          if (isTail) {
+            // Walk backwards to collect the whole consecutive assistant block
+            // so the copy at its tail copies the entire response, not just the final chunk.
+            const parts: string[] = [];
+            for (let j = i; j >= 0; j--) {
+              const m = messages[j] as MessageInfo;
+              if (m.type !== "assistant") break;
+              const textParts = (m as { content?: { type: string; text?: string }[] }).content
+                ?.filter((p) => p.type === "text" && p.text?.trim())
+                .map((p) => p.text!.trim());
+              if (textParts && textParts.length > 0) parts.unshift(textParts.join("\n\n"));
+            }
+            const combined = parts.join("\n\n");
+            if (combined) responseText = combined;
+          }
           rows.push(
             <MessageScrollerItem key={message.id} messageId={message.id} id={`msg-${message.id}`}>
-              <MessageItem message={message} compact={compact} sessionID={sessionID} />
+              <MessageItem message={message} compact={compact} sessionID={sessionID} isTail={isTail} responseText={responseText} />
             </MessageScrollerItem>,
           );
         }

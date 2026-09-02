@@ -340,7 +340,7 @@ export function Sidebar() {
   };
 
   const handleHitClick = (sessionID: string, messageID: string) => {
-    setHighlightMessage(sessionID, messageID);
+    setHighlightMessage(sessionID, messageID, trimmedQuery);
     void selectSession(sessionID);
   };
 

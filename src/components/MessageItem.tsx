@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, Fragment, type ReactNode, useSyncExternalStore } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Brain, ChevronRight, GitBranch, Pencil, Paperclip, User } from "lucide-react";
+import { Brain, Check, ChevronRight, Copy, GitBranch, Pencil, Paperclip, User } from "lucide-react";
 import type {
   AssistantMessage,
   FileAttachment,
@@ -192,7 +192,90 @@ function formatClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function MessageItem({ message, compact = false, sessionID }: { message: MessageInfo; compact?: boolean; sessionID?: string }) {
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    /* insecure context / permission denied — fallback */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function assistantCopyText(message: AssistantMessage): string {
+  const parts = message.content
+    .filter((p): p is { type: "text"; text: string } => p.type === "text" && typeof p.text === "string" && p.text.trim() !== "")
+    .map((p) => p.text);
+  return parts.join("\n\n");
+}
+
+function UserCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    void copyText(text).then((ok) => {
+      if (!ok) {
+        notify({ title: "Copy failed", variant: "destructive" });
+        return;
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    });
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? "Copied" : "Copy message"}
+      className="flex size-7 cursor-pointer items-center justify-center rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm transition-colors hover:text-[var(--text-strong)]"
+    >
+      {copied ? <Check className="size-3.5 text-[var(--text-on-success-base)]" /> : <Copy className="size-3.5" />}
+    </button>
+  );
+}
+
+function AssistantCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    void copyText(text).then((ok) => {
+      if (!ok) {
+        notify({ title: "Copy failed", variant: "destructive" });
+        return;
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    });
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? "Copied" : "Copy response"}
+      className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] px-1.5 py-1 text-xs text-[var(--text-weaker)] shadow-sm transition-colors hover:text-[var(--text-strong)] opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100"
+    >
+      {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+export function MessageItem({ message, compact = false, sessionID, isTail = false, responseText }: { message: MessageInfo; compact?: boolean; sessionID?: string; isTail?: boolean; responseText?: string }) {
   // Extension freshness — read before the body so hooks order is stable.
   const registryVersion = useRegistryVersion();
   // Memoized on the registry version only: decorations are a static list
@@ -225,13 +308,13 @@ export function MessageItem({ message, compact = false, sessionID }: { message: 
   if (customRenderer) {
     try {
       const node = customRenderer.render({ message: effectiveMessage, sessionID });
-      body = node ?? renderMessageBody(effectiveMessage, compact, sessionID);
+      body = node ?? renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
     } catch (err) {
       console.error(`[extensions] message "${customRenderer.id}" crashed:`, err);
-      body = renderMessageBody(effectiveMessage, compact, sessionID);
+      body = renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
     }
   } else {
-    body = renderMessageBody(effectiveMessage, compact, sessionID);
+    body = renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
   }
 
   return (
@@ -262,7 +345,7 @@ export function MessageItem({ message, compact = false, sessionID }: { message: 
 }
 
 /** The per-type body exactly as MessageItem always rendered it. */
-function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string): ReactNode {
+function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string, isTail?: boolean, responseText?: string): ReactNode {
   switch (message.type) {
     case "user": {
       const canAct = !!sessionID && !message.id.startsWith("msg_local_") && !message.id.startsWith("__draft__");
@@ -280,6 +363,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
             {/* Hover actions — anchored to the whole row (group), not just the bubble, so moving the cursor to the buttons doesn't lose hover */}
             {canAct && (
               <div className="absolute top-1/2 right-full mr-3 hidden -translate-y-1/2 items-center gap-1.5 group-hover:flex">
+                <UserCopyButton text={(message as UserMessage).text ?? ""} />
                 <button type="button" onClick={onEdit} title="Edit from here" className="flex size-7 cursor-pointer items-center justify-center rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm hover:text-[var(--text-strong)]">
                   <Pencil className="size-3.5" />
                 </button>
@@ -301,8 +385,18 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
         </div>
       );
     }
-    case "assistant":
-      return <AssistantView message={message} compact={compact} />;
+    case "assistant": {
+      // Only the tail of a finished response gets a copy button — not every
+      // compact chunk. A response is consecutive assistant messages; the copy
+      // lives once at its end and copies the whole response's prose when
+      // provided by the transcript (aggregated), otherwise just this message.
+      const isFinished = message.time.completed !== undefined || (message as AssistantMessage).finish !== undefined;
+      const showCopy = !!isTail && isFinished;
+      const fallback = showCopy ? assistantCopyText(message as AssistantMessage) : "";
+      const copyText = showCopy ? (responseText ?? fallback) : "";
+      const hasText = copyText.trim().length > 0;
+      return <AssistantView message={message} compact={compact} showCopy={showCopy && hasText} copyText={copyText} />;
+    }
     case "system":
     case "synthetic": {
       const text = (message as { text?: string; description?: string }).text ?? "";
@@ -692,11 +786,11 @@ function CompactionCard({
   );
 }
 
-function AssistantView({ message, compact }: { message: AssistantMessage; compact: boolean }) {
+function AssistantView({ message, compact, showCopy, copyText }: { message: AssistantMessage; compact: boolean; showCopy?: boolean; copyText?: string }) {
   const showTimestamps = useTimestamps();
   return (
     <Row align="left">
-      <div className="w-full space-y-2.5 text-sm leading-relaxed">
+      <div className="group w-full space-y-2.5 text-sm leading-relaxed">
         {!compact && (
           <div className="flex items-center gap-2 text-xs text-[var(--text-weak)]">
             <span className="font-medium text-[var(--text-strong)]">{message.agent ?? "assistant"}</span>
@@ -739,6 +833,11 @@ function AssistantView({ message, compact }: { message: AssistantMessage; compac
             );
           });
         })()}
+        {showCopy && copyText && (
+          <div className="flex justify-start pt-1">
+            <AssistantCopyButton text={copyText} />
+          </div>
+        )}
       </div>
     </Row>
   );
