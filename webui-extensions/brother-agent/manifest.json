@@ -1,0 +1,6 @@
+{
+  "id": "brother-agent",
+  "name": "Brother agent",
+  "version": "1.0.0",
+  "description": "Launch fresh top-level agent sessions (brothers) for large tasks — status/read/message/steer/stop/archive/list/watch plus headless finish notices"
+}

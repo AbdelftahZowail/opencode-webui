@@ -22,6 +22,11 @@ my-extension/
 **Gating — one state, owned by the folder itself:** presence = installed;
 `disabled: true` = paused; delete/move the folder to uninstall. No
 `config.ts` list, no per-browser localStorage gating, no second registry.
+User-facing pause (a settings toggle that stops *behavior*, e.g. an
+extension that idles when its key/feature flag is off) is not manifest
+pausing: the former keeps the entry loaded but quiet, the latter
+(`disabled: true`) is never bundled or imported and its id unregisters —
+use a settings toggle for "off for now", the manifest for "unplug".
 
 **Precedence (same id = same swap point, higher wins):**
 
@@ -75,13 +80,56 @@ addressable, no marker placement, no guessing), at leaf granularity (the
 timestamp, token readout, cost badge, copy button — not just `MessageItem`),
 with rich props, so wraps and value-overrides stay surgical.
 
+### Target inventory (the catalog — grep `autoRegister` if this lags)
+
+| Target id | Props (meaningful subset) |
+|---|---|
+| `sidebar` | — (the shell) |
+| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `onSelect` |
+| `conversation` | full `ConversationProps` |
+| `conversation.header` | full `HeaderProps` |
+| `conversation.empty` | — |
+| `composer` | full `ComposerProps` |
+| `composer.contextReadout` | `parts: string[]` |
+| `composer.sendActions` | `sessionID`, `appendDraft(text)` — space-joins onto the draft + refocuses; prefer over writing drafts directly |
+| `message.timestamp` | `time: number` (consults the `format.timestamp` service) |
+| `message.tokens` | `tokens` |
+| `message.cost` | `cost: number` |
+| `message.copyButton` | `variant: "user" \| "assistant"`, `text` |
+| `message:<type>` / `message:*` | replace-with-fall-through per message type |
+| `tool.card` | `part: ToolPart`, `stateKey?` |
+| `tool.edit` / `write` / `shell` / `subagent` / `execute` / `generic` | per-tool view props |
+| `tool:<name>` | replace-with-fall-through per tool name |
+
+Persisted-vs-live guarantee (streaming authors depend on this): persisted
+messages always carry a `[data-oc-message]` ancestor; live projections
+(`LiveAssistantView`) render `MessagePart` directly with none. Code that
+must never touch streaming output can rely on the distinction structurally.
+
+### Entry hygiene (two rules that bite silently)
+
+- **One entry per id.** Same-id `register()` SWAPS (with a console warning
+  when kind/target differ) — a folder's entries need distinct ids or the
+  later evicts the earlier, and loaders track folders by single id so extras
+  leak on disable/delete. One folder → one id per entry, always.
+- **Runtime code uses the bridge only.** External (user/project-dir) bundles
+  are built standalone: `import type` from `src/` is erased at build and
+  safe, but any *runtime* `src/` import breaks the copy outside the repo.
+  Use `window.__opencodeUI` (`register`, `react`, `api`, `store`, `prefs`,
+  `notify`, `services`, `dom`, `kv`) — shipped code consumes the identical
+  surface via `getExtensionApi()`.
+- **The `@/` alias works in shipped extensions only.** Same repo, same
+  tsconfig (`@/*` → `./src/*`, e.g. groq-voice imports
+  `@/components/ui/dialog`) — external copies must still use the bridge,
+  never `@/` or relative `src/` paths.
+
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
 import { register } from "../../src/extensions/registry";
 
 register({
   kind: "wrap",
-  id: "my-timestamps",
+  id: "my-timestamps-wrap",
   target: "Timestamp",
   render: (props, next) => (
     <span title={String(props.iso ?? "")}>{next()}</span>
@@ -90,7 +138,7 @@ register({
 
 register({
   kind: "service",
-  id: "my-timestamps",
+  id: "my-timestamps-format",
   service: "format.timestamp",
   value: (iso: string) => new Date(iso).toLocaleTimeString(),
   precedence: 10,
@@ -266,8 +314,62 @@ An extension folder may carry `engine/` — a valid opencode plugin directory
 (tools the model calls, `experimental.chat.system.transform` prompt hints).
 The webui neither loads nor hot-reloads it; the engine's rules apply
 (boot-time load, restart on edit unless the plugin implements its own shell
-pattern). Convention + worked example (brother-agent in webui terms — one
-folder, three strata): `docs/engine-payload-convention.md`.
+pattern — a stable `index.js` that require-cache-busts a `definitions.cjs`
+on mtime works and is the recommended shape). Convention + worked example
+(brother-agent in webui terms — one folder, three strata):
+`docs/engine-payload-convention.md`. Hard-won facts, stated once so no one
+re-discovers them by trial:
+
+- **Export shape:** `module.exports = { id, setup }` (v2 — the v1 `{server}`
+  / named-export shape is rejected: "must export a default definition with
+  an id and an effect or setup function").
+- **Tool namespace:** the model lists tools as `tools.<name>` — register and
+  match on the `tools.`-prefixed name, never bare.
+- **Tool results must resolve `{ output: string }`.** A bare string fails
+  result validation (`Unknown tool` in the transcript).
+- **System-hint parts need `{ type: "text", text }`.** Pushing `{text}`
+  without `type` fails the whole session drain (schema `MissingKey`).
+- **Session origin tagging** (`metadata: { origin: "…" }`) survives only via
+  REST `POST /api/session` create — the setup-bridge create drops it.
+- **Discovery + auth:** the engine registers at
+  `$XDG_STATE_HOME/opencode/service.json` (Basic `opencode:password` —
+  mirror `@opencode-ai/client`'s service helper); provider credentials live
+  under `XDG_DATA_HOME`, so a `STATE`-only sandbox sees the engine but no
+  models. When agent testing misbehaves, verify the provider first with
+  `POST /session/{id}/generate {"prompt":"OK"}`; when runs fail blank,
+  the cause is in `$XDG_DATA_HOME/opencode/log/opencode.log` (`grep drain`).
+- `server.ts` code that must call the engine has no credential helper yet —
+  parse `service.json` by hand (node builtins only, no core imports); a
+  `ctx.engine` helper is the planned fix (`server/ext/types.ts`).
+
+## Loading lifecycle (where an extension travels)
+
+One folder becomes pixels through four files — follow them in order:
+
+1. **Glob (shipped, repo dev).** `webui-extensions/index.ts` globs
+   `./*/index.{ts,tsx}` and tracks each module's `export const id` (Vite
+   HMR path — edits hot-swap via same-id registry swap, deletions prune
+   owned ids only).
+2. **Discovery (proxy).** `server/userExtensions.ts`
+   (`discoverUserUIEntries`) scans the three sources highest-precedence
+   first — user root, project root, shipped dir — taking the folder id
+   from `manifest.json` (`id`, falling back to the dir name) and the
+   entries from `index.tsx`/`dom.ts`. Same id at a lower source is
+   skipped with a once-per-process `shadowed` warning.
+3. **Manifest + SSE + bundling (proxy).** `server/index.ts` merges folder
+   entries with engine-plugin UI halves, serves
+   `GET /api/webui/extensions` (`{ id, url?v=mtime, domUrl?v=mtime,
+   source, origin }`), pushes a `{ type: "webui.extensions", version }`
+   event per manifest change on `GET /api/webui/extensions/events`, and
+   bundles each entry standalone with `Bun.build` (`bundleUIEntry` —
+   react external, build logs printed loudly, never silent).
+4. **Import + register (page).** `src/lib/runtimeExtensions.ts` fetches
+   the manifest, dynamic-imports each new `?v=` bundle (re-import on
+   mtime move → registry same-id-swap → live repaint), mounts `domUrl`
+   via the DOM kit, and unregisters ids that vanish or flip
+   `disabled: true`. Shipped browser bundles are skipped here (the glob
+   owns them — importing twice would run side effects twice) but shipped
+   `domUrl` still mounts and `disabled` still pauses them.
 
 ## What extensions can use (browser stratum)
 
@@ -337,18 +439,22 @@ register({
 isolated second instance — loopback-only `127.0.0.1:4099`, passwordless (the
 bind address is the guarantee), same engine/sessions, extensions from an
 isolated scratch dir (`WEBUI_EXTENSION_DIR`,
-default `~/.local/state/opencode-webui/sandbox-extensions/`). Iterate there;
-"shipping" = copying the folder into the real extension dir.
+default `~/.local/state/opencode-webui/sandbox-extensions/`).
+`WEBUI_EXTENSION_DIR` is a higher-precedence ADD, not a replace: it swaps
+out the user + project roots only — shipped extensions still load
+underneath, and a same-id scratch folder shadows the shipped copy (the
+`shadowed` log line is the only signal). Iterate there; "shipping" =
+copying the folder into the real extension dir.
 
 ### Parallel sandboxes (agents: read this)
 
-One command, no flags: `bun run sandbox` detects a running sandbox and
-auto-isolates. Alone it uses the fixed defaults (`:4099`/`:5175` + shared
-scratch dir); when another sandbox already holds those ports, the new
-instance takes free ports + a fresh mkdtemp extension dir and prints what
-it picked. Explicit env (`WEBUI_PROXY_PORT` / `WEBUI_VITE_PORT` /
-`WEBUI_EXTENSION_DIR`) always wins per knob and disables that knob's auto
-behavior.
+Yes — run as many sandboxes at once as you need, one per extension under
+test. `bun run sandbox` stacks with no flags: the first instance takes the
+fixed defaults (`:4099`/`:5175` + shared scratch dir); every further
+instance detects the busy ports and auto-isolates onto free ports + a fresh
+mkdtemp extension dir, printing exactly what it picked. Explicit env
+(`WEBUI_PROXY_PORT` / `WEBUI_VITE_PORT` / `WEBUI_EXTENSION_DIR`) always wins
+per knob and disables that knob's auto behavior.
 
 Rules: one sandbox per extension, never two writers to one ext dir, never
 reuse a port. The engine stays shared (same sessions everywhere, by

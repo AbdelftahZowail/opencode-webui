@@ -1,0 +1,8 @@
+{
+  "name": "rich-render-engine-hint",
+  "version": "1.0.0",
+  "description": "rich-render engine payload: teaches the model the ~~~ live-fence syntax (hint only, no tools)",
+  "private": true,
+  "type": "module",
+  "main": "index.js"
+}

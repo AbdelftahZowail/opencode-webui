@@ -34,7 +34,7 @@ Options:
 | `WEBUI_PASSWORD` | generated on first boot | Log in with this passphrase. Set it to pin your own instead of the generated one. |
 | `WEBUI_HOST` | `127.0.0.1` | Bind address. A wildcard (`0.0.0.0` / `::`) is refused without a password. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
-| `WEBUI_EXTENSION_DIR` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
+| `WEBUI_EXTENSION_DIR` | the global + project dirs | Adds a higher-precedence source shadowing both (the sandbox uses this to keep WIP isolated; shipped extensions still load underneath). |
 
 Sessions are shared with the `opencode` TUI — open a session in the TUI, continue it in the browser.
 

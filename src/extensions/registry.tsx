@@ -448,6 +448,12 @@ export function register(ext: ExtInput) {
   const stored = ext as StoredExt;
   const existing = registry.findIndex((e) => e.id === stored.id);
   if (existing !== -1) {
+    const prev = registry[existing]!;
+    if (prev.kind !== stored.kind || (prev as { target?: unknown }).target !== (stored as { target?: unknown }).target) {
+      console.warn(
+        `[extensions] id "${stored.id}" re-registered as ${stored.kind} (was ${prev.kind}) — same-id re-register SWAPS, so the previous entry is gone. Use distinct ids per entry.`,
+      );
+    }
     registry[existing] = stored;
     notifyRegistryChange();
     return;

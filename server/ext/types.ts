@@ -42,6 +42,30 @@ export interface ExtServerContext {
   extID: string;
   /** Namespaced persistent KV (JSON-file backed, see kv.ts). */
   kv: ExtKV;
+  /**
+   * Engine fetch helper (see `engine.ts`). Replaces hand-parsing
+   * `service.json`: `await ctx.engine.fetch("/api/session/active")`.
+   * Honors `WEBUI_ENGINE_URL` / `WEBUI_ENGINE_PASSWORD` (explicit env
+   * wins); auth headers always win over caller-supplied ones.
+   */
+  engine: ExtEngine;
+}
+
+/**
+ * Engine credential helper (implemented in `engine.ts`, node builtins only
+ * — no core import needed on the extension side; the context is structural).
+ */
+export interface ExtEngine {
+  /** Effective engine base URL (`WEBUI_ENGINE_URL` wins, else `service.json`). `null` when undiscoverable. */
+  baseUrl(): string | null;
+  /** Auth headers for the engine (Basic `opencode:<password>`), or `{}` when unauthenticated. */
+  headers(): Record<string, string>;
+  /**
+   * Fetch against the engine (`/api/...` paths; leading slash optional).
+   * Throws with a remedy when undiscoverable; HTTP errors are returned, not
+   * thrown. Aborts after 15s unless the caller passes its own signal.
+   */
+  fetch(path: string, init?: RequestInit): Promise<Response>;
 }
 
 /** Extra context for route handlers. */

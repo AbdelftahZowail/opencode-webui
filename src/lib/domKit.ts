@@ -17,8 +17,11 @@
  *   resort ("outside the contract; you own the fragility").
  *
  * The kit (host-provided, so DOM extensions don't each rebuild this):
- * - `foreign(anchor, nodes)` — sibling injection with automatic cleanup when
- *   React removes the anchor (foreign-sibling registry).
+ * - `foreign(anchor, nodes, opts?)` — sibling injection with automatic
+ *   cleanup when React removes the anchor (foreign-sibling registry).
+ *   `opts.position` is "before"|"after" (default "after");
+ *   `opts.onRemove` is an optional anchor-death signal (fires once on
+ *   auto-cleanup, never on manual dispose).
  * - `watch(selectors, cb)` — React-aware MutationObserver wrapper, including
  *   the streaming-settled signal (`onStreamingSettled`).
  * - `styles(css)` — scoped `<style>` element, auto-removed on
@@ -88,8 +91,21 @@ export interface DomExtensionModule {
 
 /** The host-provided kit handed to `mount`. All methods return cleanups. */
 export interface DomKit {
-  /** Insert `nodes` as siblings AFTER `anchor`; auto-removed if React drops the anchor. */
-  foreign: (anchor: Element, nodes: Node | Node[]) => () => void;
+  /**
+   * Insert `nodes` as siblings of `anchor`; auto-removed if React drops the
+   * anchor. `opts.position` selects `before` (insertBefore anchor) or `after`
+   * (after anchor, the default — preserves prior callers byte-identically).
+   * `opts.onRemove` fires once when anchor-death auto-cleanup runs (React
+   * removed the anchor or an ancestor); manual dispose does NOT fire it
+   * (the caller already knows). Removal coverage: anchor-death is always
+   * watched via MutationObserver — `onRemove` is a notification signal,
+   * not a second cleanup path.
+   */
+  foreign: (
+    anchor: Element,
+    nodes: Node | Node[],
+    opts?: { position?: "before" | "after"; onRemove?: () => void },
+  ) => () => void;
   /** Observe `document.body` subtree; `cb` fires with elements matching `selectors`. */
   watch: (selectors: string[], cb: WatchCallback) => () => void;
   /** Append a `<style data-oc-dom-ext="<id>">`; removed on dispose. */
@@ -120,21 +136,37 @@ function track(id: string, cleanup: Cleanup): Cleanup {
 
 function makeKit(id: string): DomKit {
   return {
-    foreign(anchor, nodes) {
+    foreign(anchor, nodes, opts) {
       const list = Array.isArray(nodes) ? nodes : [nodes];
+      const position = opts?.position ?? "after";
+      const onRemove = opts?.onRemove;
       const parent = anchor.parentNode;
       if (!parent) return () => {};
-      const next = anchor.nextSibling;
-      for (const n of list) parent.insertBefore(n, next);
+      if (position === "before") {
+        for (const n of list) parent.insertBefore(n, anchor);
+      } else {
+        const next = anchor.nextSibling;
+        for (const n of list) parent.insertBefore(n, next);
+      }
       const remove = () => {
         for (const n of list) n.parentNode?.removeChild(n);
       };
       // React owns the anchor: when it (or any ancestor up to body) is
       // removed, our foreign siblings are either gone with it or orphaned —
-      // clean up either way, then stop observing.
+      // clean up either way, then stop observing. onRemove (when provided)
+      // fires exactly once on this auto-cleanup path so extensions can drop
+      // their own side state; it is crash-isolated and never fires on manual
+      // dispose (the caller already knows it removed the nodes).
       const stop = watchRemoval(anchor, () => {
         remove();
         stop();
+        if (onRemove) {
+          try {
+            onRemove();
+          } catch (err) {
+            console.error(`[dom-ext] onRemove "${id}" failed:`, err);
+          }
+        }
       });
       const untrackedRemove = () => {
         stop();

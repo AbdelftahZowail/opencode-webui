@@ -1,6 +1,6 @@
 ---
 name: webui
-description: opencode-webui — the browser frontend for the OpenCode engine. Load when the user mentions the webui/web frontend, asks about webui extensions, or wants to report a webui bug (/report does it).
+description: opencode-webui — the browser frontend for the OpenCode engine. Load when the user mentions the webui/web frontend, asks about webui extensions, wants to BUILD, ADD, CHANGE, DEBUG, or TEST a webui extension, or wants to report a webui bug (/report does it).
 ---
 
 # OpenCode webui (opencode-webui)
@@ -11,7 +11,7 @@ service credentials. One port for UI + `/api/*`: http://localhost:4097
 (`WEBUI_PROXY_PORT`).
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 2.0.0 (matches the `v2.0.0` git tag —
+- **This skill's version**: 2.1.0 (matches the `v2.1.0` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -24,13 +24,13 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.0.0/src/store.ts | The store — actions useStore exposes to extensions |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/store.ts | The store — actions useStore exposes to extensions |
 
 ## Environment
 
@@ -40,15 +40,19 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | `WEBUI_HOST` | `127.0.0.1` | Bind address — a wildcard is refused without a password. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
+| `WEBUI_ENGINE_URL` | `service.json` discovery | Aim the proxy at a chosen engine — skips `Service.ensure()`, so a stale pid can never spawn a rogue serve. Explicit env wins. |
+| `WEBUI_ENGINE_PASSWORD` | `service.json` password | Engine password for the override above (no file fallback when the URL is overridden — a chosen engine has its own credential). |
+| `WEBUI_SANDBOX_NOVITE` | unset | `1` — sandbox boots the proxy only, no Vite (`--no-vite` flag does the same). |
+| `WEBUI_CRASH_LOG` | `$XDG_STATE_HOME/opencode-webui/proxy-crash.log` | File fatal proxy errors (`uncaughtException`/`unhandledRejection`) are appended to; the last entry prints on next boot. |
 | `WEBUI_DEBUG` | unset | `1` — server/proxy debug logs to stdout. |
 | `WEBUI_DEBUG_LOG` | `/tmp/webui-debug.log` | File the frontend log sink (`POST /api/debug`) appends to. |
 
 ### Parallel sandboxes (one per extension under test)
 
-One command, no flags: `bun run sandbox` detects a running sandbox and
-auto-isolates. Alone it uses the fixed defaults (`:4099`/`:5175` + shared
-scratch dir); when another sandbox already holds those ports, the new
-instance takes free ports + a fresh mkdtemp extension dir and prints what
+Yes — run as many sandboxes at once as you need. `bun run sandbox` stacks
+with no flags: the first instance takes the fixed defaults (`:4099`/`:5175`
++ shared scratch dir); every further instance detects the busy ports and
+auto-isolates onto free ports + a fresh mkdtemp extension dir, printing what
 it picked. Explicit env (`WEBUI_PROXY_PORT` / `WEBUI_VITE_PORT` /
 `WEBUI_EXTENSION_DIR`) always wins per knob. The engine stays shared
 (same sessions everywhere, by design) — only ports + extension dirs are

@@ -1,0 +1,6 @@
+{
+  "id": "groq-voice",
+  "name": "groq-voice",
+  "version": "1.0.0",
+  "description": "Mic button next to Send — record voice, transcribe with Groq whisper-large-v3-turbo, append to the composer draft"
+}

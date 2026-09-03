@@ -20,7 +20,7 @@
 
 import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
-import { existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, watch, appendFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -54,6 +54,7 @@ import {
   runExtRequestMiddleware,
   startExtModules,
 } from "./ext/registry";
+import { resolveEngineOverride } from "./ext/engine";
 
 // `sandbox` argv — one command, every runtime: `bun run sandbox` (repo, the
 // script adds Vite), `bunx opencode-webui sandbox`, `./opencode-webui sandbox`
@@ -116,12 +117,58 @@ async function writeDebug(lines: unknown[]) {
 let endpoint: Awaited<ReturnType<typeof Service.ensure>> | null = null;
 
 async function serviceEndpoint() {
+  // Explicit env wins: WEBUI_ENGINE_URL aims the proxy at a chosen engine.
+  // An override URL also SKIPS Service.ensure() — no spawn from a stale
+  // service.json pid (the rogue-serve incident), no version-kill of the
+  // chosen engine. Same resolution as ctx.engine (see server/ext/engine.ts).
+  const override = resolveEngineOverride();
+  if (override) {
+    if (!endpoint || endpoint.url !== override.url) {
+      endpoint = override;
+      console.log(`[webui] connected to opencode service at ${override.url} (WEBUI_ENGINE_URL)`);
+    }
+    return endpoint;
+  }
   if (!endpoint) {
     endpoint = await Service.ensure();
     console.log(`[webui] connected to opencode service at ${endpoint.url}`);
   }
   return endpoint;
 }
+
+// ---------------------------------------------------------------------------
+// Proxy crash-reason persistence (G-T8).
+//
+// One sandbox death left no cause. Fatal reasons are appended to CRASH_LOG
+// (never thrown from there — the crash path must not crash) and the last
+// entry is surfaced on the next boot, so an agent can see why the proxy died
+// without having watched it die. Semantics are unchanged: uncaught exceptions
+// still exit(1) (the Node default), rejections keep the runtime's behavior —
+// only observability is added.
+// ---------------------------------------------------------------------------
+
+const CRASH_LOG =
+  process.env.WEBUI_CRASH_LOG ??
+  join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode-webui", "proxy-crash.log");
+
+function persistCrashReason(kind: "uncaughtException" | "unhandledRejection", reason: unknown): void {
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  try {
+    mkdirSync(dirname(CRASH_LOG), { recursive: true, mode: 0o700 });
+    appendFileSync(CRASH_LOG, `${new Date().toISOString()} ${kind}: ${detail}\n`, "utf8");
+  } catch {
+    /* crash path — never throw */
+  }
+  console.error(`[webui] ${kind} (recorded in ${CRASH_LOG}):`, detail.split("\n")[0]);
+}
+
+process.on("uncaughtException", (err) => {
+  persistCrashReason("uncaughtException", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  persistCrashReason("unhandledRejection", reason);
+});
 
 // ---------------------------------------------------------------------------
 // Live-event recorder (catch-up for late-joining browsers).
@@ -385,6 +432,12 @@ async function bundleUIEntry(entry: string): Promise<string> {
   const artifact =
     built.outputs.find((o) => o.kind === "entry-point" && o.path.endsWith(".js")) ??
     built.outputs.find((o) => o.path.endsWith(".js"));
+  for (const log of built.logs) {
+    // Build warnings/errors are the ONLY server-side signal for a broken
+    // extension — a failing bundle must never be silent (the page just sees
+    // a missing entry). Bun.build failures throw below; warnings print here.
+    console.warn(`[webui] extension bundle build (${entry}): ${log.message}`);
+  }
   if (!artifact) throw new Error(`bun.build produced no js artifact for ${entry}`);
   const js = await artifact.text();
   bundleCache.set(entry, { mtimeMs, js });
@@ -1009,3 +1062,19 @@ console.log(
 void startEventRecorder();
 startExtensionWatcher();
 void startExtModules();
+
+// Crash-log boot note: if a previous proxy died fatally, its reason is the
+// last line of CRASH_LOG — surface it so the next boot (or an agent reading
+// the log) sees why without having watched it die.
+try {
+  if (existsSync(CRASH_LOG)) {
+    const lines = readFileSync(CRASH_LOG, "utf8").trim().split("\n").filter((l) => l.length > 0);
+    // Entries are multi-line (stacks) — the "last" entry is the last line
+    // starting a new timestamped record, not the log's physical last line.
+    const heads = lines.filter((l) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(l));
+    const last = heads[heads.length - 1] ?? lines[lines.length - 1];
+    if (last) console.log(`[webui] previous proxy crash (${heads.length} entr(ies) in ${CRASH_LOG}) — last: ${last.slice(0, 300)}`);
+  }
+} catch {
+  /* observability only — never block boot */
+}

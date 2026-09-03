@@ -40,6 +40,9 @@ export interface SessionInfo {
   title?: string;
   location: LocationRef;
   subpath?: string;
+  /** Free-form origin tagging, e.g. `{ origin: "brother-agent" }`. Mirrors
+   * openapi `Session.Info.metadata` (our hand-copied type lagged behind). */
+  metadata?: Record<string, unknown>;
 }
 
 export interface SessionsResponse {

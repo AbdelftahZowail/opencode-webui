@@ -26,15 +26,15 @@
  *
  * GAPS (follow-ups, not in this scaffolding):
  * - `server/` directory form (only bare `server.ts` is discovered).
- * - Engine-credential passthrough for pollers that must call the engine
- *   (needs a Service.headers helper that doesn't create an index.ts cycle).
  * - SSE manifest push for server-module versions (browser bundle only).
+ * (Engine credentials shipped as `ctx.engine` — see `engine.ts`.)
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalUserExtensionsDir, projectUserExtensionsDir, warnOnce } from "../userExtensions";
+import { engine } from "./engine";
 import { kvFor } from "./kv";
 import type { ExtEngineEvent, ExtServerContext, ServerExtensionModule } from "./types";
 
@@ -82,7 +82,7 @@ function isServerExtensionModule(obj: unknown): obj is ServerExtensionModule {
 }
 
 function ctxFor(id: string): ExtServerContext {
-  return { extID: id, kv: kvFor(id) };
+  return { extID: id, kv: kvFor(id), engine };
 }
 
 async function loadEntry(id: string, dir: string, entry: string): Promise<void> {

@@ -1,0 +1,6 @@
+{
+  "name": "webui-engine-fixture",
+  "version": "1.0.0",
+  "description": "Verified minimal engine-plugin fixture: one tools.* tool returning {output}, one {type:text} system hint",
+  "private": true
+}

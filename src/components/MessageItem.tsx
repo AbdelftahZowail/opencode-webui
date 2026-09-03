@@ -843,7 +843,7 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
                 : `${message.id}:${part.type}:${ordinal[part.type]++}`;
             return (
               <Fragment key={key}>
-                <MessagePart stateKey={key} part={part} />
+                <MessagePart stateKey={key} part={part} messageID={message.id} partIndex={partIndex} message={message} />
                 <PartDecorations message={message} part={part as unknown as ToolPart} partIndex={partIndex} />
               </Fragment>
             );
@@ -862,14 +862,25 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
 export function MessagePart({
   part,
   stateKey,
+  messageID,
+  partIndex,
+  message,
 }: {
   part: ToolPart | { type: "text"; text: string } | { type: "reasoning"; text: string };
   stateKey?: string;
+  messageID?: string;
+  partIndex?: number;
+  message?: MessageInfo;
 }) {
   if (part.type === "reasoning") return <ReasoningBlock text={part.text} stateKey={stateKey} />;
   if (part.type === "tool") return <Target id="tool.card" part={part} stateKey={stateKey} />;
   if (!part.text || !part.text.trim()) return null;
-  return <Markdown text={part.text} />;
+  // Leaf target (R-C1/F1): React-side alternative to DOM injection. Core
+  // default below (`message.markdown`) renders <Markdown> byte-identically
+  // when unwrapped — TargetErrorBoundary adds no DOM. Extra props
+  // (messageID/partIndex/message) are for extensions only; core ignores them.
+  // DOM remains the last resort for portals/iframes outside the React tree.
+  return <Target id="message.markdown" text={part.text} messageID={messageID} partIndex={partIndex} message={message} />;
 }
 
 const disclosureState = new Map<string, boolean>();
@@ -996,6 +1007,7 @@ function Row({ align = "left", children }: { align?: "left" | "right"; children:
 // header, the token readout, and the cost badge around it.
 // ---------------------------------------------------------------------------
 autoRegister({
+  "message.markdown": (p) => <Markdown text={p.text as string} />,
   "message.timestamp": (p) => <TimestampIfWanted time={p.time as number} />,
   "message.tokens": (p) => (
     <Tokens tokens={p.tokens as NonNullable<AssistantMessage["tokens"]>} />

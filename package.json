@@ -3,7 +3,7 @@
   "description": "Web UI for the OpenCode coding agent — chat, streaming, tool cards, and extensions over the OpenCode engine's HTTP API.",
   "private": false,
   "type": "module",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -37,6 +37,7 @@
     "start": "NODE_ENV=production bun run server/index.ts",
     "typecheck": "tsc --noEmit",
     "gen:skill": "bun run scripts/gen-skill.ts",
+    "check:ext": "bun run scripts/check-ext.ts",
     "check:swap": "bun run scripts/uitest/swap-ready.ts",
     "prepublishOnly": "bun run typecheck && bun run gen:skill && bun run build"
   },

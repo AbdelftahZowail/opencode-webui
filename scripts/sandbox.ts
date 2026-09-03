@@ -17,6 +17,11 @@
  * Explicit env (WEBUI_PROXY_PORT / WEBUI_VITE_PORT / WEBUI_EXTENSION_DIR)
  * always wins and disables that knob's auto behavior. The engine stays
  * shared (same sessions everywhere, by design).
+ *
+ * Headless proxy-only mode: WEBUI_SANDBOX_NOVITE=1 (or the --no-vite argv
+ * flag) boots the proxy WITHOUT Vite — no 5175 port, no auto-isolate on the
+ * Vite knob, no second child to reap. For agents and CI that only need the
+ * API surface (/api/*, ext routes, replay) without a dev UI.
  */
 
 import { existsSync } from "node:fs";
@@ -53,6 +58,11 @@ function freshScratchDir(): string {
 const DEFAULT_PROXY_PORT = "4099";
 const DEFAULT_VITE_PORT = "5175";
 
+// Headless proxy-only mode: WEBUI_SANDBOX_NOVITE=1 env or --no-vite flag.
+// Explicit env wins over the flag's absence, never over its presence —
+// either one alone is enough to skip Vite.
+const NO_VITE = process.argv.includes("--no-vite") || process.env.WEBUI_SANDBOX_NOVITE === "1";
+
 let proxyPort = process.env.WEBUI_PROXY_PORT ?? DEFAULT_PROXY_PORT;
 let vitePort = process.env.WEBUI_VITE_PORT ?? DEFAULT_VITE_PORT;
 let extDir = process.env.WEBUI_EXTENSION_DIR;
@@ -60,21 +70,23 @@ let isolated = false;
 
 // Auto-isolate only for knobs the operator didn't pin: a busy default port
 // means another sandbox is already up, so take free ports + a fresh dir.
+// Proxy-only mode drops the Vite knob from the decision entirely.
 if (
   process.env.WEBUI_PROXY_PORT === undefined ||
-  process.env.WEBUI_VITE_PORT === undefined ||
+  (!NO_VITE && process.env.WEBUI_VITE_PORT === undefined) ||
   extDir === undefined
 ) {
   const proxyBusy =
     process.env.WEBUI_PROXY_PORT === undefined &&
     !(await portFree(Number(DEFAULT_PROXY_PORT)));
   const viteBusy =
+    !NO_VITE &&
     DEV &&
     process.env.WEBUI_VITE_PORT === undefined &&
     !(await portFree(Number(DEFAULT_VITE_PORT)));
   if (proxyBusy || viteBusy) {
     if (process.env.WEBUI_PROXY_PORT === undefined) proxyPort = String(await freePort());
-    if (DEV && process.env.WEBUI_VITE_PORT === undefined) vitePort = String(await freePort());
+    if (!NO_VITE && DEV && process.env.WEBUI_VITE_PORT === undefined) vitePort = String(await freePort());
     if (extDir === undefined) extDir = freshScratchDir();
     isolated = true;
   }
@@ -96,14 +108,16 @@ const proxy = spawn({
   stdio: ["inherit", "inherit", "inherit"],
 });
 
-const vite = DEV
+const vite = DEV && !NO_VITE
   ? spawn({ cmd: ["bunx", "vite"], env, stdio: ["inherit", "inherit", "inherit"] })
   : null;
 
 console.log(
-  DEV
-    ? `\n[sandbox] dev UI at http://localhost:${vitePort} (proxy :${proxyPort}) — loopback only, no password; extensions: ${isolated ? `ISOLATED scratch dir ${extDir}` : "scratch dir"}\n`
-    : `\n[sandbox] UI at http://localhost:${proxyPort} — loopback only, no password; extensions: ${isolated ? `ISOLATED scratch dir ${extDir}` : "scratch dir"}\n`,
+  NO_VITE
+    ? `\n[sandbox] proxy-only at http://localhost:${proxyPort} (no Vite) — loopback only, no password; extensions: ${isolated ? `ISOLATED scratch dir ${extDir}` : "scratch dir"}\n`
+    : DEV
+      ? `\n[sandbox] dev UI at http://localhost:${vitePort} (proxy :${proxyPort}) — loopback only, no password; extensions: ${isolated ? `ISOLATED scratch dir ${extDir}` : "scratch dir"}\n`
+      : `\n[sandbox] UI at http://localhost:${proxyPort} — loopback only, no password; extensions: ${isolated ? `ISOLATED scratch dir ${extDir}` : "scratch dir"}\n`,
 );
 
 async function shutdown() {

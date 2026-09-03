@@ -1,4 +1,4 @@
-import { unregisterIds } from "../extensions/registry";
+import { getRegisteredIds, unregisterIds } from "../extensions/registry";
 import { fireHooks } from "../extensions/hooks";
 import { installExtensionBridge } from "./extensionApi";
 import {
@@ -50,7 +50,8 @@ import {
  *     died while the tab was hidden (EventSource itself auto-reconnects).
  *  3. After each sync, ids still in `loaded`/`loadedDom` but missing from the
  *     sync's enabled set (removed server-side OR newly paused) get
- *     `unregisterIds` + forgotten (browser stratum) or
+ *     unregistered via their recorded id delta (`loadedIds` — exactly what
+ *     the folder's bundle added) + forgotten (browser stratum) or
  *     `disposeDomExtension` + forgotten (DOM stratum) — a paused extension
  *     unregisters on the next event, a re-enabled one imports fresh.
  *
@@ -77,6 +78,18 @@ interface RuntimeExtensionEntry {
 
 /** Loaded browser bundles, id → exact url (with its ?v= version) currently active. */
 const loaded = new Map<string, string>();
+
+/**
+ * Folder-level id-delta tracking (IN-3, G-F2/F4 remainder — IMPLEMENTED,
+ * subsumes the one-id doc rule): manifest id → registry ids its bundle
+ * added. Snapshotted around each bundle import (before/after
+ * getRegisteredIds()); disable/delete unregisters exactly that set, so a
+ * multi-id folder (e.g. brother-agent's hook + two wraps) leaves no ghosts.
+ * The one-id guidance stays as guidance (simpler to reason about) but the
+ * loader no longer depends on it. Empty set = bundle added nothing new
+ * (re-import swap or zero-id bundle) — uninstall falls back to [id].
+ */
+const loadedIds = new Map<string, Set<string>>();
 
 /** Mounted DOM modules, id → exact domUrl + module (for `dispose` on swap). */
 const loadedDom = new Map<string, { url: string; module: DomExtensionModule }>();
@@ -147,9 +160,20 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
         enabledNow.add(entry.id);
 
         if (loaded.get(entry.id) !== entry.url) {
+          const before = new Set(getRegisteredIds());
           try {
             await import(/* @vite-ignore */ entry.url);
             loaded.set(entry.id, entry.url);
+            // Id-delta: attribute exactly the registry ids this import added.
+            const after = getRegisteredIds();
+            let owned = loadedIds.get(entry.id);
+            if (!owned) {
+              owned = new Set<string>();
+              loadedIds.set(entry.id, owned);
+            }
+            for (const rid of after) {
+              if (!before.has(rid)) owned.add(rid);
+            }
             // Lifecycle hook (spec §5.1): a runtime extension bundle just loaded —
             // observers see it after registration, before first render.
             void fireHooks("extension.loaded", { id: entry.id, url: entry.url });
@@ -171,15 +195,22 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
 
   // Stale = loaded but no longer in this sync's enabled set (removed from
   // the server, or newly paused via manifest `disabled: true`). Unregister
-  // + forget so a later re-enable imports fresh.
-  const stale: string[] = [];
+  // exactly the id delta each folder added (fallback [id] when it added
+  // nothing new) + forget so a later re-enable imports fresh.
+  const toRemove = new Set<string>();
   for (const id of loaded.keys()) {
     if (!enabledNow.has(id)) {
-      stale.push(id);
+      const owned = loadedIds.get(id);
+      if (owned && owned.size > 0) {
+        for (const rid of owned) toRemove.add(rid);
+      } else {
+        toRemove.add(id);
+      }
       loaded.delete(id);
+      loadedIds.delete(id);
     }
   }
-  if (stale.length > 0) unregisterIds(stale);
+  if (toRemove.size > 0) unregisterIds([...toRemove]);
 
   // Gating for glob-owned copies: a disabled id the runtime never loaded
   // (shipped via the Vite glob) still has a live registry entry — unregister

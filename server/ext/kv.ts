@@ -1,9 +1,8 @@
 /**
  * Proxy-stratum KV store (spec §8).
  *
- * One small persistent store service for server extensions — the
- * `~/.dsh/brother-watches.json` equivalent — so each extension doesn't roll
- * its own file I/O. JSON-file backed (per spec: "bun:sqlite or JSON-file"),
+ * One small persistent store service for server extensions — so each
+ * extension doesn't roll its own file I/O. JSON-file backed (per spec: "bun:sqlite or JSON-file"),
  * namespaced per extension id: `kvFor("brother-watcher")` only ever sees
  * its own top-level key.
  *

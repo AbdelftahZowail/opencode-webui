@@ -365,6 +365,30 @@ export function Composer({
     setCaret(el.value.length);
   }
 
+  /**
+   * Extension seam for voice input (groq-voice): space-join `insert` onto the
+   * current draft and hand focus back to the textarea. Passed as rich props on
+   * the `composer.sendActions` leaf target — extensions must prefer this over
+   * writing `webui.drafts` in localStorage (the composer's `text` state would
+   * not pick an external write up, and the next keystroke would clobber it).
+   */
+  function appendDraft(insert: string) {
+    const clean = insert.trim();
+    if (!clean) return;
+    setHistIdx(null);
+    setText((prev) => {
+      const base = prev.replace(/\s+$/, "");
+      return base === "" ? clean : `${base} ${clean}`;
+    });
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      placeCaretEnd(el);
+      setCaret(el.value.length);
+    });
+  }
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -1193,6 +1217,20 @@ export function Composer({
                       }
                     }}
                   />
+                  {/*
+                    Extension slot: voice input etc. Core default is null —
+                    wraps receive { sessionID, appendDraft } and render their
+                    controls to the LEFT of Send. Added for groq-voice
+                    (docs/extension-migrations.md §3); additive, no visual
+                    change when no extension wraps it. Outside the busy
+                    ternary on purpose: dictating the next message must work
+                    while a run is active (steer/queue).
+                  */}
+                  <Target
+                    id="composer.sendActions"
+                    sessionID={sessionID}
+                    appendDraft={appendDraft}
+                  />
                   {busy ? (
                     <Spinner className="mb-1.5 mr-2" />
                   ) : (
@@ -1369,4 +1407,11 @@ function ContextReadout({ parts }: { parts: string[] }) {
 autoRegister({
   composer: (p) => <Composer {...(p as unknown as ComposerProps)} />,
   "composer.contextReadout": (p) => <ContextReadout parts={p.parts as string[]} />,
+  /**
+   * Extension slot left of the Send button (`composer.sendActions`, null by
+   * default). Wrap props: `{ sessionID: string, appendDraft: (text: string)
+   * => void }`. Target id + prop shapes are contract (registry §5.3):
+   * renaming either is a version bump + migration note, never silent.
+   */
+  "composer.sendActions": () => null,
 });
