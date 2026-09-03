@@ -11,7 +11,7 @@ service credentials. One port for UI + `/api/*`: http://localhost:4097
 (`WEBUI_PROXY_PORT`).
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 2.1.0 (matches the `v2.1.0` git tag —
+- **This skill's version**: 2.2.0 (matches the `v2.2.0` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -24,13 +24,13 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.1.0/src/store.ts | The store — actions useStore exposes to extensions |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.2.0/src/store.ts | The store — actions useStore exposes to extensions |
 
 ## Environment
 

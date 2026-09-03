@@ -1,6 +1,0 @@
-{
-  "id": "rich-render",
-  "name": "rich-render",
-  "version": "1.0.0",
-  "description": "Claude-style inline visuals: ~~~html/svg/pdf/image fences render live in sandboxed iframes, PDF links get previews (``` stays code)"
-}

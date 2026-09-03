@@ -84,7 +84,7 @@ const loaded = new Map<string, string>();
  * subsumes the one-id doc rule): manifest id → registry ids its bundle
  * added. Snapshotted around each bundle import (before/after
  * getRegisteredIds()); disable/delete unregisters exactly that set, so a
- * multi-id folder (e.g. brother-agent's hook + two wraps) leaves no ghosts.
+ * multi-id folder (e.g. a hook plus two wraps) leaves no ghosts.
  * The one-id guidance stays as guidance (simpler to reason about) but the
  * loader no longer depends on it. Empty set = bundle added nothing new
  * (re-import swap or zero-id bundle) — uninstall falls back to [id].

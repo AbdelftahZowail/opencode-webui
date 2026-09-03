@@ -1,6 +1,7 @@
 # Extension System v2 — Specification & Migration Plan
 
-Status: **agreed, not yet implemented** (decision record for the extension-system refactor).
+Status: **implemented** (decision record for the extension-system refactor —
+kept as the historical record of what was agreed and why).
 Date: 2026-09-02.
 
 How to read this document: sections state **what must be true** (requirements, contracts,

@@ -624,8 +624,8 @@ async function main(): Promise<void> {
     registerTarget(COST, () => React.createElement("span", null, "COST-v1"));
     // NOTE: wrap and service use DISTINCT ids. The registry holds one
     // entry per id (same-id re-register swaps in place), so sharing one id
-    // across two entries would evict the first — the timestamp-test.md
-    // sketch reuses "my-time" for both, which does not survive register().
+    // across two entries would evict the first — the staleness scenario
+    // sketch (spec §5.4) reuses "my-time" for both, which does not survive register().
     register({
       kind: "wrap",
       id: WRAP,

@@ -7,14 +7,15 @@
  *   bun scripts/uitest/dom-harness-proof.ts
  *
  * Proves: fixture serving + dom-bundle build + headless-chrome evaluate +
- * settled-wait all work through the harness against the REAL
- * webui-extensions/rich-render/dom.ts + REAL src/lib/domKit.ts.
+ * settled-wait all work through the harness against the REAL rich-render
+ * dom.ts (repo copy if present, else the user extension dir) + REAL
+ * src/lib/domKit.ts.
  *
  * Own ports/scratch only (/tmp/opencode/dom-proof-<pid>); everything torn
  * down in `finally`. Test-only file: modifies neither src/ nor server/.
  */
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildDomBundle,
@@ -29,6 +30,35 @@ import {
 
 const ROOT = join(import.meta.dir, "..", "..");
 const SCRATCH = `/tmp/opencode/dom-proof-${process.pid}`;
+
+/**
+ * rich-render is a personal extension and lives outside the repo (user
+ * extension dir). The proof runs against whichever copy exists, preferring
+ * the repo checkout when present.
+ */
+function resolveRichRenderDom(): string {
+  const repoCopy = join(ROOT, "webui-extensions", "rich-render", "dom.ts");
+  if (existsSync(repoCopy)) return repoCopy;
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (home) {
+    const userCopy = join(home, ".config", "opencode", "webui-extensions", "rich-render", "dom.ts");
+    if (existsSync(userCopy)) return userCopy;
+  }
+  if (process.env.XDG_CONFIG_HOME) {
+    const xdgCopy = join(
+      process.env.XDG_CONFIG_HOME,
+      "opencode",
+      "webui-extensions",
+      "rich-render",
+      "dom.ts",
+    );
+    if (existsSync(xdgCopy)) return xdgCopy;
+  }
+  throw new Error(
+    `rich-render dom.ts not found (tried ${repoCopy} and the user extension dir) — ` +
+      `install the rich-render extension to run this proof.`,
+  );
+}
 
 const FIXTURE_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>dom-harness proof fixture</title></head>
@@ -71,7 +101,7 @@ async function main(): Promise<void> {
   await buildDomBundle(
     {
       extId: "rich-render",
-      domPath: join(ROOT, "webui-extensions", "rich-render", "dom.ts"),
+      domPath: resolveRichRenderDom(),
       entryPath: join(SCRATCH, "proof-entry.ts"),
       globalName: "__proof",
     },

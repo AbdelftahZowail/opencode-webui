@@ -35,9 +35,11 @@ my-extension/
    different reload rules). If they need shared constants, duplicate the
    literal or read it from a file both sides parse — boring and explicit.
 
-## Worked example — brother-agent in webui terms, one folder, three strata
+## Worked example — one folder, three strata
 
-- `engine/` registers the `brother_agent*` tools (model-callable).
+A typical multi-strata extension (e.g. an agent-spawning helper):
+
+- `engine/` registers the model-callable tools.
 - `server.ts` taps events (`onEvent`) and queues finish notices into parent
   sessions headless — works with all browser tabs closed.
 - `index.tsx` renders the sidebar badge (browser stratum).

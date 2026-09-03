@@ -119,7 +119,7 @@ must never touch streaming output can rely on the distinction structurally.
   `notify`, `services`, `dom`, `kv`) — shipped code consumes the identical
   surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
-  tsconfig (`@/*` → `./src/*`, e.g. groq-voice imports
+  tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
   `@/components/ui/dialog`) — external copies must still use the bridge,
   never `@/` or relative `src/` paths.
 
@@ -315,8 +315,7 @@ An extension folder may carry `engine/` — a valid opencode plugin directory
 The webui neither loads nor hot-reloads it; the engine's rules apply
 (boot-time load, restart on edit unless the plugin implements its own shell
 pattern — a stable `index.js` that require-cache-busts a `definitions.cjs`
-on mtime works and is the recommended shape). Convention + worked example
-(brother-agent in webui terms — one folder, three strata):
+on mtime works and is the recommended shape). Convention + worked example (one folder, three strata):
 `docs/engine-payload-convention.md`. Hard-won facts, stated once so no one
 re-discovers them by trial:
 
@@ -407,8 +406,7 @@ kit, `kv`) — used identically by our shipped ones.
 > User tweaks only the timestamp format. Maintainer later redesigns the
 > token counter and adds a finish badge in the same header. **The user gets
 > both, visibly** — parent and siblings are still core's; the user's wrap
-> delegates by default. (`docs/extension-system-spec.md` §5.4; scenario
-> script: `docs/extension-timestamp-test.md`.)
+> delegates by default. (`docs/extension-system-spec.md` §5.4.)
 
 ```tsx
 // ✅ RIGHT — wrap (stale-proof): the header redesign flows through

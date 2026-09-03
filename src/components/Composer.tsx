@@ -366,7 +366,7 @@ export function Composer({
   }
 
   /**
-   * Extension seam for voice input (groq-voice): space-join `insert` onto the
+   * Extension seam for voice input extensions: space-join `insert` onto the
    * current draft and hand focus back to the textarea. Passed as rich props on
    * the `composer.sendActions` leaf target — extensions must prefer this over
    * writing `webui.drafts` in localStorage (the composer's `text` state would
@@ -1220,8 +1220,8 @@ export function Composer({
                   {/*
                     Extension slot: voice input etc. Core default is null —
                     wraps receive { sessionID, appendDraft } and render their
-                    controls to the LEFT of Send. Added for groq-voice
-                    (docs/extension-migrations.md §3); additive, no visual
+                    controls to the LEFT of Send. Added for voice-input
+                    extensions; additive, no visual
                     change when no extension wraps it. Outside the busy
                     ternary on purpose: dictating the next message must work
                     while a run is active (steer/queue).
