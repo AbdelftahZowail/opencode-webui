@@ -65,7 +65,7 @@ event vocabulary and what replaced what when debugging event handling.
    duplicating released work.
 2. **No UI extensibility upstream.** No slots, no registry; `app/src/addons/`
    is just serialization helpers. Monorepo `packages/plugin` is ENGINE-side.
-   Our `ui-extensions` slot system has no equivalent there.
+   Our `webui-extensions` extension system has no equivalent there.
 3. **The app is SolidJS**, not React. Patterns transfer; code does not.
 4. **Auth**: the local service speaks Basic auth (`opencode:` +
    password from `~/.config/opencode/service.json`). Their app accepts an

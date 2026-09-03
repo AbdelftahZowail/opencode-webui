@@ -20,7 +20,7 @@
 
 import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -41,10 +41,19 @@ import {
 import { syncSkill } from "./skillSync";
 import {
   discoverUserUIEntries,
+  extensionSourceRoots,
   globalUserExtensionsDir,
+  invalidateExtensionCache,
   warnOnce,
   type UIEntry,
 } from "./userExtensions";
+import {
+  applyExtResponseMiddleware,
+  dispatchExtEvent,
+  dispatchExtRequest,
+  runExtRequestMiddleware,
+  startExtModules,
+} from "./ext/registry";
 
 // `sandbox` argv — one command, every runtime: `bun run sandbox` (repo, the
 // script adds Vite), `bunx opencode-webui sandbox`, `./opencode-webui sandbox`
@@ -154,6 +163,9 @@ function recordEvent(evt: RecordedEvent) {
     recorderSeenIds.add(evt.id);
     if (recorderSeenIds.size > RECORDER_SEEN_MAX) recorderSeenIds.clear();
   }
+  // Proxy-stratum event tap (spec §8): headless extensions observe the same
+  // deduped stream the replay buffer keeps. Fire-and-forget, never blocks.
+  void dispatchExtEvent(evt).catch((err) => console.error("[webui] ext onEvent failed:", err));
   let buf = replayBuffers.get(sessionID);
   if (!buf) {
     // Hard cap on tracked sessions; drop the least recently active.
@@ -240,12 +252,21 @@ async function startEventRecorder() {
 // code. The engine lists loaded plugins at GET /plugin ({ location,
 // data: PluginInfo[] }). For every LOCAL-source plugin we probe two UI entry
 // candidates next to it — `<dir>/ui/main.tsx`, then
-// `<dir>/<base>.ui.tsx` — bundle the first that exists with Bun.build into a
-// self-contained ESM script (it carries its own React and talks to this app
-// only through the window.__opencodeUI bridge), and serve:
+// `<dir>/<base>.ui.tsx` — bundle the first that exists with Bun.build into an
+// ESM script and serve:
 //
-//   GET /api/webui/extensions                -> { data: [{ id, url, source }] }
-//   GET /api/webui/extensions/:id/bundle.js  -> text/javascript, no-cache
+//   GET /api/webui/extensions                -> { data: [{ id, url?, domUrl?, source }] }
+//   GET /api/webui/extensions/:id/bundle.js  -> text/javascript, no-cache (browser stratum)
+//   GET /api/webui/extensions/:id/dom.js     -> text/javascript, no-cache (DOM stratum, spec §7)
+//
+// `react` (+ `react/jsx-runtime`, `react/jsx-dev-runtime`) are EXTERNAL in
+// every bundle — never inlined. The page's index.html carries an import map
+// pointing those bare specifiers at /api/webui/vendor/*.js, which re-export
+// the app's own React via the window.__opencodeUI bridge (installed at boot,
+// re-ensured by the runtime loader before every import). One React instance
+// for app and extensions alike: inlining a second copy breaks hooks
+// (invalid-hook-call on the first useState). The vendor shims are the only
+// copy extensions ever see.
 //
 // Both routes ride the same session auth as every other /api call (the
 // upstream plugin list is fetched with Service.headers) and register BEFORE
@@ -324,21 +345,22 @@ async function discoverUIEntries(): Promise<UIEntry[]> {
 }
 
 /**
- * Plugin UI entries + user-dir entries, plugin ids winning collisions (a
- * user folder may never shadow a plugin's UI — that's warned about once).
+ * Folder extensions (user > project > shipped, same-id swap) PLUS engine
+ * plugin UI halves. Folder ids win collisions: a folder may shadow a
+ * plugin's UI — presence on disk is the deliberate override.
  */
 async function discoverAllUIEntries(): Promise<UIEntry[]> {
   const pluginEntries = await discoverUIEntries();
-  const userEntries = discoverUserUIEntries();
-  if (userEntries.length === 0) return pluginEntries;
-  const ids = new Set(pluginEntries.map((e) => e.id));
-  const merged = [...pluginEntries];
-  for (const user of userEntries) {
-    if (ids.has(user.id)) {
-      warnOnce(`collide:${user.id}`, `user extension "${user.id}" skipped — a plugin already owns that id`);
+  const folderEntries = discoverUserUIEntries();
+  if (folderEntries.length === 0) return pluginEntries;
+  const ids = new Set(folderEntries.map((e) => e.id));
+  const merged = [...folderEntries];
+  for (const plugin of pluginEntries) {
+    if (ids.has(plugin.id)) {
+      warnOnce(`collide:${plugin.id}`, `plugin extension "${plugin.id}" skipped — a folder already owns that id`);
       continue;
     }
-    merged.push(user);
+    merged.push(plugin);
   }
   return merged;
 }
@@ -353,23 +375,12 @@ async function bundleUIEntry(entry: string): Promise<string> {
     target: "browser",
     format: "esm",
     minify: false,
-    // Plugin dirs have no node_modules — resolve React from THIS app so every
-    // runtime bundle shares one React copy. JSX dev/runtime variants included.
-    plugins: [
-      {
-        name: "react-from-app",
-        setup(build) {
-          build.onResolve({ filter: /^react(\/jsx-runtime|\/jsx-dev-runtime)?$/ }, (args) => ({
-            path: join(
-              APP_ROOT,
-              "node_modules",
-              "react",
-              args.path === "react" ? "index.js" : `${args.path.slice("react/".length)}.js`,
-            ),
-          }));
-        },
-      },
-    ],
+    // React is EXTERNAL — never inlined. Extension bundles import the bare
+    // specifiers and the page's import map (index.html) resolves them to
+    // /api/webui/vendor/*.js, which re-export the app's own React instance.
+    // Resolving react to a FILE path here (the old react-from-app plugin)
+    // inlined a private second copy -> invalid-hook-call on first useState.
+    external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime"],
   });
   const artifact =
     built.outputs.find((o) => o.kind === "entry-point" && o.path.endsWith(".js")) ??
@@ -378,6 +389,222 @@ async function bundleUIEntry(entry: string): Promise<string> {
   const js = await artifact.text();
   bundleCache.set(entry, { mtimeMs, js });
   return js;
+}
+
+// ---------------------------------------------------------------------------
+// Shared-React vendor shims (import-map targets for external bundles).
+//
+// Extension bundles import the bare specifiers "react",
+// "react/jsx-runtime" and "react/jsx-dev-runtime" (see `external` above).
+// The page's import map (index.html) resolves those to these routes, which
+// re-export the APP's React instance via the window.__opencodeUI bridge —
+// installed at boot (main.tsx) and re-ensured by the runtime loader before
+// every bundle import, so the bridge always exists when a shim executes.
+// No React code ships in these shims and none is inlined into bundles:
+// there is exactly one React instance in the page.
+//
+// The named-export list is derived from the running app's react copy so it
+// stays correct across React upgrades without hand-maintained lists.
+// ---------------------------------------------------------------------------
+
+const REACT_NAMED_EXPORTS: string[] = (() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ns = require("react") as Record<string, unknown>;
+    return Object.keys(ns).filter(
+      (k) => k !== "default" && k !== "__esModule" && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k),
+    );
+  } catch {
+    // Fallback: hooks + primitives an extension could plausibly import.
+    return [
+      "Children", "Component", "Fragment", "Profiler", "PureComponent", "StrictMode", "Suspense",
+      "cache", "cloneElement", "createContext", "createElement", "createRef", "forwardRef",
+      "isValidElement", "lazy", "memo", "startTransition", "use", "useCallback", "useContext",
+      "useDebugValue", "useDeferredValue", "useEffect", "useId", "useImperativeHandle",
+      "useInsertionEffect", "useLayoutEffect", "useMemo", "useReducer", "useRef", "useState",
+      "useSyncExternalStore", "useTransition", "version",
+    ];
+  }
+})();
+
+const REACT_VENDOR_JS = `// Shared-React shim: re-exports the app's React (window.__opencodeUI.react).
+// Served by the proxy at /api/webui/vendor/react.js (import-map target).
+const R = globalThis.__opencodeUI?.react;
+if (!R) throw new Error("[webui] React bridge not ready: window.__opencodeUI.react is missing");
+export default R;
+export const { ${REACT_NAMED_EXPORTS.join(", ")} } = R;
+`;
+
+// The automatic JSX transform calls jsx()/jsxs() to build elements. These
+// delegate to createElement on the SAME shared instance, so elements and
+// hooks always agree on the dispatcher. __source/__self (dev) are stripped.
+const JSX_RUNTIME_BODY = `const R = globalThis.__opencodeUI?.react;
+if (!R) throw new Error("[webui] React bridge not ready: window.__opencodeUI.react is missing");
+export const Fragment = R.Fragment;
+function _el(type, props, key) {
+  const p = { ...(props || {}) };
+  const children = p.children;
+  delete p.children;
+  delete p.__source;
+  delete p.__self;
+  if (key !== undefined) p.key = key;
+  if (children === undefined) return R.createElement(type, p);
+  return Array.isArray(children) ? R.createElement(type, p, ...children) : R.createElement(type, p, children);
+}
+export function jsx(type, props, key) { return _el(type, props, key); }
+export function jsxs(type, props, key) { return _el(type, props, key); }
+`;
+
+const REACT_JSX_RUNTIME_VENDOR_JS = `// Shared-React shim for react/jsx-runtime (import-map target).
+${JSX_RUNTIME_BODY}`;
+
+const REACT_JSX_DEV_RUNTIME_VENDOR_JS = `// Shared-React shim for react/jsx-dev-runtime (import-map target).
+${JSX_RUNTIME_BODY}export function jsxDEV(type, props, key) { return _el(type, props, key); }
+`;
+
+function vendorShimFor(path: string): string | null {
+  if (path === "/api/webui/vendor/react.js") return REACT_VENDOR_JS;
+  if (path === "/api/webui/vendor/react-jsx-runtime.js") return REACT_JSX_RUNTIME_VENDOR_JS;
+  if (path === "/api/webui/vendor/react-jsx-dev-runtime.js") return REACT_JSX_DEV_RUNTIME_VENDOR_JS;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Extension manifest push (spec §6: replaces the 8s browser poll).
+//
+// The proxy watches all three folder sources, rebuilds changed bundles
+// (bundleCache is mtime-keyed, so the next bundle.js fetch rebuilds), bumps
+// the manifest version, and pushes it over SSE; the page re-imports bundles
+// whose ?v= moved and same-id-swaps them in the registry — sub-second, no
+// refresh. Delete/move = uninstall (the id vanishes from the manifest and
+// the page unregisters it); manifest `disabled: true` = paused.
+// ---------------------------------------------------------------------------
+
+type ManifestItem =
+  | { id: string; source: string; origin?: UIEntry["origin"]; url?: string; domUrl?: string }
+  | { id: string; source: string; origin?: UIEntry["origin"]; disabled: true };
+
+async function buildExtensionManifest(): Promise<ManifestItem[]> {
+  // discoverAllUIEntries never throws; upstream failures collapse to [].
+  const entries = await discoverAllUIEntries();
+  return entries.map((e) => {
+    if (e.disabled || (!e.entry && !e.domEntry)) {
+      return { id: e.id, source: e.source ?? e.entry, origin: e.origin, disabled: true as const };
+    }
+    const item: { id: string; source: string; origin?: UIEntry["origin"]; url?: string; domUrl?: string } = {
+      id: e.id,
+      source: e.source ?? e.entry,
+      origin: e.origin,
+    };
+    // Shipped browser stratum loads via the in-repo Vite glob
+    // (webui-extensions/index.ts, Vite HMR) — never via a bundle URL, or
+    // module side effects run twice and `extension.loaded` fires twice
+    // (Bug 2). Omit `url` for shipped origin; a user/project copy shadowing
+    // the same id wins discovery with origin user/project, keeps its `url`,
+    // and same-id-swaps over the glob copy. DOM stratum (`domUrl`) still
+    // serves for shipped: the glob never loads `dom.ts`, so there is no
+    // double-load there and omitting it would break shipped DOM extensions.
+    if (e.entry && e.origin !== "shipped") {
+      item.url = `/api/webui/extensions/${encodeURIComponent(e.id)}/bundle.js?v=${e.mtimeMs}`;
+    }
+    // DOM stratum (spec §7): its own `?v=` — a `dom.ts` edit changes the
+    // manifest JSON, which is what fires the SSE push (no second channel).
+    if (e.domEntry && e.domMtimeMs !== undefined) {
+      item.domUrl = `/api/webui/extensions/${encodeURIComponent(e.id)}/dom.js?v=${e.domMtimeMs}`;
+    }
+    return item;
+  });
+}
+
+let extManifestVersion = 0;
+let lastManifestJSON = "";
+const extManifestListeners = new Set<(msg: string) => void>();
+
+function broadcastExtensionManifest() {
+  const msg = JSON.stringify({ type: "webui.extensions", version: extManifestVersion });
+  for (const send of extManifestListeners) send(msg);
+}
+
+/**
+ * Re-scan and push when the manifest actually changed (edits change ?v=
+ * mtimes, adds/removes/disabled-flips change the id set). Returns true on
+ * change. Watcher-triggered scans invalidate the TTL caches first so the
+ * push is immediate, not up-to-5s late.
+ */
+async function checkExtensionManifest(immediate: boolean): Promise<boolean> {
+  if (immediate) {
+    invalidateExtensionCache();
+    uiEntryCache = null;
+  }
+  const manifest = await buildExtensionManifest();
+  const json = JSON.stringify(manifest);
+  if (json === lastManifestJSON) return false;
+  lastManifestJSON = json;
+  extManifestVersion++;
+  dbg("extensions manifest v" + extManifestVersion + ":", manifest.length, "entr(ies)");
+  broadcastExtensionManifest();
+  return true;
+}
+
+const watchedExtRoots = new Set<string>();
+let extRescanTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleExtRescan() {
+  if (extRescanTimer) return;
+  extRescanTimer = setTimeout(() => {
+    extRescanTimer = null;
+    void checkExtensionManifest(true);
+  }, 300); // coalesce save-bursts (edit + manifest.json write land together)
+}
+
+function ensureExtWatchers() {
+  const attach = (path: string) => {
+    if (watchedExtRoots.has(path)) return;
+    try {
+      const watcher = watch(path, { persistent: false }, () => scheduleExtRescan());
+      watcher.on("error", () => {
+        // Path deleted (or never existed) — drop it; a later rescan
+        // re-attaches when it reappears.
+        try {
+          watcher.close();
+        } catch {
+          /* already closed */
+        }
+        watchedExtRoots.delete(path);
+      });
+      watchedExtRoots.add(path);
+    } catch {
+      /* absent path — retry on the next rescan */
+    }
+  };
+  for (const root of extensionSourceRoots()) attach(root);
+  // Each extension folder too: a content-only edit (index.tsx bytes,
+  // manifest.json `disabled` flip) fires no event on the PARENT root watch
+  // (inotify reports only direct-child create/delete/rename there) — without
+  // this, edits would wait for the 5s backstop instead of pushing sub-second.
+  // discoverUserUIEntries() is TTL-cached, so this sweep is cheap.
+  const PREFIX = "webui-extensions:";
+  for (const e of discoverUserUIEntries()) {
+    const dir = e.entry
+      ? dirname(e.entry)
+      : e.source?.startsWith(PREFIX)
+        ? e.source.slice(PREFIX.length)
+        : null;
+    if (dir) attach(dir);
+  }
+}
+
+let extWatcherRunning = false;
+/** fs.watch for immediacy + a 5s re-scan for engine-plugin drift and roots. */
+function startExtensionWatcher() {
+  if (extWatcherRunning) return;
+  extWatcherRunning = true;
+  ensureExtWatchers();
+  void checkExtensionManifest(true); // seed lastManifestJSON + version 1
+  setInterval(() => {
+    ensureExtWatchers(); // attach to roots that appeared since boot
+    void checkExtensionManifest(false);
+  }, 5_000).unref?.();
 }
 
 // ---------------------------------------------------------------------------
@@ -496,31 +723,79 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       return Response.json({ data: events });
     }
 
-    // Plugin + user web-UI extensions — must match before the generic /api proxy.
+    // Extension manifest — folder entries (user > project > shipped) plus
+    // plugin UI halves. Disabled entries ship WITHOUT a url so the page can
+    // show them paused without importing anything. Shipped-origin browser
+    // entries likewise ship without `url` (Bug 2: the in-repo Vite glob owns
+    // them — a bundle URL here would double-load); shadowing user/project
+    // copies keep their `url` and same-id-swap. `origin` lets the page tell
+    // them apart; shipped `domUrl` still serves (the glob never loads dom).
     if (method === "GET" && path === "/api/webui/extensions") {
-      // discoverAllUIEntries never throws; upstream failures collapse to { data: [] }.
-      const entries = await discoverAllUIEntries();
-      dbg("extensions list:", entries.length, "ui entr(ies)");
-      return Response.json({
-        data: entries.map((e) => ({
-          id: e.id,
-          source: e.source ?? e.entry,
-          url: `/api/webui/extensions/${encodeURIComponent(e.id)}/bundle.js?v=${e.mtimeMs}`,
-        })),
+      const data = await buildExtensionManifest();
+      dbg("extensions list:", data.length, "ui entr(ies)");
+      return Response.json({ data, version: extManifestVersion });
+    }
+
+    // Manifest push channel (spec §6): one event per manifest change plus a
+    // hello on subscribe. The page re-fetches the manifest on each event and
+    // re-imports only bundles whose ?v= moved. Heartbeat comments keep the
+    // stream alive through idle infrastructure.
+    if (method === "GET" && path === "/api/webui/extensions/events") {
+      const encoder = new TextEncoder();
+      let send: ((msg: string) => void) | null = null;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const stream = new ReadableStream({
+        start(controller) {
+          send = (msg: string) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${msg}\n\n`));
+            } catch {
+              /* client gone — cancel() cleans up */
+            }
+          };
+          extManifestListeners.add(send);
+          send(JSON.stringify({ type: "webui.extensions", version: extManifestVersion }));
+          heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(`: ping\n\n`));
+            } catch {
+              /* client gone */
+            }
+          }, 15_000);
+        },
+        cancel() {
+          if (heartbeat) clearInterval(heartbeat);
+          if (send) extManifestListeners.delete(send);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        },
       });
     }
 
-    if (method === "GET" && /^\/api\/webui\/extensions\/[^/]+\/bundle\.js$/.test(path)) {
-      const id = decodeURIComponent(path.split("/")[4] ?? "");
+    // Browser-stratum bundle (`bundle.js`) and DOM-stratum bundle
+    // (`dom.js`, spec §7) — same mtime-keyed Bun.build pipeline, same
+    // no-cache serving. Disabled entries 404 — the page must never import a
+    // paused extension.
+    if (method === "GET" && /^\/api\/webui\/extensions\/[^/]+\/(bundle|dom)\.js$/.test(path)) {
+      const segs = path.split("/");
+      const id = decodeURIComponent(segs[4] ?? "");
+      const wantDom = (segs[5] ?? "").startsWith("dom");
       try {
         // Resolve through the CURRENT discovery result so removed/expired
-        // plugins 404 instead of serving a stale bundle.
+        // plugins 404 instead of serving a stale bundle. Disabled entries
+        // 404 too — the page must never import a paused extension.
         const found = (await discoverAllUIEntries()).find((e) => e.id === id);
-        if (!found || !existsSync(found.entry)) {
+        const entry = wantDom ? found?.domEntry : found?.entry;
+        if (!found || found.disabled || !entry || !existsSync(entry)) {
           return Response.json({ error: `unknown extension: ${id}` }, { status: 404 });
         }
-        const js = await bundleUIEntry(found.entry); // throws -> 500 below
-        dbg("extensions bundle:", id, `${js.length}b`);
+        const js = await bundleUIEntry(entry); // throws -> 500 below
+        dbg("extensions bundle:", id, wantDom ? "(dom)" : "", `${js.length}b`);
         return new Response(js, {
           headers: { "content-type": "text/javascript", "cache-control": "no-cache" },
         });
@@ -528,6 +803,24 @@ const server: Server<Record<string, unknown>> = Bun.serve({
         console.error(`[webui] extension bundle "${id}" failed:`, err);
         return Response.json({ error: `bundle failed for ${id}` }, { status: 500 });
       }
+    }
+
+    if (path.startsWith("/api/webui/ext/")) {
+      const extRes = await dispatchExtRequest(req, url);
+      if (extRes) return extRes;
+      return Response.json({ error: "unknown extension route" }, { status: 404 });
+    }
+
+    // Shared-React vendor shims (import-map targets — see bundleUIEntry).
+    // Same session auth as every other /api route (gate above applies);
+    // same-origin dynamic imports carry the session cookie. Content is
+    // derived from the running app's react copy, so no-cache (tiny files).
+    if (method === "GET" && path.startsWith("/api/webui/vendor/")) {
+      const js = vendorShimFor(path);
+      if (js === null) return Response.json({ error: "unknown vendor module" }, { status: 404 });
+      return new Response(js, {
+        headers: { "content-type": "text/javascript", "cache-control": "no-cache" },
+      });
     }
 
     if (path.startsWith("/api")) {
@@ -548,14 +841,21 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       }
       const t0 = Date.now();
       try {
+        // Proxy-stratum request middleware (spec §8): a returned Response
+        // short-circuits the passthrough; a returned Request replaces it.
+        let activeReq = req;
+        const extRewrite = await runExtRequestMiddleware(req);
+        if (extRewrite instanceof Response) return extRewrite;
+        if (extRewrite instanceof Request) activeReq = extRewrite;
+        const upMethod = activeReq.method;
         const ep = await serviceEndpoint();
         const headers = Service.headers(ep);
         const upstream: Response = await fetch(`${ep.url}${path}${url.search}`, {
-          method,
+          method: upMethod,
           // Abort the upstream request when the browser client goes away,
           // otherwise streamed responses (SSE) leak one connection per
           // client reconnect until the pool wedges and requests hang.
-          signal: req.signal,
+          signal: activeReq.signal,
           headers: {
             ...headers,
             // Forward only benign client headers. Service.headers must WIN —
@@ -563,7 +863,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
             // engine credential (e.g. its own `authorization`). Also drop
             // spoofable/transport headers the engine should never see.
             ...Object.fromEntries(
-              [...req.headers.entries()].filter(([k]) => {
+              [...activeReq.headers.entries()].filter(([k]) => {
                 const name = k.toLowerCase();
                 if (FORBIDDEN_CLIENT_HEADERS.has(name)) return false;
                 return (
@@ -578,7 +878,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
             // hops gain nothing from compression — never request it.
             "accept-encoding": "identity",
           },
-          body: ["GET", "HEAD"].includes(method) ? undefined : req.body,
+          body: ["GET", "HEAD"].includes(upMethod) ? undefined : activeReq.body,
           redirect: "manual",
         });
 
@@ -588,10 +888,14 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           responseHeaders.delete("content-encoding");
         }
         dbg("proxy:", method, path, "->", upstream.status, `${Date.now() - t0}ms`);
-        return new Response(upstream.body, {
-          status: upstream.status,
-          headers: responseHeaders,
-        });
+        // Proxy-stratum response middleware (spec §8): uniform rewriting.
+        return await applyExtResponseMiddleware(
+          new Response(upstream.body, {
+            status: upstream.status,
+            headers: responseHeaders,
+          }),
+          req,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error("[webui] proxy error:", message);
@@ -696,10 +1000,12 @@ console.log(
       ? `[webui] sandbox — loopback only, NO password; extensions (scratch): ${globalUserExtensionsDir()}`
       : `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
-    `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/main.tsx`,
+    `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/ (index.tsx + manifest.json)`,
     SKILL.ok
       ? `[webui] agent skill installed at ${SKILL.target} (auto-synced each boot)`
       : `[webui] agent skill NOT synced: ${SKILL.reason}`,
   ].join("\n"),
 );
 void startEventRecorder();
+startExtensionWatcher();
+void startExtModules();

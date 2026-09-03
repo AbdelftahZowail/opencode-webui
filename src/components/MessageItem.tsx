@@ -16,18 +16,21 @@ import { editAtMessage, forkAtMessage, useStore } from "../store";
 import { notify } from "../lib/notify";
 import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachments";
 import { formatModelRef } from "../lib/modelLabel";
-import { ToolCard } from "./ToolCard";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
 import { getPrefs, subscribePrefs } from "../prefs";
 import {
+  Target,
+  autoRegister,
+  getContributions,
   getHooks,
-  getMessageDecorations,
-  getMessagePartDecorations,
-  getMessageRenderer,
-  getContextMenus,
+  getService,
+  getTargetChain,
+  renderTarget,
   subscribeRegistry,
-  Slot,
+  type ContextMenuContribution,
+  type MessageDecorationContribution,
+  type MessagePartContribution,
 } from "../extensions/registry";
 import {
   ContextMenu,
@@ -96,7 +99,7 @@ function MessageContextMenu({
   children: ReactNode;
 }) {
   const version = useExtensionVersion();
-  const menus = useMemo(() => getContextMenus("message"), [version]);
+  const menus = useMemo(() => getContributions<ContextMenuContribution>("contextMenu.message"), [version]);
   const isUser = message.type === "user" && !message.id.startsWith("msg_local_");
   const hasBuiltIn = isUser && !!sessionID && sessionID !== "__draft__";
   if (menus.length === 0 && !hasBuiltIn) return <>{children}</>;
@@ -145,13 +148,13 @@ function MessageContextMenu({
             key={item.id}
             onSelect={() => {
               try {
-                item.run({ messageID });
+                item.item.run({ messageID });
               } catch (err) {
                 console.error(`[extensions] contextMenu "${item.id}" crashed:`, err);
               }
             }}
           >
-            {item.label}
+            {item.item.label}
           </ContextMenuItem>
         ))}
       </ContextMenuContent>
@@ -170,14 +173,14 @@ function PartDecorations({
   partIndex: number;
 }) {
   const version = useExtensionVersion();
-  const decorations = useMemo(() => getMessagePartDecorations(), [version]);
+  const decorations = useMemo(() => getContributions<MessagePartContribution>("message.part"), [version]);
   if (decorations.length === 0) return null;
   const nodes: ReactNode[] = [];
   for (let i = 0; i < decorations.length; i++) {
     const dec = decorations[i]!;
     let node: ReactNode = null;
     try {
-      node = dec.render({ messageID: message.id, message, part, partIndex });
+      node = dec.item.render({ messageID: message.id, message, part, partIndex });
     } catch (err) {
       console.error(`[extensions] message.part "${dec.id ?? i}" crashed:`, err);
     }
@@ -280,11 +283,13 @@ export function MessageItem({ message, compact = false, sessionID, isTail = fals
   const registryVersion = useRegistryVersion();
   // Memoized on the registry version only: decorations are a static list
   // per registration state; per-message work happens in the render calls.
-  const decorations = useMemo(() => getMessageDecorations(), [registryVersion]);
+  const decorations = useMemo(() => getContributions<MessageDecorationContribution>("message.decoration"), [registryVersion]);
 
-  // --- extension hook + message renderer (the "do everything" contract) ---
-  // `hook:message.render` runs first (observe/mutate), then `kind:"message"`
-  // can fully replace the body. Both are version-gated so HMR repaint works.
+  // --- extension hook + replace targets (the "do everything" contract) ---
+  // `hook:message.render` runs first (observe/mutate), then `replace` on
+  // `message:<type>` (exact) or `message:*` (any) can take over the body.
+  // First non-null wins; `null` falls through to the built-in body below.
+  // Both are version-gated so hot-swaps repaint.
   let effectiveMessage: MessageInfo = message;
   const hooks = useMemo(() => getHooks("message.render"), [registryVersion]);
   if (hooks.length > 0) {
@@ -299,37 +304,44 @@ export function MessageItem({ message, compact = false, sessionID, isTail = fals
     }
     effectiveMessage = ctx.message as MessageInfo;
   }
-  const customRenderer = useMemo(
-    () => getMessageRenderer(effectiveMessage.type as MessageInfo["type"]),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [registryVersion, effectiveMessage.type, effectiveMessage.id],
-  );
-  let body: ReactNode;
-  if (customRenderer) {
-    try {
-      const node = customRenderer.render({ message: effectiveMessage, sessionID });
-      body = node ?? renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
-    } catch (err) {
-      console.error(`[extensions] message "${customRenderer.id}" crashed:`, err);
-      body = renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
+  const messageTarget = useMemo(() => {
+    for (const id of [`message:${effectiveMessage.type}`, "message:*"]) {
+      const chain = getTargetChain(id);
+      if (chain.replaces.length > 0 || chain.wraps.length > 0) return id;
     }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registryVersion, effectiveMessage.type, effectiveMessage.id]);
+  const defaultBody = () => renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
+  let body: ReactNode;
+  if (messageTarget) {
+    // Crash-isolated inside renderTarget: a throwing replace falls through
+    // to the next candidate / core instead of blanking the row.
+    const node = renderTarget(messageTarget, { message: effectiveMessage, sessionID });
+    body = node ?? defaultBody();
   } else {
-    body = renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
+    body = defaultBody();
   }
 
   return (
     <MessageContextMenu message={effectiveMessage} sessionID={sessionID}>
-      <Slot region="message.before" messageID={effectiveMessage.id} />
+      {/* DOM-stratum anchor (spec §7): stable per-message boundary. The three
+          attributes travel together — presence, id, and type. */}
+      <div
+        data-oc-message
+        data-oc-message-id={effectiveMessage.id}
+        data-oc-message-type={effectiveMessage.type}
+      >
       <>{body}
       {/* Message decorations: a tiny inline row under the body. Guarded by
            a length check so zero registrations cost nothing; individual
-           renderers are crash-isolated like slot items. */}
+           renderers are crash-isolated like target items. */}
       {decorations.length > 0 && (
         <div className="mt-1 flex flex-wrap items-center gap-1">
           {decorations.map((decoration, i) => {
             let node: ReactNode = null;
             try {
-              node = decoration.render({ messageID: effectiveMessage.id, message: effectiveMessage });
+              node = decoration.item.render({ messageID: effectiveMessage.id, message: effectiveMessage });
             } catch (err) {
               console.error(`[extensions] message decoration "${decoration.id ?? i}" crashed:`, err);
             }
@@ -338,8 +350,8 @@ export function MessageItem({ message, compact = false, sessionID, isTail = fals
           })}
         </div>
       )}
-      <Slot region="message.after" messageID={effectiveMessage.id} />
       </>
+      </div>
     </MessageContextMenu>
   );
 }
@@ -363,7 +375,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
             {/* Hover actions — anchored to the whole row (group), not just the bubble, so moving the cursor to the buttons doesn't lose hover */}
             {canAct && (
               <div className="absolute top-1/2 right-full mr-3 hidden -translate-y-1/2 items-center gap-1.5 group-hover:flex">
-                <UserCopyButton text={(message as UserMessage).text ?? ""} />
+                <Target id="message.copyButton" text={(message as UserMessage).text ?? ""} variant="user" />
                 <button type="button" onClick={onEdit} title="Edit from here" className="flex size-7 cursor-pointer items-center justify-center rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm hover:text-[var(--text-strong)]">
                   <Pencil className="size-3.5" />
                 </button>
@@ -373,7 +385,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
               </div>
             )}
             <div className="flex items-center justify-end gap-1.5 text-xs text-[var(--text-weak)]">
-              <TimestampIfWanted time={message.time.created} />
+              <Target id="message.timestamp" time={message.time.created} />
               <User className="size-3.5" />
               You
             </div>
@@ -648,7 +660,15 @@ function FileChip({ name, mime }: { name?: string; mime?: string }) {
 function TimestampIfWanted({ time }: { time: number }) {
   const show = useTimestamps();
   if (!show) return null;
-  return <span className="font-mono text-[var(--text-weaker)]">{formatClock(time)}</span>;
+  // The format consults the "format.timestamp" service — a value override
+  // stays stale-proof where a forked component would rot.
+  const format = getService<(ms: number) => string>("format.timestamp") ?? formatClock;
+  return <span className="font-mono text-[var(--text-weaker)]">{format(time)}</span>;
+}
+
+/** Session cost badge, e.g. "$0.0234" — its own target per §5.3. */
+function CostBadge({ cost }: { cost: number }) {
+  return <span className="font-mono text-[var(--text-weaker)]">${cost.toFixed(4)}</span>;
 }
 
 /** Compact per-message usage next to the cost, e.g. "1.2k in / 3.4k out". */
@@ -799,13 +819,9 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
                 {formatModelRef(message.model)}
               </span>
             )}
-            {showTimestamps && (
-              <span className="font-mono text-[var(--text-weaker)]">{formatClock(message.time.created)}</span>
-            )}
-            {message.cost !== undefined && message.cost > 0 && (
-              <span className="font-mono text-[var(--text-weaker)]">${message.cost.toFixed(4)}</span>
-            )}
-            {message.tokens && <Tokens tokens={message.tokens} />}
+            {showTimestamps && <Target id="message.timestamp" time={message.time.created} />}
+            {message.cost !== undefined && message.cost > 0 && <Target id="message.cost" cost={message.cost} />}
+            {message.tokens && <Target id="message.tokens" tokens={message.tokens} />}
             {message.finish && message.finish !== "stop" && (
               <span className="rounded-sm border border-[var(--border-weak-base)] px-1 py-px font-mono text-[10px] text-[var(--text-weak)]">
                 {message.finish}
@@ -835,7 +851,7 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
         })()}
         {showCopy && copyText && (
           <div className="flex justify-start pt-1">
-            <AssistantCopyButton text={copyText} />
+            <Target id="message.copyButton" text={copyText} variant="assistant" />
           </div>
         )}
       </div>
@@ -851,7 +867,7 @@ export function MessagePart({
   stateKey?: string;
 }) {
   if (part.type === "reasoning") return <ReasoningBlock text={part.text} stateKey={stateKey} />;
-  if (part.type === "tool") return <ToolCard part={part} stateKey={stateKey} />;
+  if (part.type === "tool") return <Target id="tool.card" part={part} stateKey={stateKey} />;
   if (!part.text || !part.text.trim()) return null;
   return <Markdown text={part.text} />;
 }
@@ -972,3 +988,23 @@ function Row({ align = "left", children }: { align?: "left" | "right"; children:
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Self-registration (spec §5.3): every tweakable leaf is its own registered
+// unit with meaningful props. Parents stay core's — a wrap on one leaf
+// (e.g. the timestamp format) still receives maintainer redesigns of the
+// header, the token readout, and the cost badge around it.
+// ---------------------------------------------------------------------------
+autoRegister({
+  "message.timestamp": (p) => <TimestampIfWanted time={p.time as number} />,
+  "message.tokens": (p) => (
+    <Tokens tokens={p.tokens as NonNullable<AssistantMessage["tokens"]>} />
+  ),
+  "message.cost": (p) => <CostBadge cost={p.cost as number} />,
+  "message.copyButton": (p) =>
+    p.variant === "assistant" ? (
+      <AssistantCopyButton text={p.text as string} />
+    ) : (
+      <UserCopyButton text={p.text as string} />
+    ),
+});

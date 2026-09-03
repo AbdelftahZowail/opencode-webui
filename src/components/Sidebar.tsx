@@ -27,7 +27,7 @@ import { api } from "../api/client";
 import type { SessionInfo } from "../api/types";
 import { searchContent, type ContentHits, type MessageHit } from "../lib/searchIndex";
 import { SEARCH_KBD, IS_MAC } from "../lib/platform";
-import { Slot, getPages, getContextMenus, subscribeRegistry } from "../extensions/registry";
+import { Target, autoRegister, getContributions, subscribeRegistry, type ContextMenuContribution, type PageContribution } from "../extensions/registry";
 import { timeAgo } from "./ui";
 import {
   ContextMenu,
@@ -87,7 +87,7 @@ function useSidebarExtVersion(): number {
 
 function SessionContextMenu({ sessionID, children }: { sessionID: string; children: ReactNode }) {
   const version = useSidebarExtVersion();
-  const menus = useMemo(() => getContextMenus("session"), [version]);
+  const menus = useMemo(() => getContributions<ContextMenuContribution>("contextMenu.session"), [version]);
   if (menus.length === 0) return <>{children}</>;
   return (
     <ContextMenu>
@@ -98,13 +98,13 @@ function SessionContextMenu({ sessionID, children }: { sessionID: string; childr
             key={item.id}
             onSelect={() => {
               try {
-                item.run({ sessionID });
+                item.item.run({ sessionID });
               } catch (err) {
                 console.error(`[extensions] contextMenu "${item.id}" crashed:`, err);
               }
             }}
           >
-            {item.label}
+            {item.item.label}
           </ContextMenuItem>
         ))}
       </ContextMenuContent>
@@ -389,6 +389,7 @@ export function Sidebar() {
   return (
     <aside
       ref={sidebarRef}
+      data-oc-sidebar
       className={`relative flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-border bg-background ${resizing ? "select-none" : ""}`}
       style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
     >
@@ -471,8 +472,9 @@ export function Sidebar() {
                     const collapsed = collapsedHits.has(s.id);
                     return (
                       <div key={s.id} className="mb-1">
-                        <SessionRow
-                          id={s.id}
+                        <Target
+                          id="sidebar.sessionRow"
+                          sessionID={s.id}
                           title={s.title ?? "Untitled session"}
                           updated={s.time.updated}
                           active={activeIDs.includes(s.id)}
@@ -593,8 +595,9 @@ export function Sidebar() {
                       const showHits = hits.length > 0 && trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH;
                       return (
                         <div key={s.id} className="mb-0.5">
-                          <SessionRow
-                            id={s.id}
+                          <Target
+                            id="sidebar.sessionRow"
+                            sessionID={s.id}
                             title={s.title ?? "Untitled session"}
                             updated={s.time.updated}
                             active={active}
@@ -679,7 +682,6 @@ export function Sidebar() {
           </button>
         </div>
       )}
-      <Slot region="sidebar" />
       <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} />
       <SettingsDialog />
       {!sidebarCollapsed && (
@@ -849,7 +851,7 @@ function useRegistryVersion(): number {
 /** One extension page as a footer link: "/ext/{id}", tooltip = title/description. */
 function ExtensionPagesNav() {
   const registryVersion = useRegistryVersion();
-  const pages = useMemo(() => getPages(), [registryVersion]);
+  const pages = useMemo(() => getContributions<PageContribution>("pages"), [registryVersion]);
   if (pages.length === 0) return null;
   return (
     <>
@@ -857,7 +859,7 @@ function ExtensionPagesNav() {
         <a
           key={page.id}
           href={`/ext/${page.id}`}
-          title={page.description ? `${page.title} — ${page.description}` : page.title}
+          title={page.item.description ? `${page.item.title} — ${page.item.description}` : page.item.title}
           onClick={(event) => {
             // Unmodified left-clicks stay in-app (pushState, no reload);
             // modified clicks / middle clicks keep the native anchor behavior.
@@ -869,7 +871,7 @@ function ExtensionPagesNav() {
           className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground"
         >
           <Puzzle className="size-3" />
-          {page.title}
+          {page.item.title}
         </a>
       ))}
     </>
@@ -914,15 +916,7 @@ function handleSessionLinkClick(event: MouseEvent<HTMLAnchorElement>, onSelect: 
   void onSelect();
 }
 
-function SessionRow({
-  id,
-  title,
-  updated,
-  active,
-  selected,
-  subagentsActive,
-  onSelect,
-}: {
+export interface SessionRowProps {
   id: string;
   title: string;
   updated: number;
@@ -931,12 +925,21 @@ function SessionRow({
   /** A subagent child of this session is currently running/queued. */
   subagentsActive: boolean;
   onSelect: () => void;
-}) {
+}
+
+function SessionRow({
+  id,
+  title,
+  updated,
+  active,
+  selected,
+  subagentsActive,
+  onSelect,
+}: SessionRowProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
     <SessionContextMenu sessionID={id}>
-      <Slot region="sidebar.session.before" sessionID={id} />
       <div className="group relative mb-0.5 w-full min-w-0 max-w-full">
         {/* Hover/focus warms the transcript cache so the click paints instantly. */}
         <a
@@ -1004,7 +1007,27 @@ function SessionRow({
         )}
       </div>
     </div>
-      <Slot region="sidebar.session.after" sessionID={id} />
     </SessionContextMenu>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Self-registration (spec §5.3): the sidebar shell plus every session row is
+// its own registered unit. Rows take `sessionID` (not `id` — that name is
+// the target id on <Target>) alongside the row's own meaningful props.
+// ---------------------------------------------------------------------------
+
+autoRegister({
+  sidebar: (_p) => <Sidebar />,
+  "sidebar.sessionRow": (p) => (
+    <SessionRow
+      id={p.sessionID as string}
+      title={p.title as string}
+      updated={p.updated as number}
+      active={p.active as boolean}
+      selected={p.selected as boolean}
+      subagentsActive={p.subagentsActive as boolean}
+      onSelect={p.onSelect as () => void}
+    />
+  ),
+});

@@ -1,35 +1,33 @@
-import * as React from "react";
-import * as ReactJSXRuntime from "react/jsx-runtime";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
-import { startStore, useStore } from "./store";
-import "../ui-extensions";
+import { startStore } from "./store";
+import "../webui-extensions";
+// Core targets must EXECUTE before any <Target> renders: autoRegister calls
+// live inside the component modules, and nothing else imports them (App only
+// references them by target id). Without these side-effect imports every
+// Target resolves to null — blank sidebar, blank transcript. Keep this list
+// next to the modules; the registry warns at boot for targets with no core.
+import "./components/Sidebar";
+import "./components/Conversation";
+import "./components/Composer";
+import "./components/MessageItem";
+import "./components/ToolCard";
 import { log } from "./lib/log";
-import { register, getHooks } from "./extensions/registry";
-import { api } from "./api/client";
+import { installExtensionBridge } from "./lib/extensionApi";
 import { startRuntimeExtensions } from "./lib/runtimeExtensions";
-import { notify } from "./lib/notify";
 
 const DEBUG_CONSOLE = typeof localStorage !== "undefined" && localStorage.getItem("webui.debug") === "1";
 (window as unknown as { __WEBUI_DEBUG_CONSOLE__?: boolean }).__WEBUI_DEBUG_CONSOLE__ = DEBUG_CONSOLE;
 
-// Runtime extension bridge: plugin-shipped UI bundles (loaded lazily by
-// lib/runtimeExtensions) reach the app ONLY through this object — it is the
-// versioned public API surface for runtime extensions. Bundles carry their
-// OWN React copies (bundled server-side), so these refs are for THEIR use.
-(window as unknown as Record<string, unknown>).__opencodeUI = {
-  version: 1,
-  register,
-  react: React,
-  jsxRuntime: ReactJSXRuntime,
-  useStore,
-  api,
-  notify,
-  getHooks,
-};
+// Runtime extension bridge: the ONE extension API surface (spec §10 —
+// register, react, api, store, prefs, notify, services, dom kit, kv),
+// shared identically by external bundles (via window.__opencodeUI) and our
+// shipped extensions (via getExtensionApi()). Installed before the loader
+// starts so the object always exists when a bundle executes.
+installExtensionBridge();
 
 startRuntimeExtensions();
 

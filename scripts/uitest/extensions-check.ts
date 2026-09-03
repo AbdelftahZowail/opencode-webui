@@ -9,28 +9,25 @@
  * drives headless Chrome over CDP, and walks the registry contract end to
  * end — no mocks, the same files a human would drop:
  *
- *   A  hot ADD    drop ui-extensions/zz-contract-check/ into the live tree →
- *                 the footer Slot renders its marker, `registered` flips, and
+ *   A  hot ADD    drop webui-extensions/zz-contract-check/ into the live tree →
+ *                 the sidebar wrap renders its marker, `registered` flips, and
  *                 NO page reload happened (sentinel + bootId prove it).
  *   B  hot EDIT   rewrite the entry (v2, edits:1) → same-id registry swap,
- *                 slots repaint, STILL no reload.
- *   C  REMOVE     delete the folder → its registrations vanish — via the
- *                 documented coalesced full reload, or (Vite 8's observed
- *                 norm) a registry prune at the HMR boundary with NO reload.
- *                 Both mechanisms satisfy the removal contract; the report
- *                 names which one fired.
+ *                 targets repaint, STILL no reload.
+ *   C  REMOVE     delete the folder → its registrations vanish via the
+ *                 loader's owned-set unregister at the HMR boundary, with NO
+ *                 reload. The report names the cleanup path if a coalesced
+ *                 full reload ever fires instead.
  *   D  runtime    the /api/webui/extensions* surface + the
  *                 ~/.config/opencode/webui-extensions/ user-dir pipeline.
  *
  * Findings baked into the flow (re-verify before "fixing" the script):
- *  - Gating: registration is ungated but RENDERING is per-id gated by
- *    `enabled` in ui-extensions/config.ts (ancestry-aware). The script
- *    appends "zz-contract-check" BEFORE the dev servers start (a config flip
- *    reloads the page by design, so it must not land mid-check) and restores
- *    the exact original bytes in cleanup.
+ *  - Gating: presence = installed, manifest `disabled` = paused — there is
+ *    no config list and no per-browser gating, so phases A/B measure the
+ *    folder add/edit lifecycle reload-free with zero setup edits.
  *  - Auth: server/auth.ts gates every /api route behind a session cookie
  *    (POST /api/auth/login). The SPA itself is served by VITE unauthenticated
- *    and the app shell (footer Slot included) mounts fine with /api 401-ing —
+ *    and the app shell mounts fine unauthenticated —
  *    so phases A–C run without login; the script-side /api probes log in
  *    with WEBUI_PASSWORD (the instance is ours: the env var if provided,
  *    else a random one) and carry the cookie. If login is somehow impossible
@@ -44,21 +41,20 @@
  *    a proxy surface, and bundle EXECUTION in a page is the runtime loader's
  *    job (src/lib/runtimeExtensions.ts).
  *
- * Cleanup is unconditional (finally): temp files/dirs removed, config bytes
- * restored, both child trees killed by PID (SIGTERM → SIGKILL), ports
- * re-checked. The transient file edits DO hot-reload any open dev instance
- * watching this repo — that is inherent to testing the real HMR path.
+ * Cleanup is unconditional (finally): temp files/dirs removed, both child
+ * trees killed by PID (SIGTERM → SIGKILL), ports re-checked. The transient
+ * file edits DO hot-reload any open dev instance watching this repo — that
+ * is inherent to testing the real HMR path.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EXT_ID = "zz-contract-check";
-const EXT_DIR = join(ROOT, "ui-extensions", EXT_ID);
+const EXT_DIR = join(ROOT, "webui-extensions", EXT_ID);
 const EXT_FILE = join(EXT_DIR, "index.tsx");
-const CONFIG_FILE = join(ROOT, "ui-extensions", "config.ts");
 const USER_DIR = join(homedir(), ".config", "opencode", "webui-extensions", EXT_ID);
 const USER_FILE = join(USER_DIR, "main.tsx");
 const USER_REG_ID = "zz-user-check";
@@ -388,18 +384,20 @@ function extSource(marker: "v1" | "v2"): string {
 
 export const id = "${EXT_ID}";
 
+// A wrap on the always-mounted sidebar shell: the marker div proves the
+// target chain evaluates live registrations without any page reload.
 register({
-  kind: "region",
+  kind: "wrap",
   id,
-  region: "footer",
-  render: () => <div data-contract-check="${marker}">CONTRACT_CHECK_${marker.toUpperCase()}</div>,
+  target: "sidebar",
+  render: (_props, next) => <><div data-contract-check="${marker}">CONTRACT_CHECK_${marker.toUpperCase()}</div>{next()}</>,
 });
 
 register({
-  kind: "command",
+  kind: "contribute",
   id: "${EXT_ID}.cmd",
-  title: "Contract check",
-  run: () => {},
+  collection: "palette",
+  item: { title: "Contract check", run: () => {} },
 });
 
 // Lifecycle probe: bootId survives hot-swaps (module re-run in the same
@@ -422,41 +420,9 @@ function userExtSource(): string {
   return `// Throwaway contract-check runtime extension (owned by extensions-check.ts).
 const ui = (window as unknown as { __opencodeUI?: { register?: (ext: unknown) => void } }).__opencodeUI;
 if (ui && typeof ui.register === "function") {
-  ui.register({ kind: "region", id: "${USER_REG_ID}", region: "footer", render: () => null });
+  ui.register({ kind: "contribute", id: "${USER_REG_ID}", collection: "palette", item: { title: "Contract check", run: () => {} } });
 }
 `;
-}
-
-// ---------------------------------------------------------------------------
-// config.ts transient gating edit (exact-bytes restore)
-// ---------------------------------------------------------------------------
-
-let configOriginal: string | null = null;
-
-function enableInConfig(): void {
-  let original = readFileSync(CONFIG_FILE, "utf8");
-  if (original.includes(`"${EXT_ID}"`)) {
-    // Self-heal a leftover from a crashed earlier run of THIS script.
-    original = original
-      .replaceAll(`"${EXT_ID}", `, "")
-      .replaceAll(`"${EXT_ID}"`, "")
-      .replace(/,\s*(\])/s, "\n$1");
-    console.error(`[extensions-check] removed leftover "${EXT_ID}" from config.ts (previous crashed run?)`);
-  }
-  const m = original.match(/export\s+const\s+enabled[^=]*=\s*\[/s);
-  if (!m) throw new Error(`config.ts: could not locate the \`enabled[]\` literal — gating edit aborted`);
-  configOriginal = original;
-  writeFileSync(CONFIG_FILE, original.replace(m[0], `${m[0]}"${EXT_ID}", `));
-}
-
-function restoreConfig(): void {
-  if (configOriginal === null) return;
-  try {
-    writeFileSync(CONFIG_FILE, configOriginal);
-  } catch (err) {
-    console.error("[extensions-check] FAILED to restore config.ts:", err);
-  }
-  configOriginal = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,7 +454,6 @@ async function cleanup(): Promise<void> {
       if (pidAlive(pid)) signal(pid, "SIGKILL");
     }
   }
-  restoreConfig();
   for (const dir of [EXT_DIR, USER_DIR]) {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -657,8 +622,8 @@ async function main(): Promise<void> {
     });
   }
 
-  // --- Setup: ports, gating edit (pre-launch — a config flip reloads by
-  // design and must not land mid-check), isolated dev instance. ---
+  // --- Setup: ports, isolated dev instance (no gating edits exist — folder
+  // presence IS installed, so nothing must land pre-launch). ---
   const t0 = Date.now();
   const vitePort = freePort();
   const proxyPort = freePort();
@@ -668,8 +633,6 @@ async function main(): Promise<void> {
   // Our instance, our password: honors a caller-provided WEBUI_PASSWORD,
   // otherwise mints one — so the script-side /api probes can always log in.
   const proxyPassword = process.env.WEBUI_PASSWORD || `extcheck-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-
-  enableInConfig();
 
   devProc = Bun.spawn({
     cmd: ["bun", "run", "scripts/dev.ts"],
@@ -859,7 +822,7 @@ async function main(): Promise<void> {
         status: typeof bootId === "number" ? "PASS" : "FAIL",
         detail:
           typeof bootId === "number"
-            ? `footer Slot renders CONTRACT_CHECK_V1 · registered · bootId captured — sentinel intact → zero reloads`
+            ? `sidebar wrap renders CONTRACT_CHECK_V1 · registered · bootId captured — sentinel intact → zero reloads`
             : `bootId not a number: ${String(bootId)}`,
         secs: Date.now() - t1,
       });
@@ -928,10 +891,11 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Phase C: REMOVE (marker must vanish; cleanup arrives either via the
-  // documented coalesced full reload OR via a registry prune at the HMR
-  // boundary — Vite 8 accepts the deletion at ui-extensions/index.ts, so the
-  // prune path is the observed norm; both satisfy the removal contract) ---
+  // --- Phase C: REMOVE (marker must vanish; cleanup arrives via the
+  // loader's owned-set unregister at the HMR boundary — Vite accepts the
+  // deletion at webui-extensions/index.ts, so the no-reload prune path is
+  // the observed norm; a coalesced full reload would also satisfy the
+  // removal contract and the report below names which one fired) ---
   if (rows.find((r) => r.label === "B  edit hot-swap (no reload)")?.status === "PASS" && cdp) {
     const t1 = Date.now();
     rmSync(EXT_DIR, { recursive: true, force: true });
@@ -1012,9 +976,9 @@ function report(): void {
   const skip = rows.filter((r) => r.status === "SKIP").length;
   console.log(`\nRESULT: ${pass} pass · ${fail} fail · ${skip} skip → exit ${fail > 0 ? 1 : 0}`);
   console.log(
-    "Notes: rendering is gated by ui-extensions/config.ts `enabled` (ancestry-aware); this check appends " +
-      `"${EXT_ID}" pre-launch and restores the original bytes in cleanup. A config flip reloads by design, ` +
-      "so phases A/B measure the folder add/edit lifecycle reload-free.",
+    "Notes: gating is folder presence (no config list); phases A/B measure " +
+      "the folder add/edit lifecycle reload-free, phase C the owned-set " +
+      "unregister on folder delete.",
   );
 }
 

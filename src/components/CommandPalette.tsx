@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette, Puzzle } from "lucide-react";
-import { getCommands } from "../extensions/registry";
+import { getContributions, type PaletteContribution } from "../extensions/registry";
 import {
   commandMove,
   commandSelectActive,
@@ -82,11 +82,8 @@ export function CommandPalette() {
 
   // Extension commands are read at render time (re-read on every palette
   // open); no subscription/polling — a mid-open registry change self-corrects
-  // on the next open. The typeof guard rides out HMR ordering while the
-  // registry module is being reworked.
-  const extensionCommands = (
-    typeof getCommands === "function" ? getCommands() : []
-  ) as unknown as Array<{ id: string; title: string; run: (ctx: { sessionID?: string }) => void; keybind?: string }>;
+  // on the next open.
+  const extensionCommands = getContributions<PaletteContribution>("palette");
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
@@ -161,24 +158,24 @@ export function CommandPalette() {
             <CommandSeparator />
             <CommandGroup heading="Extension commands">
               {extensionCommands.map((c) => {
-                const kb = (c as { keybind?: string }).keybind;
+                const kb = c.item.keybind;
                 return (
                   <CommandItem
                     key={c.id}
                     // Explicit value so the query matches BOTH title and id
                     // (text content alone only carries the title).
-                    value={`${c.title} ${c.id} ${kb ?? ""}`}
+                    value={`${c.item.title} ${c.id} ${kb ?? ""}`}
                     onSelect={() => {
                       setOpen(false);
                       try {
-                        c.run({ sessionID: currentSessionID ?? undefined });
+                        c.item.run({ sessionID: currentSessionID ?? undefined });
                       } catch (err) {
                         console.error("[extensions] command failed:", err);
                       }
                     }}
                   >
                     <Puzzle />
-                    <span className="truncate">{c.title}</span>
+                    <span className="truncate">{c.item.title}</span>
                     {kb ? <CommandShortcut>{kb}</CommandShortcut> : null}
                   </CommandItem>
                 );

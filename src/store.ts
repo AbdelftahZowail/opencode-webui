@@ -12,6 +12,7 @@ import {
   type PromptFile,
 } from "./api/client";
 import { connectEvents, sseStale, type V2Event } from "./api/events";
+import { fireHooks } from "./extensions/hooks";
 import { log } from "./lib/log";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import type {
@@ -440,6 +441,10 @@ let stateBatchPending = false;
 
 function setState(patch: Partial<State>) {
   state = { ...state, ...patch };
+  // Store middleware (spec §5.1 + §11 step 2): every action flows through
+  // here, so `store.dispatch` hooks observe every mutation. Fire-and-forget —
+  // setState stays synchronous; handlers are crash-isolated in fireHooks.
+  void fireHooks("store.dispatch", { patch, state });
   if (stateBatchDepth > 0) {
     stateBatchPending = true;
     return;
@@ -2915,6 +2920,9 @@ export async function selectSession(
     // Surface undelivered busy-sends immediately (items queued from
     // InboxPanel/another tab) instead of waiting for the next poll tick.
     void reconcileInbox(sessionID).catch(() => undefined);
+    // Lifecycle hook (spec §5.1): the session is now adopted by the routed
+    // surface — history loaded, replay pulled.
+    void fireHooks("session.adopted", { sessionID });
   } else if (state.draftWorkspace !== null) {
     setState({ draftWorkspace: null });
   }
@@ -3013,6 +3021,9 @@ async function adoptFocusedSession(sessionID: string | null) {
     await loadMessages(sessionID);
     void reconcileInbox(sessionID).catch(() => undefined);
   }
+  // Lifecycle hook (spec §5.1): pane focus re-pointed the global machinery
+  // at this session without touching history/drafts/pane bindings.
+  void fireHooks("session.adopted", { sessionID });
 }
 
 /** Move focus to a pane; its session becomes the globally-active one. */
@@ -3022,6 +3033,9 @@ export async function focusPane(paneID: string) {
   if (state.focusedPane === paneID) return;
   log("pane", `focus ${paneID}`);
   setState({ focusedPane: paneID });
+  // Lifecycle hook (spec §5.1): pane focus — fired before the session adopt
+  // below so observers see focus first, adopt second.
+  void fireHooks("pane.focused", { paneID, sessionID: pane.sessionID });
   await adoptFocusedSession(pane.sessionID);
 }
 
@@ -3168,10 +3182,24 @@ export async function sendPromptTo(
     "send",
     `prompt ${sessionID}: ${text.slice(0, 80)}${opts?.delivery ? ` (${opts.delivery})` : ""}`,
   );
+  // Interception hook (spec §5.1): `session.prompt` handlers may rewrite
+  // ctx.text / ctx.delivery before the prompt goes out. Awaited — the send
+  // below reads the (possibly mutated) ctx.
+  const promptCtx: Record<string, unknown> = {
+    sessionID,
+    text,
+    ...(opts?.delivery ? { delivery: opts.delivery } : {}),
+  };
+  await fireHooks("session.prompt", promptCtx);
+  text = typeof promptCtx.text === "string" ? promptCtx.text : text;
+  const delivery =
+    promptCtx.delivery === "steer" || promptCtx.delivery === "queue"
+      ? promptCtx.delivery
+      : opts?.delivery;
   await ensureSessionModel(sessionID);
   if (!isDraftSession(sessionID) && sessionBusy(sessionID)) {
     commitRevertOptimistically(sessionID);
-    await admitWhileBusy(sessionID, text, opts?.delivery);
+    await admitWhileBusy(sessionID, text, delivery);
     return;
   }
   commitRevertOptimistically(sessionID);

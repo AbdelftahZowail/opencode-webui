@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 import { fileURLToPath } from "node:url";
 /**
- * Regenerates skills/webui/SKILL.md from ui-extensions/README.md.
+ * Regenerates skills/webui/SKILL.md from webui-extensions/README.md.
  *
  * The skill IS the agent-context injection: its frontmatter description is
  * always visible to every opencode agent (bodies load on demand), so the
  * description makes agents aware of the webui without bloat. The extension
- * tables in the body are EXTRACTED from ui-extensions/README.md so they can
+ * tables in the body are EXTRACTED from webui-extensions/README.md so they can
  * never drift from the authoring guide.
  *
  * Deterministic: extraction follows source document order, output has no
@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const SOURCE = join(ROOT, "ui-extensions", "README.md");
+const SOURCE = join(ROOT, "webui-extensions", "README.md");
 const TARGET = join(ROOT, "skills", "webui", "SKILL.md");
 const PKG = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { version: string };
 const VERSION = PKG.version;
@@ -36,7 +36,7 @@ const DESCRIPTION =
   "opencode-webui — the browser frontend for the OpenCode engine. Load when the user mentions the webui/web frontend, asks about webui extensions, or wants to report a webui bug (/report does it).";
 
 // ---------------------------------------------------------------------------
-// Extraction helpers (ui-extensions/README.md is the single source of truth)
+// Extraction helpers (webui-extensions/README.md is the single source of truth)
 // ---------------------------------------------------------------------------
 
 /** A markdown table: the line matching `header`, then every `|`-led line after. */
@@ -54,52 +54,22 @@ function extractTable(src: string, header: RegExp, label: string): string {
   return rows.join("\n");
 }
 
-/** Content between two literal markers (the regions:auto block), trimmed. */
-function extractBetween(src: string, startMarker: string, endMarker: string, label: string): string {
-  const start = src.indexOf(startMarker);
-  const end = src.indexOf(endMarker);
-  if (start < 0 || end < 0 || end < start)
-    throw new Error(`gen-skill: ${label} markers not found in ${SOURCE}`);
-  return src.slice(start + startMarker.length, end).trim();
-}
-
-/** A `## …` section's content (heading excluded) up to the next `## ` heading. */
-function extractSection(src: string, heading: string, label: string): string {
-  const lines = src.split("\n");
-  const start = lines.findIndex((l) => l.trim() === heading);
-  if (start < 0) throw new Error(`gen-skill: ${label} section not found in ${SOURCE}`);
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("## ")) {
-      end = i;
-      break;
-    }
-  }
-  return lines.slice(start + 1, end).join("\n").trim(); // +1: drop the heading itself
-}
-
 const readme = readFileSync(SOURCE, "utf8");
 
 const kindTable = extractTable(
   readme,
-  /^\| Kind \| What it does \|/,
-  "kind contract",
+  /^\| Kind \| Job \|/,
+  "five kinds",
 );
 const hookTable = extractTable(
   readme,
   /^\| Event \| `?ctx.*shape.*\|/i,
-  "hook events",
+  "hook catalog",
 );
-const regionTable = extractBetween(
+const anchorTable = extractTable(
   readme,
-  "<!-- regions:auto:start -->",
-  "<!-- regions:auto:end -->",
-  "regions",
-);
-const addRemoveDisable = extractSection(
-  readme,
-  "## Add / remove / disable",
-  "add/remove/disable",
+  /^\| Anchor \| Site \|/,
+  "DOM anchors",
 );
 
 // ---------------------------------------------------------------------------
@@ -130,11 +100,12 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| ${RAW("ui-extensions/README.md")} | Full authoring guide — the source of truth for kinds/hooks/regions |
-| ${RAW("src/extensions/registry.tsx")} | The slot registry — exact register() shapes per kind |
-| ${RAW("src/components/Composer.tsx")} | Where slash entries / prompt hooks / composer regions live |
-| ${RAW("src/components/MessageItem.tsx")} | Where message/message.decoration/message.part render |
-| ${RAW("src/lib/composerHandoff.ts")} | Type-anywhere → composer behavior (if your extension competes for keys) |
+| ${RAW("webui-extensions/README.md")} | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| ${RAW("src/extensions/registry.tsx")} | The extension registry — exact register() shapes per kind |
+| ${RAW("src/extensions/hooks.ts")} | Shared fireHooks runner — how open hook events fire |
+| ${RAW("src/lib/domKit.ts")} | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| ${RAW("server/ext/types.ts")} | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| ${RAW("docs/extension-system-spec.md")} | The v2 decision record — strata, precedence, deletions, acceptance checks |
 | ${RAW("src/store.ts")} | The store — actions useStore exposes to extensions |
 
 ## Environment
@@ -144,8 +115,21 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | \`WEBUI_PASSWORD\` | generated on first boot, printed once | Shared login passphrase. |
 | \`WEBUI_HOST\` | \`127.0.0.1\` | Bind address — a wildcard is refused without a password. |
 | \`WEBUI_PROXY_PORT\` | \`4097\` | Port for the UI and \`/api/*\`. |
+| \`WEBUI_EXTENSION_DIR\` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
 | \`WEBUI_DEBUG\` | unset | \`1\` — server/proxy debug logs to stdout. |
 | \`WEBUI_DEBUG_LOG\` | \`/tmp/webui-debug.log\` | File the frontend log sink (\`POST /api/debug\`) appends to. |
+
+### Parallel sandboxes (one per extension under test)
+
+One command, no flags: \`bun run sandbox\` detects a running sandbox and
+auto-isolates. Alone it uses the fixed defaults (\`:4099\`/\`:5175\` + shared
+scratch dir); when another sandbox already holds those ports, the new
+instance takes free ports + a fresh mkdtemp extension dir and prints what
+it picked. Explicit env (\`WEBUI_PROXY_PORT\` / \`WEBUI_VITE_PORT\` /
+\`WEBUI_EXTENSION_DIR\`) always wins per knob. The engine stays shared
+(same sessions everywhere, by design) — only ports + extension dirs are
+isolated. Rules: one sandbox per extension, never two writers to one ext
+dir, never reuse a port.
 
 ## What you can do for the user
 
@@ -154,75 +138,94 @@ fetch the exact file at the pinned tag instead of reading a local clone:
   ring) into a prefilled GitHub issue for AbdelftahZowail/opencode-webui (see
   Reporting bugs below).
 - **Explain the extension system** from the tables below — they are extracted
-  verbatim from the authoring guide (\`ui-extensions/README.md\`), which is the
+  verbatim from the authoring guide (\`webui-extensions/README.md\`), which is the
   source of truth.
-- **Author a user-dir extension** for the user — a folder, no build step, no
-  restart.
+- **Author an extension folder** for the user — one folder, no build step, no
+  restart. Pick the stratum that matches the job (React tree → browser,
+  portals/canvas/post-render → dom.ts, headless/always-on → server.ts,
+  model tools → engine/).
 
-### Dev extensions vs user extensions (two homes, one contract)
+## The model in one minute
 
-| | Dev (app repo) | User (any machine) |
-| --- | --- | --- |
-| Where | \`ui-extensions/<name>/\` in the webui checkout | \`~/.config/opencode/webui-extensions/<name>/main.tsx\` (per-user) or \`<project>/.opencode/webui-extensions/<name>/main.tsx\` (per-project) |
-| How it loads | Bundled into the app build, listed in \`ui-extensions/index.ts\` | The proxy bundles it on the fly; page picks it up within ~8s |
-| On/off | \`enabled\` list in \`ui-extensions/config.ts\` | Settings › Extensions toggle |
-| API surface | Full app internals (imports, \`useStore\`, \`api\`) | ONLY the \`window.__opencodeUI\` bridge (\`register\`, \`react\`, \`useStore\`, \`api\`, \`notify\`, \`getHooks\`, \`version\`) |
+One extension = **one folder**: \`manifest.json\` (id, version, description,
+\`disabled\`?) + \`index.tsx\` (browser stratum) + \`dom.ts\` (DOM stratum) +
+\`server.ts\` (proxy stratum) + \`engine/\` (opencode plugin payload).
+Presence = installed; \`disabled: true\` = paused; delete the folder =
+uninstalled. Precedence, highest wins: \`~/.config/opencode/webui-extensions/\`
+(user) → \`<project>/.opencode/webui-extensions/\` (project) → shipped
+\`webui-extensions/\` (ours). Dropping a folder in the extension dir is an
+act of trust — extension code is not sandboxed.
 
-Authoring rules (kinds, hook events) are identical in both homes — the tables
-below apply to each.
+### Add / pause / remove
 
-### Minimal user-dir extension
+| Action | How |
+| --- | --- |
+| Add | Create \`webui-extensions/<name>/\` with \`manifest.json\` + \`index.tsx\` calling \`register({ kind, ... })\`. Loads without rebuild/refresh/restart (manifest SSE push, same-id swap). |
+| Pause | Set \`"disabled": true\` in its \`manifest.json\` — gone on the next manifest push. |
+| Remove | Delete/move the folder — the id vanishes from the manifest. |
+| Shadow | Same id at higher precedence wins; core updates still flow everywhere else. |
 
-Drop a folder — \`~/.config/opencode/webui-extensions/<name>/main.tsx\`
-(per-user) or \`<project>/.opencode/webui-extensions/<name>/main.tsx\`
-(per-project). The proxy bundles it and the page loads it within a poll cycle
-\`~8s\` — see the dev-vs-user split above). Runtime extensions reach
-the app ONLY through the \`window.__opencodeUI\` bridge (\`register\`,
-\`react\`, \`useStore\`, \`api\`, \`notify\`, \`getHooks\`, \`version\`):
+Authoring rules (kinds, hook events) are identical in every source — the
+tables below apply to each. Full hot-reload guarantees and the timestamp
+worked example are in the authoring guide.
+
+### Minimal extension (wrap — the default path for edits)
 
 \`\`\`tsx
-// ~/.config/opencode/webui-extensions/hello/main.tsx
-const { register, react } = window.__opencodeUI;
+// ~/.config/opencode/webui-extensions/my-time/{manifest.json,index.tsx}
+import { register } from "opencode-webui/extensions"; // shipped dirs import from src; external dirs use the extension API surface
 
 register({
-  kind: "region",
-  id: "hello",
-  region: "footer",
-  render: () => react.createElement("span", null, "hello from a user extension"),
+  kind: "wrap",
+  id: "my-time",
+  target: "Timestamp",
+  render: (props, next) => <span className="tabular-nums">{next()}</span>,
 });
 \`\`\`
 
+## Five kinds, one job each (the contract)
+
+${kindTable}
+
+Contribute collections (registry-owned lists — data, not new kinds):
+\`palette\`, \`slash\` (UI-only; engine commands win name clashes),
+\`pages\` (routed at \`/ext/{id}\`), \`settings\`,
+\`contextMenu.message\` / \`contextMenu.session\` / \`contextMenu.file\`.
+
+### Hook catalog
+
+${hookTable}
+
+Browser hooks affect only their own browser — transforms affecting *all*
+clients go in proxy \`server.ts\` middleware. Proxy mounts (\`server/ext/\`):
+\`routes\` at \`/api/webui/ext/<id>/…\`, \`middleware\` over \`/api/*\`,
+\`onEvent\` tap (works with all tabs closed), \`pollers\`, per-extension KV.
+
+## DOM anchors (the free layer)
+
+\`dom.ts\` + the kit (\`foreign\`/\`watch\`/\`styles\`, mount/dispose) covers
+what the React tree cannot: mid-component DOM, portals, canvas/xterm,
+iframes. Stable anchors below are contract — renaming one is a version bump
++ migration note. DOM is the marked last resort ("outside the contract; you
+own the fragility").
+
+${anchorTable}
+
 ## Sandbox (iterate without touching the user's webui)
 
-A second, private instance for authoring/testing user extensions — no repo
+A second, private instance for authoring/testing extensions — no repo
 needed. Start it the same way the package runs, plus \`sandbox\`:
 \`bunx opencode-webui sandbox\` (or \`./opencode-webui-<target> sandbox\`).
 It binds \`127.0.0.1:4099\` — loopback-only, NO password (a non-loopback
 sandbox is refused) — and loads extensions from an ISOLATED scratch dir
-(\`~/.local/state/opencode-webui/sandbox-extensions/<name>/main.tsx\`), so WIP
+(\`~/.local/state/opencode-webui/sandbox-extensions/<name>/\`), so WIP
 is invisible to the user's main instance. Same engine, same sessions as the
-main instance. Workflow: write the extension in the scratch dir → watch it
-load in the sandbox within its poll cycle (~8s) → fix until right → then copy
-the folder into \`~/.config/opencode/webui-extensions/<name>/\` to ship it to
-the user (or \`<project>/.opencode/webui-extensions/<name>/\` for one project).
-Do not write user extensions directly into the real dirs while iterating —
-that exposes WIP to the user's browser immediately.
-
-## Extension kinds (the contract)
-
-${kindTable}
-
-### Hook events
-
-${hookTable}
-
-## Regions (render points)
-
-${regionTable}
-
-## Add / remove / disable (app repo)
-
-${addRemoveDisable}
+main instance. Workflow: write the extension folder in the scratch dir →
+watch it load in the sandbox via the manifest push (sub-second) → fix until
+right → then copy the folder into \`~/.config/opencode/webui-extensions/<name>/\`
+to ship it to the user (or \`<project>/.opencode/webui-extensions/<name>/\`
+for one project). Do not write user extensions directly into the real dirs
+while iterating — that exposes WIP to the user's browser immediately.
 
 ## Reporting bugs
 

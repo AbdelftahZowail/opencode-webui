@@ -7,12 +7,16 @@
  * `--agent` flag the prompt is handed to the session agent instead, which
  * files the issue via the gh CLI.
  */
-import { register } from "../../src/extensions/registry";
-import { notify } from "../../src/lib/notify";
-import { enabled as builtinIds } from "../config";
-import { getState, isDraftSession, materializeDraft, sendPromptTo } from "../../src/store";
+import { getExtensionApi } from "../../src/lib/extensionApi";
+import { getRegisteredIds } from "../../src/extensions/registry";
 
 export const id = "report";
+
+// The ONE extension API surface (spec §10) — this shipped extension consumes
+// it exactly like an external bundle would (via window.__opencodeUI),
+// which is what keeps the surface honest.
+const ext = getExtensionApi();
+const { notify } = ext;
 
 const FALLBACK_REPO = "AbdelftahZowail/opencode-webui";
 const RING_CAP = 10;
@@ -77,7 +81,7 @@ async function collectDiag(sessionID: string | null) {
     viewport: `${window.innerWidth}x${window.innerHeight}`,
     version: config?.version ?? "unknown",
     reportRepo: config?.reportRepo ?? FALLBACK_REPO,
-    builtins: [...builtinIds],
+    builtins: getRegisteredIds(),
     runtimeExtensions: (exts?.data ?? []).map((e) => e.id ?? "").filter(Boolean),
     errors: w.__reportErrors ?? [],
     sessionID,
@@ -125,7 +129,7 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
   const args = rawArgs.trim();
   const agentMode = args.startsWith("--agent");
   const titleArgs = agentMode ? args.replace(/^--agent\b/, "").trim() : args;
-  const diag = await collectDiag(ctx.sessionID ?? getState().currentSessionID ?? null);
+  const diag = await collectDiag(ctx.sessionID ?? ext.store.getState().currentSessionID ?? null);
   const { title, body, url } = buildIssue(titleArgs, diag);
 
   if (agentMode) {
@@ -133,10 +137,10 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
       `File a bug against ${diag.reportRepo} using the gh CLI: create an issue with the title and ` +
       `body below, then reply with the issue URL. Do not include any private session content beyond ` +
       `the diagnostics JSON.\n\nTitle: ${title}\n\n${body}`;
-    let sid = ctx.sessionID ?? getState().currentSessionID ?? null;
-    if (sid && isDraftSession(sid)) {
+    let sid = ctx.sessionID ?? ext.store.getState().currentSessionID ?? null;
+    if (sid && ext.store.isDraftSession(sid)) {
       try {
-        sid = await materializeDraft("");
+        sid = await ext.store.materializeDraft("");
       } catch {
         sid = null;
       }
@@ -151,7 +155,7 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
       return;
     }
     notify({ title: "Report handed to the agent", description: "It will file the issue and reply with the URL." });
-    await sendPromptTo(sid, prompt);
+    await ext.store.sendPromptTo(sid, prompt);
     return;
   }
 
@@ -168,13 +172,16 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
   }
 }
 
-register({
-  kind: "slash",
+ext.register({
+  kind: "contribute",
   id: "report",
-  name: "report",
-  aliases: ["bug"],
-  description: "Report a webui bug on GitHub — diag bundle prefilled",
-  run,
+  collection: "slash",
+  item: {
+    name: "report",
+    aliases: ["bug"],
+    description: "Report a webui bug on GitHub — diag bundle prefilled",
+    run,
+  },
 });
 
 // Self-accept so edits hot-swap: same-id registry swap, no reload.

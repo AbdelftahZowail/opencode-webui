@@ -1,33 +1,58 @@
-import { disableRuntimeIds, enableRuntimeIds, getHooks, register } from "../extensions/registry";
-import { isDisabled } from "./extGate";
-import { notify } from "./notify";
-import { registerPoller } from "./scheduler";
+import { unregisterIds } from "../extensions/registry";
+import { fireHooks } from "../extensions/hooks";
+import { installExtensionBridge } from "./extensionApi";
+import {
+  disposeDomExtension,
+  isDomExtensionModule,
+  mountDomExtension,
+  type DomExtensionModule,
+} from "./domKit";
 
 /**
- * Runtime extension loader — brings plugin-shipped UI halves into the app.
+ * Runtime extension loader — folder extensions (user > project > shipped,
+ * spec §4/§6) plus engine plugin UI halves, served by the proxy.
  *
  * Flow:
- *  1. The proxy exposes what plugins shipped: GET /api/webui/extensions →
- *     `{ data: [{ id, url, source }] }`, where `url` is a full same-origin
- *     path INCLUDING a `?v=<mtime>` cache-buster (e.g.
- *     `/api/webui/extensions/acme/bundle.js?v=172…`). `source` names where
- *     the bundle came from (plugin name/path); it's metadata only here.
- *  2. Every 8 seconds (only while the tab is visible; skipped ticks just
- *     wait for the next one) we refetch that manifest and, per entry:
- *       - skip entirely if the user killed it via the extGate kill switch;
- *       - allow-list its id in the registry (`enableRuntimeIds`) so slots/
- *         pages/commands serve whatever it registered;
- *       - import its bundle when we haven't loaded THIS url yet (module-
- *         level `loaded` map id→url; a changed `?v=` re-imports).
- *     Bundles register themselves against `window.__opencodeUI` (installed
- *     in main.tsx BEFORE any render) — the versioned bridge is the ONLY way
- *     they touch the app. They carry their own React copies; the refs are
- *     for their use.
- *  3. After each successful tick, ids still in `loaded` but missing from
- *     the tick's enabled set (dropped server-side OR newly disabled by the
- *     user) get `disableRuntimeIds` + forgotten — Settings toggles apply
- *     within ~8s: OFF unregisters immediately on the next tick, ON imports
- *     on the next tick.
+ *  1. The proxy exposes the manifest: GET /api/webui/extensions →
+ *     `{ data: [{ id, url?, domUrl?, source, origin? } | { id, source, origin?, disabled: true }],
+ *     version }`, where `url` is the browser-stratum bundle and `domUrl` the
+ *     DOM-stratum bundle (`dom.ts`), each a full same-origin path INCLUDING
+ *     a `?v=<mtime>` cache-buster. Either stratum may be absent (a dom-only
+ *     or index-only folder); `source` names where the bundle came from; it's
+ *     metadata only here. `origin` is user/project/shipped (absent for engine
+ *     plugin halves): shipped browser entries carry NO `url` — the in-repo
+ *     Vite glob (webui-extensions/index.ts) owns them, and importing them
+ *     here too would run module side effects twice (Bug 2). Shipped `domUrl`
+ *     still serves (the glob never loads `dom.ts`).
+ *  2. The proxy pushes manifest changes over SSE
+ *     (GET /api/webui/extensions/events, one `{ type: "webui.extensions",
+ *     version }` event per change — the SAME channel carries both strata:
+ *     any `dom.ts` edit moves its `?v=`, which changes the manifest JSON and
+ *     fires the push). Each event re-fetches the manifest and, per entry:
+ *       - unregisters `disabled: true` ids outright (gating is owned by the
+ *         folder's manifest.json, not the browser) — including glob-owned
+ *         shipped copies the runtime never imported, or pausing a shipped
+ *         extension would never take effect;
+ *       - skips the browser import when `origin === "shipped"` (glob-owned;
+ *         defense in depth alongside the proxy omitting shipped `url`), while
+ *         still mounting shipped `domUrl` and still tracking the entry;
+ *       - the registry is ungated (presence IS installed): no allow-list step;
+ *         whatever it registered is served to targets/collections directly;
+ *       - imports its browser bundle when we haven't loaded THIS url yet
+ *         (module-level `loaded` map id→url; a changed `?v=` re-imports, and
+ *         the registry same-id-swaps → live repaint, no refresh);
+ *       - imports its DOM bundle when we haven't mounted THIS domUrl yet
+ *         (`loadedDom` map id→{url, module}; a changed `?v=` disposes the old
+ *         module and mounts the new one — edits repaint clean, never stack
+ *         ghosts).
+ *     Delete/move the folder and the id vanishes from the manifest = instant
+ *     uninstall. No polling: a `visibilitychange` refetch covers streams that
+ *     died while the tab was hidden (EventSource itself auto-reconnects).
+ *  3. After each sync, ids still in `loaded`/`loadedDom` but missing from the
+ *     sync's enabled set (removed server-side OR newly paused) get
+ *     `unregisterIds` + forgotten (browser stratum) or
+ *     `disposeDomExtension` + forgotten (DOM stratum) — a paused extension
+ *     unregisters on the next event, a re-enabled one imports fresh.
  *
  * Manifest fetch/import failures are silently ignored: the engine or proxy
  * may simply be down, and a transient failure must never unregister
@@ -40,45 +65,37 @@ import { registerPoller } from "./scheduler";
 
 interface RuntimeExtensionEntry {
   id: string;
-  url: string;
+  url?: string;
+  /** DOM-stratum bundle (`dom.ts`), same `?v=` cache-bust contract as `url`. */
+  domUrl?: string;
+  source?: string;
+  disabled?: boolean;
+  /** Which source won discovery (user > project > shipped). Shipped browser
+   *  bundles never import here — the in-repo Vite glob owns them. */
+  origin?: "user" | "project" | "shipped";
 }
 
-/** Loaded bundles, id → exact url (with its ?v= version) currently active. */
+/** Loaded browser bundles, id → exact url (with its ?v= version) currently active. */
 const loaded = new Map<string, string>();
 
-const POLL_MS = 8_000;
+/** Mounted DOM modules, id → exact domUrl + module (for `dispose` on swap). */
+const loadedDom = new Map<string, { url: string; module: DomExtensionModule }>();
 
-function ensureBridge() {
-  const w = window as unknown as Record<string, unknown>;
-  const bridge = (w.__opencodeUI ?? {}) as Record<string, unknown>;
-  if (!bridge.notify) bridge.notify = notify;
-  if (!bridge.getHooks) bridge.getHooks = getHooks;
-  if (!bridge.register) bridge.register = register;
-  if (!bridge.version) {
-    // App version + report repo, from the proxy — available to extensions
-    // (and anything else on the page) as window.__opencodeUI.version.
-    void fetch("/api/webui/config")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((cfg: { version?: string; reportRepo?: string } | null) => {
-        if (!cfg) return;
-        const b = (window as unknown as Record<string, unknown>).__opencodeUI as Record<
-          string,
-          unknown
-        >;
-        if (cfg.version) b.version = cfg.version;
-        if (cfg.reportRepo) b.reportRepo = cfg.reportRepo;
-      })
-      .catch(() => {});
-  }
-  w.__opencodeUI = bridge;
+/**
+ * The `window.__opencodeUI` surface always exists before any bundle
+ * executes — installed once at boot (`main.tsx`), re-ensured here so a
+ * bundle imported by the very first sync can never race it.
+ */
+function ensureBridge(): void {
+  installExtensionBridge();
 }
 
 /** Guard so startRuntimeExtensions() is safe to call more than once. */
 let started = false;
 
-async function pollOnce(opts?: { force?: boolean }): Promise<void> {
+async function syncOnce(opts?: { force?: boolean }): Promise<void> {
   ensureBridge();
-  // Background tabs skip RE-DISCOVERY ticks — but the very first (boot) tick
+  // Background tabs skip re-discovery syncs — but the very first (boot) sync
   // always runs, so extensions are ready the moment the user looks at the
   // tab even if it loaded in the background.
   if (!opts?.force && started && document.hidden) return;
@@ -94,29 +111,67 @@ async function pollOnce(opts?: { force?: boolean }): Promise<void> {
     return; // engine/proxy down — silently ignore, keep what's running
   }
 
-  // This tick's set of ids the user allows AND the server still ships.
+  // This sync's set of ids the manifest ships AND leaves enabled.
   const enabledNow = new Set<string>();
+  // Ids with a live DOM stratum this sync (drives DOM-stale disposal below).
+  const domNow = new Set<string>();
+  // Disabled ids this sync — gating is owned by the folder's manifest.json.
+  // The runtime never imports a paused bundle, and a paused id that the
+  // in-repo glob owns (shipped) must still unregister here, or `disabled`
+  // would never turn a shipped extension off (the glob doesn't read flags).
+  const disabledNow = new Set<string>();
 
   for (const entry of entries) {
-    if (typeof entry?.id !== "string" || typeof entry?.url !== "string") continue;
-    if (isDisabled(entry.id)) continue;
+    if (typeof entry?.id !== "string") continue;
+    if (entry.disabled) {
+      disabledNow.add(entry.id);
+      continue;
+    }
+    // An entry with neither bundle is a mid-write folder — skip silently so
+    // a later sync retries once both files land.
+    if (typeof entry?.url !== "string" && typeof entry?.domUrl !== "string") continue;
 
-    enabledNow.add(entry.id);
-    enableRuntimeIds([entry.id]);
+    if (typeof entry.url === "string") {
+      // Shipped browser stratum is owned by the in-repo Vite glob
+      // (webui-extensions/index.ts) — importing it here too runs module side
+      // effects twice and fires `extension.loaded` twice (Bug 2). Skip the
+      // import (defense in depth: the proxy already omits `url` for shipped)
+      // but still honor the entry below for DOM + stale purposes. A
+      // user/project copy shadowing the same id arrives with origin
+      // user/project and its own `url`, so it still imports and same-id-swaps
+      // over the glob copy.
+      if (entry.origin === "shipped") {
+        // Intentionally NOT added to `enabledNow`: the runtime doesn't own
+        // this browser copy, so it must never shield a stale runtime entry.
+      } else {
+        enabledNow.add(entry.id);
 
-    if (loaded.get(entry.id) === entry.url) continue;
-    try {
-      await import(/* @vite-ignore */ entry.url);
-      loaded.set(entry.id, entry.url);
-    } catch {
-      // Bundle failed to load/execute — left unrecorded so a later tick
-      // retries (e.g. after the plugin finishes writing its files).
+        if (loaded.get(entry.id) !== entry.url) {
+          try {
+            await import(/* @vite-ignore */ entry.url);
+            loaded.set(entry.id, entry.url);
+            // Lifecycle hook (spec §5.1): a runtime extension bundle just loaded —
+            // observers see it after registration, before first render.
+            void fireHooks("extension.loaded", { id: entry.id, url: entry.url });
+          } catch {
+            // Bundle failed to load/execute — left unrecorded so a later sync
+            // retries (e.g. after the extension finishes writing its files).
+          }
+        }
+      }
+    }
+
+    // DOM stratum (spec §7): same manifest, same SSE push — a `dom.ts` edit
+    // moves its `?v=`, which changes the manifest JSON and fires the push.
+    if (typeof entry.domUrl === "string") {
+      domNow.add(entry.id);
+      await syncDomEntry(entry.id, entry.domUrl);
     }
   }
 
-  // Stale = loaded but no longer in this tick's enabled set (removed from
-  // the server, or newly disabled by the user). Unregister + forget so a
-  // later re-enable imports fresh.
+  // Stale = loaded but no longer in this sync's enabled set (removed from
+  // the server, or newly paused via manifest `disabled: true`). Unregister
+  // + forget so a later re-enable imports fresh.
   const stale: string[] = [];
   for (const id of loaded.keys()) {
     if (!enabledNow.has(id)) {
@@ -124,20 +179,77 @@ async function pollOnce(opts?: { force?: boolean }): Promise<void> {
       loaded.delete(id);
     }
   }
-  if (stale.length > 0) disableRuntimeIds(stale);
+  if (stale.length > 0) unregisterIds(stale);
+
+  // Gating for glob-owned copies: a disabled id the runtime never loaded
+  // (shipped via the Vite glob) still has a live registry entry — unregister
+  // it so `disabled: true` actually pauses shipped extensions. No-op when
+  // nothing is registered under those ids (unregisterIds only notifies on
+  // removal). Stale runtime copies were already unregistered above; calling
+  // again with the same ids is harmless.
+  if (disabledNow.size > 0) unregisterIds([...disabledNow]);
+
+  // Stale DOM = mounted but no longer shipped with a domUrl (removed,
+  // paused, or the `dom.ts` was deleted while `index.tsx` stayed). Dispose
+  // with the module's own `dispose` so no foreign node survives.
+  for (const [id, prev] of loadedDom) {
+    if (!domNow.has(id)) {
+      loadedDom.delete(id);
+      disposeDomExtension(id, prev.module);
+    }
+  }
 }
 
-/** Kicks off manifest polling (immediately, then on the scheduler's 8s
- * cadence while the tab is visible — the scheduler skips hidden tabs, which
- * replaces this module's own document.hidden check). Idempotent. */
+/**
+ * Mount one DOM-stratum bundle, no-op when THIS domUrl is already mounted.
+ * A moved `?v=` disposes the old module (its own `dispose` runs) before
+ * mounting the new one — hot edits repaint clean, never stack ghosts.
+ * Import/shape failures stay unrecorded so the next sync retries.
+ */
+async function syncDomEntry(id: string, domUrl: string): Promise<void> {
+  if (loadedDom.get(id)?.url === domUrl) return;
+  let module: DomExtensionModule;
+  try {
+    const imported = (await import(/* @vite-ignore */ domUrl)) as { default?: unknown };
+    if (!isDomExtensionModule(imported.default)) return;
+    module = imported.default;
+  } catch {
+    return;
+  }
+  const prev = loadedDom.get(id);
+  if (prev) disposeDomExtension(id, prev.module);
+  loadedDom.set(id, { url: domUrl, module });
+  await mountDomExtension(id, module);
+}
+
+/** Subscribe to the proxy's manifest push channel; EventSource reconnects. */
+function subscribeManifestPush(): void {
+  let source: EventSource | null = null;
+  try {
+    source = new EventSource("/api/webui/extensions/events");
+  } catch {
+    return;
+  }
+  source.onmessage = () => {
+    void syncOnce({ force: true });
+  };
+  source.onerror = () => {
+    // EventSource backs off and reconnects on its own; if the stream is
+    // down for good the visibility refetch below still catches up.
+  };
+  // A stream that died while the tab was hidden replays nothing — refetch
+  // explicitly when the tab becomes visible again.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void syncOnce();
+  });
+}
+
+/** Kicks off the manifest sync (immediately) then follows SSE pushes.
+ * Idempotent. */
 export function startRuntimeExtensions(): void {
   if (started) return;
   started = true;
   ensureBridge();
-  void pollOnce({ force: true }); // boot tick: unconditional
-  registerPoller({
-    name: "extensions-manifest",
-    minInterval: POLL_MS,
-    run: () => pollOnce(),
-  });
+  void syncOnce({ force: true }); // boot sync: unconditional
+  subscribeManifestPush();
 }

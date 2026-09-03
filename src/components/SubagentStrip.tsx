@@ -30,7 +30,7 @@ export function SubagentStrip({
   const runningCount = children.filter((c) => runningMap[c.id] || activeIDs.includes(c.id)).length;
 
   return (
-    <div className="border-b border-[color:var(--border-weak-base)] px-4 py-1">
+    <div className="border-b border-[color:var(--border-weak-base)] px-4 py-1" data-oc-subagent-strip>
       <button
         type="button"
         aria-expanded={open}

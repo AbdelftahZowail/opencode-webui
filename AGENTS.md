@@ -44,8 +44,13 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/lib/scheduler.ts` | The one fetch/tick scheduler — tiers (live/idle/hidden), registered pollers, no component-owned `setInterval` |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
 | `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip`, `PendingRequestsPanel`, `ui` (primitives) |
-| `src/extensions/registry.tsx` | The slot registry — the stable contract for UI extensions (do not change lightly) |
-| `ui-extensions/` | Feature folders; `index.ts` wires them in. Authoring guide: `ui-extensions/README.md` |
+| `src/extensions/registry.tsx` | The extension registry (v2 contract: kinds, target chains, collections, services, hooks — do not change lightly) |
+| `src/extensions/hooks.ts` | Shared `fireHooks` runner for `kind:"hook"` extensions (open event strings) |
+| `src/lib/domKit.ts` | DOM-stratum kit (`foreign`/`watch`/`styles`, mount/dispose, `data-oc-*` anchors) |
+| `src/lib/runtimeExtensions.ts` | Browser loader client: manifest fetch + SSE push, bundle import, same-id swap |
+| `server/ext/` | Proxy-stratum loader + mount points (`routes`, `middleware`, `onEvent`, `pollers`, KV) |
+| `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
+| `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
 | `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
 
@@ -133,40 +138,96 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
    MessageScroller) and `@xterm/xterm` + addon-fit (PTY terminal
    emulator). A new dependency needs justification.
 
-## Extensions (not plugins — read this before adding UI features)
+## Extensions (one folder, four strata — read this before adding UI features)
 
-Frontend features are **plain React code** living in `ui-extensions/<name>/`,
-auto-discovered by `ui-extensions/index.ts` (drop the folder, that's the
-install). They register against a small vocabulary of **kinds**:
+One extension = **one folder** in one format, loaded by one loader, gated by
+one rule. A folder may provide code in up to four *strata*
+(full contract: `docs/extension-system-spec.md` §4; authoring guide:
+`webui-extensions/README.md`; agent skill: `skills/webui/SKILL.md`):
 
-| Kind | What it does | Surfaces via |
-| --- | --- | --- |
-| `region` | renders into any `<Slot region="…">` marker in core markup | generated table: `bun run regions` |
-| `command` | palette action (`Extension commands` group) — add `keybind:"ctrl+shift+k"` for global hotkey | palette (⌘/ctrl-K) + keybind |
-| `slash` | UI-only slash entry for Composer `/name` | Composer `/` autocomplete |
-| `message` | full replacement for any message type — first non-null wins | `MessageItem` per message |
-| `message.decoration` | per-message extras | under every message row |
-| `message.part` | inject after each text/tool/reasoning part | inside `MessageItem` per part |
-| `tool.renderer` | custom card for a specific tool name | `ToolCard` per tool |
-| `contextMenu` | right-click item `target:"message"\|"session"\|"file"` | context menu |
-| `hook` | intercept `session.prompt`, `message.render`, `store.dispatch` — `event:string` open so new seams need no registry bump | store + `MessageItem` + `Composer` |
-| `page` | full surface at auto-route `/ext/{id}` | sidebar links + direct URL |
-| `settings` | titled section inside Settings › Extensions | Settings dialog |
-| toasts | `window.__opencodeUI.notify({title, variant})` | bottom-right stack, 3s |
+```
+my-extension/
+  manifest.json    id, name, version, description, disabled (optional bool)
+  index.tsx        browser stratum: register() against the registry
+  dom.ts           DOM stratum: post-render DOM changes (the free layer)
+  server.ts        proxy stratum: routes / middleware / event tap / pollers
+  engine/          optional opencode plugin payload (tools, system-prompt hints)
+```
 
-- **Add a feature**: create `ui-extensions/<name>/index.tsx`, call
-  `register({ kind, ... })`, export its `id`, keep the trailing
-  `import.meta.hot.accept()` line. Adding, editing, and deleting extension
-  folders are all hot (no reload).
-- **Disable**: remove its id from the `enabled` list in
-  `ui-extensions/config.ts`.
-- **Full app access**: extensions are the same build — they can use
-  `useStore`, `api`, and any component.
-- **The kinds + region list is the contract** (`src/extensions/registry.tsx`
-  owns it). Adding a REGION MARKER is a one-line, always-welcome change.
-  Adding a new KIND is a deliberate contract change: edit registry.tsx +
-  document here and in `ui-extensions/README.md`. Never build speculative
-  kinds.
+| Stratum | Runs in | Reaches | One method |
+|---|---|---|---|
+| Browser (registry) | the page | React tree, store, api calls, logic modules | wrap / replace / contribute / hook / service |
+| DOM | the page, post-render | any node incl. portals, canvas, iframes | `dom.ts` + the DOM kit (`src/lib/domKit.ts`) |
+| Proxy | the proxy process | fs, spawn, engine creds, always-on event stream, all clients | `server.ts` + mount points (`server/ext/`) |
+| Engine | the engine process | tools the model calls, system prompt | opencode plugin rules (out of scope — we carry the payload, see `docs/engine-payload-convention.md`) |
+
+**Gating — one state, owned by the folder itself:** presence = installed;
+manifest `disabled: true` = paused; delete/move the folder to uninstall. No
+`config.ts` list, no per-browser localStorage gating, no second registry.
+
+**Loading precedence (same id = same swap point, higher wins):**
+
+1. `~/.config/opencode/webui-extensions/<name>/` — user
+2. `<project>/.opencode/webui-extensions/<name>/` — project
+3. the app's shipped `webui-extensions/` — ours, updates with the app
+
+A user shadowing a shipped extension = a folder with the same id at higher
+precedence. Core updates land underneath; the user's still wins; nothing is
+forked. Our own optional features ship as extensions in stratum 3 — we
+dogfood the exact same API users get.
+
+The registry has **five kinds, one job each** (`src/extensions/registry.tsx`):
+`wrap` (flow-through tweak — the default path for edits, stale-proof by
+construction), `replace` (take ownership of one target — the marked escape
+hatch, frozen-snapshot semantics), `contribute` (add an item to a named
+collection: `palette`, `slash`, `pages`, `settings`,
+`contextMenu.message|session|file`, …), `hook` (open event strings —
+`api.pre`/`api.post`/`api.error`, `store.dispatch`, `session.prompt`,
+`session.adopted`, `pane.focused`, `extension.loaded`, `message.render`, …),
+`service` (provide/consume named logic; doubles as value overrides, e.g. the
+timestamp formatter). Dropping a folder in the extension dir is an act of
+trust (same model as host plugins) — no sandboxing of extension code.
+
+- **Add a feature**: create the folder, write `manifest.json` + `index.tsx`,
+  call `register({ kind, ... })`. No repo-file edits, no `enabled` list.
+- **Full app access**: shipped extensions are the same build — they can use
+  `useStore`, `api`, and any component. External extensions use the one
+  extension API surface (`register`, `react`, `api`, `store`, `prefs`,
+  `notify`, `services`, `dom` kit, `kv`).
+- **Hot reload**: external browser bundles rebuild on edit, bump `?v=`, push
+  the manifest over SSE, and the page same-id-swaps with a live repaint
+  (sub-second, no refresh). Repo dev uses Vite HMR. Proxy `server.ts`
+  modules reload with no proxy restart.
+
+> **How to change the webui without breaking extensibility**
+>
+> 1. **Every new component must self-register.** Hand-writing an unregistered unit
+>    inside a registered one recreates the predicted-seam problem. Use the
+>    auto-registration helper; split out leaves for anything plausibly tweakable.
+> 2. **Rich props / consulted services over baked-in values.** If a value is
+>    format-able, routable, or calculable, it arrives as a prop or a service core
+>    consults — never hardcoded inside a unit.
+> 3. **Don't add kinds casually.** Kinds are the versioned contract. New seam? Prefer a
+>    new `hook` event string (open) or a new `contribute` collection (data). A new kind
+>    is a deliberate contract change: registry + docs + version bump together.
+> 4. **Target ids, collection ids, service ids, `data-oc-*` anchors, and manifest
+>    fields are contract.** Renaming/moving any of them = version bump + migration note
+>    in the same commit. Never break silently.
+> 5. **Never absorb an extension into core "because it's easier".** Optional features
+>    ship as extensions in the shipped source; core stays minimal. We dogfood the
+>    public API or it rots.
+> 6. **One method per concern.** If you're adding a second way to do something that
+>    exists (a second gate, a second loader, a fallback path), stop — you're adding
+>    legacy on day one.
+> 7. **Proxy changes go through mount points.** New capability in the proxy = a new
+>    mount point extensions can use, not core-only logic.
+> 8. **Stable markup anchors.** Meaningful markup boundaries carry `data-oc-*`
+>    attributes; restyles must not remove them without a contract bump.
+> 9. **Docs move with the code.** Every contract-relevant change updates the authoring
+>    guide, this rule set, and the skill in the same commit. Code that outruns its docs
+>    is a bug.
+> 10. **The engine is out of scope.** We carry engine payloads and adapt client-side;
+>     we do not reach into engine internals from the webui.
 
 ## Commands
 
@@ -177,6 +238,34 @@ install). They register against a small vocabulary of **kinds**:
 - `bun run build && bun start` — production build, served on 4097
 - `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check).
+- `bun run scripts/uitest/ext-battery-browser.ts` (+ `-dom`, `-proxy`,
+  `-acceptance`) — the extension-system E2E battery, 65 checks total; the
+  release gate for anything touching extensions (see Release checklist).
+
+## Release checklist (push + publish — do every step, in order)
+
+Version flows from ONE source: `package.json` (`server` reads it at boot
+for `/api/webui/status|config`, `gen:skill` pins the skill to it). Bumping
+means editing that one line, then:
+
+1. **Bump** `package.json` version (semver; breaking contract change → major).
+2. **Regen** `bun run scripts/gen-skill.ts` — the skill embeds the version +
+   `v{version}` tag links; verify the new version appears in
+   `skills/webui/SKILL.md`.
+3. **Gate** — all green, no exceptions:
+   - `bun run typecheck`
+   - `bun run build`
+   - all four battery files (`ext-battery-browser|dom|proxy|acceptance`)
+4. **Commit** with a message describing the contract impact (what breaks,
+   what the migration is); keep extension-system + unrelated work in
+   separate commits.
+5. **Tag** `v{version}` on the release commit (`git tag v2.0.0`).
+6. **Push** commit + tag (`git push origin master --tags`). Pushing the tag
+   is what makes the skill's pinned `v{version}` raw links resolve.
+7. **Publish** `npm publish` (runs `prepublishOnly`: typecheck + gen:skill
+   + build). Requires `npm whoami` authed.
+8. **Verify** the tag page + npm version + skill links resolve; never publish
+   without the tag (skill links would 404).
 
 ## Live streaming (robustness model)
 

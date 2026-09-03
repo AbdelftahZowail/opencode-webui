@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/assets/opencode.svg" />
     <title>OpenCode Web</title>
+    <!-- Shared-React import map: external extension bundles import the bare
+      specifiers below (Bun.build `external`, server/index.ts) and resolve
+      them to the proxy's vendor shims, which re-export the app's own React
+      instance — one copy for app and extensions, so hooks work. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "/api/webui/vendor/react.js",
+          "react/jsx-runtime": "/api/webui/vendor/react-jsx-runtime.js",
+          "react/jsx-dev-runtime": "/api/webui/vendor/react-jsx-dev-runtime.js"
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

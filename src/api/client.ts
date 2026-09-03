@@ -23,6 +23,7 @@ import type {
   SessionsResponse,
   SkillInfo,
 } from "./types";
+import { fireHooks } from "../extensions/hooks";
 
 export type ForkBoundary =
   | { type: "before"; messageID: string }
@@ -374,7 +375,7 @@ export interface ReferenceInfo {
   source: unknown;
 }
 
-export const api = {
+const apiRaw = {
   health: () => request<{ ok: boolean; service?: string; error?: string }>("/api/webui/status"),
 
   // sessions
@@ -622,7 +623,7 @@ export const api = {
   inboxDelete: (sessionID: string, inboxID: string) =>
     request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}`, { method: "DELETE" }),
   /** Queue-delivered prompt (durable inbox item; wakes nothing by itself). */
-  inboxPrompt: (sessionID: string, text: string) => api.prompt(sessionID, text, "queue"),
+  inboxPrompt: (sessionID: string, text: string) => apiRaw.prompt(sessionID, text, "queue"),
 
   // filesystem & location
   location: () => request<LocationInfo>("/api/location"),
@@ -868,3 +869,40 @@ export const api = {
   referenceList: () =>
     request<{ location: unknown; data: ReferenceInfo[] }>("/api/reference"),
 };
+
+// ---- hook instrumentation (spec §5.1 + §11 step 2) --------------------------
+//
+// Every endpoint fires open-string hook events — no registry change is needed
+// for new seams. `api.pre` may MUTATE `ctx.args` (an unknown[] spread into the
+// endpoint); `api.post` observes `{ name, args, result }`; `api.error`
+// observes `{ name, args, error }` and the original error is rethrown.
+// Hook failures never break the call — fireHooks isolates per handler.
+
+type ApiRaw = typeof apiRaw;
+
+function wrapApi<T extends Record<string, unknown>>(raw: T): T {
+  const wrapped = {} as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    const fn = (raw as Record<string, unknown>)[key];
+    if (typeof fn !== "function") {
+      wrapped[key] = fn;
+      continue;
+    }
+    wrapped[key] = async (...args: unknown[]) => {
+      const preCtx: Record<string, unknown> = { name: key, args };
+      await fireHooks("api.pre", preCtx);
+      const finalArgs = Array.isArray(preCtx.args) ? (preCtx.args as unknown[]) : args;
+      try {
+        const result = await (fn as (...a: unknown[]) => unknown)(...finalArgs);
+        await fireHooks("api.post", { name: key, args: finalArgs, result });
+        return result;
+      } catch (error) {
+        await fireHooks("api.error", { name: key, args: finalArgs, error });
+        throw error;
+      }
+    };
+  }
+  return wrapped as T;
+}
+
+export const api: ApiRaw = wrapApi(apiRaw);

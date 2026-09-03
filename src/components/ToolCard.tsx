@@ -1,7 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import type { MessageInfo, ToolPart, ToolState } from "../api/types";
-import { getToolRenderer, Slot } from "../extensions/registry";
+import {
+  Target,
+  autoRegister,
+  getTargetChain,
+  renderTarget,
+  subscribeRegistry,
+} from "../extensions/registry";
 import { selectSession, useStore } from "../store";
 import { getPrefs, subscribePrefs } from "../prefs";
 import { DiffView } from "./DiffView";
@@ -29,9 +35,18 @@ function rememberToolDisclosure(key: string, value: boolean) {
 export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string }) {
   const [showDetails, setShowDetails] = useState(getPrefs().showToolDetails);
   useEffect(() => subscribePrefs(() => setShowDetails(getPrefs().showToolDetails)), []);
+  // Repaint trigger for `replace`/`wrap` registrations on `tool:<name>` —
+  // the chain is re-read every render.
+  const [, setRegistryVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setRegistryVersion((v) => v + 1)), []);
 
-  const renderer = getToolRenderer(part.name);
-  if (renderer) return <>{renderer.render(part)}</>;
+  // `replace` on `tool:<name>` takes over the card; first non-null wins,
+  // `null` falls through to the built-in views below.
+  const toolChain = getTargetChain(`tool:${part.name}`);
+  if (toolChain.replaces.length > 0 || toolChain.wraps.length > 0) {
+    const node = renderTarget(`tool:${part.name}`, { part });
+    if (node !== null && node !== undefined) return <>{node}</>;
+  }
 
   if (!part.state) return null;
   const state = part.state;
@@ -54,23 +69,21 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
   const streamingText = state.status === "streaming" ? state.input : undefined;
 
   const props: ToolProps = { part, state, stateKey, input, meta, output, error, streamingText };
-  const toolBefore = <Slot region="tool.before" part={part} />;
-  const toolAfter = <Slot region="tool.after" part={part} />;
 
   const core = (() => {
   switch (part.name) {
     case "edit":
-      return <EditTool {...props} />;
+      return <Target id="tool.edit" {...props} />;
     case "write":
-      return <WriteTool {...props} />;
+      return <Target id="tool.write" {...props} />;
     case "shell":
     case "bash":
-      return <ShellTool {...props} />;
+      return <Target id="tool.shell" {...props} />;
     case "subagent":
     case "task":
-      return <SubagentTool {...props} />;
+      return <Target id="tool.subagent" {...props} />;
     case "execute":
-      return <ExecuteTool {...props} />;
+      return <Target id="tool.execute" {...props} />;
     case "read":
       return (
         <InlineTool
@@ -136,10 +149,14 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
         />
       );
     default:
-      return <GenericTool {...props} name={part.name} />;
+      return <Target id="tool.generic" {...props} name={part.name} />;
   }
   })();
-  return <>{toolBefore}{core}{toolAfter}</>;
+  return (
+    <div data-oc-tool-card data-oc-tool-name={part.name}>
+      {core}
+    </div>
+  );
 }
 
 interface ToolProps {
@@ -916,3 +933,18 @@ function CodeBlock({ code }: { code: string }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Self-registration (spec §5.3): the card plus every rich per-tool view is
+// its own registered unit. `tool:<name>` (replace, with fall-through) owns
+// whole-card takeovers; `tool.edit` etc. own one tool's view.
+// ---------------------------------------------------------------------------
+autoRegister({
+  "tool.card": (p) => <ToolCard {...(p as unknown as { part: ToolPart; stateKey?: string })} />,
+  "tool.edit": (p) => <EditTool {...(p as unknown as ToolProps)} />,
+  "tool.write": (p) => <WriteTool {...(p as unknown as ToolProps)} />,
+  "tool.shell": (p) => <ShellTool {...(p as unknown as ToolProps)} />,
+  "tool.subagent": (p) => <SubagentTool {...(p as unknown as ToolProps)} />,
+  "tool.execute": (p) => <ExecuteTool {...(p as unknown as ToolProps)} />,
+  "tool.generic": (p) => <GenericTool {...(p as unknown as ToolProps & { name: string })} />,
+});

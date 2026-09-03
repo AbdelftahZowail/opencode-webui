@@ -88,14 +88,27 @@ manually.
 
 ## Extensions
 
-Plain React, dropped in a folder, loaded at runtime — no rebuild, no restart:
+One extension = one folder, dropped in — no rebuild, no restart:
 
-- `~/.config/opencode/webui-extensions/<name>/main.tsx` — per-user
-- `<project>/.opencode/webui-extensions/<name>/main.tsx` — per-project
+- `~/.config/opencode/webui-extensions/<name>/` — per-user
+- `<project>/.opencode/webui-extensions/<name>/` — per-project
 
-Toggle any extension in Settings › Extensions. The full authoring guide — the kind
-contract, hooks, region markers, the `window.__opencodeUI` bridge — is
-[ui-extensions/README.md](ui-extensions/README.md).
+```
+my-extension/
+  manifest.json    id, version, description, disabled?
+  index.tsx        browser stratum (wrap / replace / contribute / hook / service)
+  dom.ts           DOM stratum (portals, canvas, post-render tweaks)
+  server.ts        proxy stratum (routes, middleware, event tap, pollers)
+  engine/          opencode plugin payload (model tools, prompt hints)
+```
+
+Presence = installed, `disabled: true` = paused, delete = uninstalled; a
+higher-precedence folder with the same id shadows the shipped one, so user
+customizations survive core updates with no forks. Hot reload everywhere:
+browser edits repaint live via the manifest SSE push, proxy edits reload
+with no restart. The full authoring guide — the five kinds, hook catalog,
+DOM kit, `server.ts` mounts, precedence, and the timestamp worked example —
+is [webui-extensions/README.md](webui-extensions/README.md).
 
 The built-in `/report` command files a prefilled GitHub issue with a diagnostics
 bundle (build version, enabled extensions, error ring); `--agent` hands it to the
@@ -111,7 +124,7 @@ bun run typecheck
 bun run build && bun start   # production: dist/ + API on 4097
 ```
 
-- Extension authoring guide: [ui-extensions/README.md](ui-extensions/README.md)
+- Extension authoring guide: [webui-extensions/README.md](webui-extensions/README.md)
 - Extension contract check: `bun run scripts/uitest/extensions-check.ts`
 - Architecture, editing rules, roadmap: [AGENTS.md](AGENTS.md)
 

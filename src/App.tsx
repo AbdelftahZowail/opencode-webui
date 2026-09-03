@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Columns2 } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
-import { Conversation } from "./components/Conversation";
 import { HelpDialog } from "./components/HelpDialog";
-import { Sidebar } from "./components/Sidebar";
 import { ShellPanel } from "./components/ShellPanel";
 import { SplitPicker } from "./components/SplitPicker";
 import { ActivityStrip } from "./components/ActivityStrip";
 import { CommandKeybinds } from "./components/CommandKeybinds";
 import { Toasts } from "./components/Toasts";
-import { Slot, getPage, getPages, subscribeRegistry } from "./extensions/registry";
+import { Target, getContributions, subscribeRegistry, type PageContribution } from "./extensions/registry";
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { log } from "./lib/log";
 import { useHotkeys } from "./hooks/useHotkeys";
@@ -86,8 +84,10 @@ export default function App() {
   // footer and all overlays compose exactly as on session routes.
   const pathname = useWindowPathname();
   const extPageID = EXT_ROUTE_RE.exec(pathname)?.[1] ?? null;
-  const extPage = extPageID ? getPage(extPageID) : undefined;
-  const extPageTitle = extPage?.title;
+  const extPage = extPageID
+    ? getContributions<PageContribution>("pages").find((c) => c.id === extPageID)
+    : undefined;
+  const extPageTitle = extPage?.item.title;
 
   // Browser tab mirrors the conversation: the session's title, prefixed
   // with a live dot while that session OR any of its subagents is working
@@ -240,9 +240,8 @@ export default function App() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
-      <Slot region="app.header" sessionID={sessionID ?? undefined} />
       <div className="flex min-h-0 flex-1">
-        <Sidebar />
+        <Target id="sidebar" />
         <div className="flex min-w-0 flex-1 overflow-x-auto">
           {/* Main pane: always the routed surface, even while a split holds focus. */}
           <section
@@ -255,7 +254,8 @@ export default function App() {
               // pane; the shell around it stays exactly as-is.
               <ExtensionPageSurface id={extPageID} />
             ) : mainSessionID ? (
-              <Conversation
+              <Target
+                id="conversation"
                 key={mainSessionID}
                 sessionID={mainSessionID}
                 paneKey="main"
@@ -275,7 +275,8 @@ export default function App() {
               onFocusCapture={focusThis(pane.id)}
             >
               {pane.sessionID ? (
-                <Conversation
+                <Target
+                  id="conversation"
                   key={`${pane.id}:${pane.sessionID}`}
                   sessionID={pane.sessionID}
                   paneKey={pane.id}
@@ -305,7 +306,6 @@ export default function App() {
         </div>
       </div>
       <ActivityStrip />
-      <Slot region="footer" />
       <ForeignPendingChip />
       <SplitPicker />
       <CommandPalette />
@@ -369,8 +369,8 @@ function ExtensionPageSurface({ id }: { id: string }) {
   // Subscribe for hot (re-)registration of pages; the counter itself is
   // only the repaint trigger.
   useRegistryVersion();
-  const page = getPage(id);
-  const pages = getPages();
+  const pages = getContributions<PageContribution>("pages");
+  const page = pages.find((c) => c.id === id);
 
   const back = (
     <button
@@ -392,17 +392,17 @@ function ExtensionPageSurface({ id }: { id: string }) {
             <div className="flex items-center gap-2">
               {back}
               <h1 className="truncate text-[var(--font-size-large)] font-medium text-[var(--text-strong)]">
-                {page ? page.title : "Unknown extension page"}
+                {page ? page.item.title : "Unknown extension page"}
               </h1>
             </div>
-            {page?.description && (
-              <p className="mt-1 text-sm text-[var(--text-weaker)]">{page.description}</p>
+            {page?.item.description && (
+              <p className="mt-1 text-sm text-[var(--text-weaker)]">{page.item.description}</p>
             )}
           </div>
         </div>
         <div className="mt-4">
           {page ? (
-            page.render({})
+            page.item.render({})
           ) : (
             <div className="flex flex-col gap-2 text-sm text-[var(--text-weak)]">
               <p>No extension registered “{id}”. Available pages:</p>
@@ -414,10 +414,10 @@ function ExtensionPageSurface({ id }: { id: string }) {
                     <li key={p.id}>
                       <a
                         href={`/ext/${p.id}`}
-                        title={p.description ?? p.title}
+                        title={p.item.description ?? p.item.title}
                         className="text-[var(--text-interactive-base)] underline underline-offset-2"
                       >
-                        /ext/{p.id} — {p.title}
+                        /ext/{p.id} — {p.item.title}
                       </a>
                     </li>
                   ))}

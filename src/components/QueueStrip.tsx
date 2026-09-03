@@ -52,7 +52,7 @@ export function QueueStrip({ sessionID }: { sessionID: string }) {
   if (steers.length === 0 && queues.length === 0) return null;
 
   return (
-    <div className="border-t border-[color:var(--border-weak-base)] px-3 pb-1 pt-1">
+    <div className="border-t border-[color:var(--border-weak-base)] px-3 pb-1 pt-1" data-oc-queue-strip>
       <div className="mx-auto max-w-3xl overflow-hidden rounded-md border border-[color-mix(in_oklch,var(--border-base)_55%,transparent)] bg-[color-mix(in_oklch,var(--surface-base)_40%,transparent)]">
         <div className="divide-y divide-[color:var(--border-weak-base)]">
           {GROUPS.map((group) => {

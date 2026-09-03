@@ -44,7 +44,7 @@ import {
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
-import { getSlashCommands, Slot, subscribeRegistry } from "../extensions/registry";
+import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
 import { openSettings } from "./settings/SettingsDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
@@ -219,17 +219,19 @@ function placeCaretEnd(el: HTMLTextAreaElement) {
   el.setSelectionRange(len, len);
 }
 
-export function Composer({
-  sessionID,
-  paneKey = "main",
-  onNavigate,
-}: {
+export interface ComposerProps {
   sessionID: string;
   /** DOM id suffix — every split pane mounts its own composer. */
   paneKey?: string;
   /** In-pane navigation (fork, /sessions, agents menu, Backspace-to-parent). */
   onNavigate?: (sessionID: string | null) => void;
-}) {
+}
+
+export function Composer({
+  sessionID,
+  paneKey = "main",
+  onNavigate,
+}: ComposerProps) {
   // Navigation inside a split must swap THAT pane, not the whole app.
   const go = (sid: string | null) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
   // The unsent message is a silent per-session draft: seeded from storage,
@@ -264,7 +266,7 @@ export function Composer({
   );
   const [registryVersion, setRegistryVersion] = useState(0);
   useEffect(() => subscribeRegistry(() => setRegistryVersion((v) => v + 1)), []);
-  const slashExtensions = useMemo(() => getSlashCommands(), [registryVersion]);
+  const slashExtensions = useMemo(() => getContributions<SlashContribution>("slash"), [registryVersion]);
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /**
@@ -594,12 +596,12 @@ export function Composer({
     for (const ext of slashExtensions) {
       entries.push({
         key: `slash:${ext.id}`,
-        display: `/${ext.name}`,
-        names: [ext.name, ...(ext.aliases ?? [])],
-        description: ext.description,
+        display: `/${ext.item.name}`,
+        names: [ext.item.name, ...(ext.item.aliases ?? [])],
+        description: ext.item.description,
         onSelect: () => {
           setText("");
-          void ext.run("", { sessionID });
+          void ext.item.run("", { sessionID });
         },
       });
     }
@@ -761,9 +763,9 @@ export function Composer({
           setAttachments([]);
           return;
         }
-        const slashExt = slashExtensions.find((s) => s.name === name || s.aliases?.includes(name));
+        const slashExt = slashExtensions.find((s) => s.item.name === name || s.item.aliases?.includes(name));
         if (slashExt) {
-          await slashExt.run(parts.slice(1).join(" "), { sessionID });
+          await slashExt.item.run(parts.slice(1).join(" "), { sessionID });
           setText("");
           setPickedFiles([]);
           setAttachments([]);
@@ -905,6 +907,7 @@ export function Composer({
         <Popover open={isSlash}>
           <PopoverAnchor asChild>
             <div
+              data-oc-composer
               onDragEnter={(e) => {
                 if (Array.from(e.dataTransfer.types).includes("Files")) setDragDepth((d) => d + 1);
               }}
@@ -928,8 +931,6 @@ export function Composer({
                   : "border-[color:var(--border-base)]"
               }`}
             >
-              {/* Extension region: very top inside the composer card. */}
-              <Slot region="composer.above" sessionID={sessionID} />
               {isEditingThisSession && pendingEdit && (
                 <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs">
                   <span className="flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-300">
@@ -982,6 +983,7 @@ export function Composer({
                 <div className="flex items-end gap-2">
                   <Textarea
                     id={`composer-input-${paneKey}`}
+                    data-oc-composer-input
                     ref={textareaRef}
                     value={text}
                     placeholder={placeholder}
@@ -1197,6 +1199,7 @@ export function Composer({
                     <Button
                       variant="default"
                       size="sm"
+                      data-oc-composer-send
                       disabled={!text.trim() && attachments.length === 0}
                       onClick={() => void submit()}
                       title={running ? "Send (↵ steer · ctrl+↵ queue)" : "Send (Enter)"}
@@ -1237,19 +1240,8 @@ export function Composer({
                 <AgentPicker sessionID={sessionID} openUp align="left" />
                 <ModelPicker sessionID={sessionID} openUp align="left" />
                 <VariantPicker sessionID={sessionID} openUp align="left" />
-                <Slot region="composer.toolbar" sessionID={sessionID} />
-                {contextParts.length > 0 && (
-                  <span
-                    className="ml-auto font-mono text-[11px] text-[color:var(--text-weaker)]"
-                    title="Tokens used · share of model context window · session cost"
-                  >
-                    {contextParts.join(" · ")}
-                  </span>
-                )}
+                <Target id="composer.contextReadout" parts={contextParts} />
               </div>
-              {/* Extension region: right after the meta row (the bottom
-                  border area of the composer card). */}
-              <Slot region="composer.below" sessionID={sessionID} />
             </div>
           </PopoverAnchor>
           <PopoverContent
@@ -1356,3 +1348,25 @@ function MovePickerDialog({ sessionID, currentDirectory, onClose, onMoved }: { s
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Self-registration (spec §5.3)
+// ---------------------------------------------------------------------------
+
+/** Token usage / context share / session cost readout — its own target. */
+function ContextReadout({ parts }: { parts: string[] }) {
+  if (parts.length === 0) return null;
+  return (
+    <span
+      className="ml-auto font-mono text-[11px] text-[color:var(--text-weaker)]"
+      title="Tokens used · share of model context window · session cost"
+    >
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
+autoRegister({
+  composer: (p) => <Composer {...(p as unknown as ComposerProps)} />,
+  "composer.contextReadout": (p) => <ContextReadout parts={p.parts as string[]} />,
+});

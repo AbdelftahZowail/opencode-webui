@@ -20,5 +20,5 @@
     },
     "noEmit": true
   },
-  "include": ["src", "server", "scripts", "ui-extensions", "vite.config.ts"]
+  "include": ["src", "server", "scripts", "webui-extensions", "vite.config.ts"]
 }

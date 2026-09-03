@@ -15,7 +15,7 @@ import {
   type LiveContentPart,
 } from "../store";
 import type { MessageInfo } from "../api/types";
-import { Slot } from "../extensions/registry";
+import { Target, autoRegister } from "../extensions/registry";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -26,7 +26,6 @@ import {
   useMessageScroller,
 } from "./ui/message-scroller";
 import { Badge } from "./ui/badge";
-import { Composer } from "./Composer";
 import { MessageItem, MessagePart } from "./MessageItem";
 import { PendingRequestsPanel } from "./PendingRequestsPanel";
 import { QueueStrip } from "./QueueStrip";
@@ -40,13 +39,7 @@ import { WorkspacePicker } from "./WorkspacePicker";
 /** In-pane navigation: goes through the focused pane's surface. */
 type NavigateFn = (sessionID: string | null) => void;
 
-export function Conversation({
-  sessionID,
-  paneKey = "main",
-  focused = true,
-  onClose,
-  onNavigate,
-}: {
+export interface ConversationProps {
   sessionID: string;
   /** Which split pane this instance renders — namespaces its DOM ids. */
   paneKey?: string;
@@ -56,7 +49,15 @@ export function Conversation({
   onClose?: () => void;
   /** In-pane navigation; defaults to global selectSession for safety. */
   onNavigate?: NavigateFn;
-}) {
+}
+
+export function Conversation({
+  sessionID,
+  paneKey = "main",
+  focused = true,
+  onClose,
+  onNavigate,
+}: ConversationProps) {
   // Every in-pane navigation routes through onNavigate when provided so a
   // split pane swaps ITS content instead of yanking the whole app.
   const go: NavigateFn = (sid) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
@@ -198,7 +199,8 @@ export function Conversation({
 
   return (
     <div className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
-      <Header
+      <Target
+        id="conversation.header"
         title={session?.title}
         sessionID={sessionID}
         running={running}
@@ -208,9 +210,6 @@ export function Conversation({
         onClose={onClose}
       />
       {!isDraftSession(sessionID) && <SubagentStrip sessionID={sessionID} onNavigate={onNavigate} />}
-      {/* Extension region: pinned strip at the very top of the transcript
-          area (above the scroller, so it stays visible while scrolled). */}
-      <Slot region="transcript.above" sessionID={sessionID} />
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
         <div className="relative flex flex-1 flex-col overflow-hidden">
@@ -235,9 +234,6 @@ export function Conversation({
         </div>
       </MessageScrollerProvider>
 
-      {/* Extension region: right after the transcript (live block included),
-          before SendErrorStrip / QueueStrip / the composer slot. */}
-      <Slot region="transcript.below" sessionID={sessionID} />
       <SendErrorStrip sessionID={sessionID} />
       {/* Pending busy-sends (steer/queue) — above the whole composer slot so
           it also shows while RunsPanel/gate replace the composer. */}
@@ -246,11 +242,7 @@ export function Conversation({
         // Unfocused panes stream their own live projection but carry none of
         // the focused pane's global chrome — always the plain composer,
         // never the runs-panel/gate swaps.
-        <Slot
-          region="composer.replace"
-          sessionID={sessionID}
-          fallback={<Composer sessionID={sessionID} paneKey={paneKey} />}
-        />
+        <Target id="composer" sessionID={sessionID} paneKey={paneKey} />
       ) : ownPending ? (
         // This session's pending permission/question/form REPLACES the
         // composer until resolved — the agent is blocked on it (panel owns
@@ -263,11 +255,7 @@ export function Conversation({
         // (site-wide binding in App), Backspace/↑ return to the parent.
         <SubagentGate sessionID={sessionID} parentID={session.parentID} go={go} />
       ) : (
-        <Slot
-          region="composer.replace"
-          sessionID={sessionID}
-          fallback={<Composer sessionID={sessionID} paneKey={paneKey} />}
-        />
+        <Target id="composer" sessionID={sessionID} paneKey={paneKey} />
       )}
     </div>
   );
@@ -509,14 +497,13 @@ function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
  */
 const TranscriptList = React.memo(function TranscriptList({ sessionID, messages, live, running }: TranscriptProps) {
   return (
-    <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6">
+    <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6" data-oc-transcript>
       {messages.length === 0 && live.length === 0 && !running && (
         <>
           <MessageScrollerItem>
             <EmptyHint />
           </MessageScrollerItem>
-          {/* Extension region: alongside the built-in empty state. */}
-          <Slot region="transcript.empty" sessionID={sessionID} />
+          <Target id="conversation.empty" sessionID={sessionID} />
         </>
       )}
       {(() => {
@@ -597,6 +584,16 @@ function EmptyHint() {
 function workspaceLabel(directory: string): string {
   return directory.replace(/\/+$/, "").replace(/^\/(home|Users)\/[^/]+/, "~");
 }
+export interface HeaderProps {
+  title?: string;
+  sessionID: string;
+  running: boolean;
+  queued: boolean;
+  parentID?: string;
+  go: (sessionID: string | null) => void;
+  onClose?: () => void;
+}
+
 function Header({
   title,
   sessionID,
@@ -605,23 +602,14 @@ function Header({
   parentID,
   go,
   onClose,
-}: {
-  title?: string;
-  sessionID: string;
-  running: boolean;
-  queued: boolean;
-  parentID?: string;
-  go: (sessionID: string | null) => void;
-  onClose?: () => void;
-}) {
+}: HeaderProps) {
   const parentTitle = useStore((s) => s.sessionDetails[parentID ?? ""]?.title);
   // The draft has no server-side session yet — show its target workspace
   // instead of a title/id pair.
   const isDraft = isDraftSession(sessionID);
   const draftWorkspace = useStore((s) => s.draftWorkspace);
   return (
-    <div className="flex items-center justify-between border-b border-[var(--border-base)] px-4 py-2.5">
-      <Slot region="header.session.before" sessionID={sessionID} />
+    <div className="flex items-center justify-between border-b border-[var(--border-base)] px-4 py-2.5" data-oc-session-header>
       <div className="flex min-w-0 items-center gap-2">
         {parentID && (
           <button
@@ -671,9 +659,6 @@ function Header({
         )}
       </div>
       <div className="flex items-center gap-1.5">
-        {/* Extension region: first in the right-aligned action cluster, so
-            extension actions sit beside (left of) the built-in controls. */}
-        <Slot region="header.session.actions" sessionID={sessionID} />
         {onClose && (
           <button
             type="button"
@@ -806,3 +791,13 @@ function livePartKey(assistantID: string, part: LiveContentPart): string {
     ? `${assistantID}:tool:${part.tool.id}`
     : `${assistantID}:${part.type}:${part.ordinal}`;
 }
+
+// ---------------------------------------------------------------------------
+// Self-registration (spec §5.3)
+// ---------------------------------------------------------------------------
+
+autoRegister({
+  conversation: (p) => <Conversation {...(p as unknown as ConversationProps)} />,
+  "conversation.header": (p) => <Header {...(p as unknown as HeaderProps)} />,
+  "conversation.empty": (p) => <EmptyHint {...(p as unknown as Record<string, never>)} />,
+});

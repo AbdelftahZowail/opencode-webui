@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { getCommands, subscribeRegistry } from "../extensions/registry";
+import { getContributions, subscribeRegistry, type PaletteContribution } from "../extensions/registry";
 import { getState } from "../store";
 
 function parseKeybind(str: string): { ctrl: boolean; meta: boolean; shift: boolean; alt: boolean; key: string } {
@@ -43,20 +43,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 export function CommandKeybinds() {
   useEffect(() => {
-    let commands = getCommands() as unknown as Array<{
-      id: string;
-      title: string;
-      run: (ctx: { sessionID?: string }) => void;
-      keybind?: string;
-    }>;
+    let commands = getContributions<PaletteContribution>("palette");
 
     const refresh = () => {
-      commands = getCommands() as unknown as Array<{
-        id: string;
-        title: string;
-        run: (ctx: { sessionID?: string }) => void;
-        keybind?: string;
-      }>;
+      commands = getContributions<PaletteContribution>("palette");
     };
 
     const unsub = subscribeRegistry(refresh);
@@ -69,13 +59,13 @@ export function CommandKeybinds() {
         return;
       }
       for (const c of commands) {
-        const kb = (c as { keybind?: string }).keybind;
+        const kb = c.item.keybind;
         if (!kb) continue;
         if (matchesBinding(kb, e)) {
           e.preventDefault();
           try {
             const sid = getState().currentSessionID ?? undefined;
-            c.run({ sessionID: sid });
+            c.item.run({ sessionID: sid });
           } catch (err) {
             console.error(`[extensions] command "${c.id}" keybind failed:`, err);
           }

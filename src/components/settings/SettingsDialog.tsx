@@ -4,12 +4,9 @@ import { Blocks, Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, XIcon } fro
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { ScrollArea } from "../ui/scroll-area";
-import { Switch } from "../ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { isDisabled, setDisabled, subscribeExtGate } from "../../lib/extGate";
 import { registerPoller } from "../../lib/scheduler";
-import { getSettings, subscribeRegistry } from "../../extensions/registry";
-import { enabled as builtinExtensions } from "../../../ui-extensions/config";
+import { getContributions, getRegisteredIds, subscribeRegistry, type SettingsContribution } from "../../extensions/registry";
 import { ConfigSection } from "./ConfigSection";
 import { IntegrationsSection } from "./IntegrationsSection";
 import { McpSection } from "./McpSection";
@@ -125,11 +122,15 @@ export function SettingsDialog() {
   );
 }
 
-/** One runtime (plugin-shipped) extension as served by GET /api/webui/extensions. */
+/** One runtime (folder) extension as served by GET /api/webui/extensions. */
 interface RuntimeExtensionInfo {
   id: string;
-  url: string;
-  source: string;
+  url?: string;
+  domUrl?: string;
+  source?: string;
+  origin?: "user" | "project" | "shipped";
+  /** manifest.json `disabled: true` — paused, never bundled or imported. */
+  disabled?: boolean;
 }
 
 /**
@@ -143,20 +144,16 @@ function useRegistryVersion(): number {
   return version;
 }
 
-/** Re-render signal when any extGate toggle flips (keeps switch rows honest). */
-function useExtGateVersion(): number {
-  const [version, setVersion] = useState(0);
-  useEffect(() => subscribeExtGate(() => setVersion((v) => v + 1)), []);
-  return version;
-}
-
 /**
- * Settings › Extensions: runtime plugin-UI toggles, the static built-in list,
- * and every settings section contributed by enabled extensions ("settings"
- * kind). Mounted only while its tab is active (Radix unmounts inactive tabs).
+ * Settings › Extensions: every folder extension the proxy serves, every id
+ * registered in this page, and every settings section contributed by
+ * extensions ("settings" collection). Mounted only while its tab is active
+ * (Radix unmounts inactive tabs).
+ *
+ * Gating lives in the folders, not here: presence = installed, manifest
+ * `disabled: true` = paused — so this tab states, it never toggles.
  */
 function ExtensionsSection() {
-  const gateVersion = useExtGateVersion();
   const registryVersion = useRegistryVersion();
   // null = first load in flight; failures degrade to [] (endpoint may not
   // exist yet) rather than an error box — a missing list must not nag.
@@ -187,15 +184,15 @@ function ExtensionsSection() {
   }, []);
 
   // Extension-contributed settings sections; re-read when registrations change.
-  const extSettings = useMemo(() => getSettings(), [registryVersion]);
-  void gateVersion; // flips re-render this component so isDisabled() re-reads
+  const extSettings = useMemo(() => getContributions<SettingsContribution>("settings"), [registryVersion]);
+  const registeredIds = useMemo(() => getRegisteredIds(), [registryVersion]);
 
   return (
     <div className="space-y-5">
       <div>
-        <SectionHeader title="Extensions" note="plugin-shipped UI — toggle off to disable" />
+        <SectionHeader title="Extensions" note="one folder per extension — presence installs, manifest paused disables" />
         {runtime === null ? null : runtime.length === 0 ? (
-          <Empty>No plugin extensions installed.</Empty>
+          <Empty>No folder extensions installed.</Empty>
         ) : (
           <div className="space-y-1">
             {runtime.map((item) => (
@@ -205,26 +202,31 @@ function ExtensionsSection() {
               >
                 <div className="min-w-0">
                   <p className="truncate font-mono text-xs text-[var(--text-strong)]">{item.id}</p>
-                  <p className="truncate text-[11px] text-[var(--text-weaker)]">{item.source}</p>
+                  <p className="truncate text-[11px] text-[var(--text-weaker)]">{item.source ?? (item.url ?? "")}</p>
                 </div>
-                <Switch
-                  size="sm"
-                  checked={!isDisabled(item.id)}
-                  onCheckedChange={(next) => setDisabled(item.id, next)}
-                  aria-label={`Toggle ${item.id}`}
-                  title={isDisabled(item.id) ? "Disabled" : "Enabled"}
-                />
+                {item.disabled ? (
+                  <span className="shrink-0 rounded-sm border border-[var(--border-weak-base)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-weaker)]">
+                    paused
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-sm border border-transparent bg-[var(--surface-success-base)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-on-success-base)]">
+                    on
+                  </span>
+                )}
               </div>
             ))}
           </div>
         )}
+        <p className="mt-1 text-[11px] text-[var(--text-weaker)]">
+          pause with `"disabled": true` in the folder's manifest.json; delete the folder to uninstall.
+        </p>
       </div>
 
       <div>
-        <SectionHeader title="Built-in extensions" />
-        {builtinExtensions.length > 0 && (
+        <SectionHeader title="Registered in this page" />
+        {registeredIds.length > 0 ? (
           <div className="mb-1 flex flex-wrap gap-1">
-            {builtinExtensions.map((id) => (
+            {registeredIds.map((id) => (
               <span
                 key={id}
                 className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2 py-1 font-mono text-xs text-[var(--text-strong)]"
@@ -233,15 +235,14 @@ function ExtensionsSection() {
               </span>
             ))}
           </div>
+        ) : (
+          <Empty>No registrations.</Empty>
         )}
-        <p className="text-[11px] text-[var(--text-weaker)]">
-          built-in — manage in ui-extensions/config.ts
-        </p>
       </div>
 
       {extSettings.length > 0 && (
         <div>
-          <SectionHeader title="Extension settings" note="contributed by enabled extensions" />
+          <SectionHeader title="Extension settings" note="contributed by installed extensions" />
           <div className="space-y-2">
             {extSettings.map((section) => (
               // Key includes the registry version: a hot-swapped registration
@@ -252,11 +253,11 @@ function ExtensionsSection() {
                 id={section.id}
               >
                 <section className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] p-2.5">
-                  <h4 className="text-xs font-medium text-[var(--text-strong)]">{section.title}</h4>
-                  {section.description && (
-                    <p className="mt-0.5 text-[11px] text-[var(--text-weaker)]">{section.description}</p>
+                  <h4 className="text-xs font-medium text-[var(--text-strong)]">{section.item.title}</h4>
+                  {section.item.description && (
+                    <p className="mt-0.5 text-[11px] text-[var(--text-weaker)]">{section.item.description}</p>
                   )}
-                  <div className="mt-2">{section.render()}</div>
+                  <div className="mt-2">{section.item.render()}</div>
                 </section>
               </SettingsSectionBoundary>
             ))}
@@ -269,7 +270,7 @@ function ExtensionsSection() {
 
 /**
  * Crash isolation per contributed settings block — one broken extension must
- * not blank the whole Extensions tab (mirrors registry SlotErrorBoundary).
+ * not blank the whole Extensions tab (mirrors registry TargetErrorBoundary).
  */
 class SettingsSectionBoundary extends Component<
   { id: string; children: ReactNode },

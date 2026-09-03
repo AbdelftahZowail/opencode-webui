@@ -1,0 +1,6 @@
+{
+  "id": "report",
+  "name": "report",
+  "version": "1.0.0",
+  "description": "Report a webui bug on GitHub — diag bundle prefilled (/report)"
+}

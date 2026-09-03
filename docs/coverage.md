@@ -34,6 +34,31 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | worktree | `GET/POST/DELETE /api/worktree/{projectID}`, `POST refresh` | (proxied, not yet wrapped) | surfaced via workspace selection |
 | interrupt/background | `POST /api/session/{id}/interrupt?continue`, `POST background` | `interrupt`, `flushSteersNow` (`continue=true`: interrupt + resume steering, queue stays parked), `sessionBackground` | Esc two-step interrupt, QueueStrip "interrupt & send now", Ctrl+B background subagents |
 
+## Webui extension surface (proxy-owned — not engine OpenAPI, no snapshot drift)
+
+These routes are served by the proxy itself (`server/index.ts`, `server/ext/`,
+`server/userExtensions.ts`) for the extension system
+(`docs/extension-system-spec.md` §6/`§8`, authoring guide
+`webui-extensions/README.md`). They never appear in `docs/reference/openapi.json`
+and are intentionally excluded from `scripts/diff-openapi.ts`.
+
+| Endpoint | Served by | Purpose |
+| --- | --- | --- |
+| `GET /api/webui/extensions` → `{ data: [{ id, url, source }], version }` | `server/index.ts` via `server/userExtensions.ts` discovery | Extension manifest: one loader, three sources (user → project → shipped); folder presence + manifest `disabled` is the only gating |
+| `GET /api/webui/extensions/events` (SSE) | `server/index.ts` manifest listeners | Manifest push channel: one `{ type: "webui.extensions", version }` event per change + hello on subscribe; the page re-fetches the manifest and same-id-swaps bundles (replaces the old 8s poll) |
+| `GET /api/webui/extensions/{id}/bundle.js?v=mtime` | `server/index.ts` via `Bun.build` | Per-extension browser bundle (`index.tsx` entry), ESM cache-busted on the query so hot edits repaint live with no refresh |
+| `/api/webui/ext/<id>/…` | `server/ext/registry.ts` `dispatchExtRequest` | Proxy-stratum `server.ts` routes, auto-mounted and namespaced per extension (unknown id/route never falls through to the engine) |
+| `GET /api/webui/config` → `{ version, reportRepo }` | `server/index.ts` | Pinned version exposure for the agent skill (`skills/webui/SKILL.md` links pin to the released tag) |
+
+Loader behavior: user dir → project dir → shipped dir precedence (same id =
+same swap point, higher wins); `manifest.json` `{ id?, disabled? }`;
+browser entry candidates `index.tsx`/`index.ts`/`main.tsx`/`main.ts`
+(legacy `main.tsx`-only folders still load); `server.ts` modules stat-polled
+(2s) and cache-busted re-imported with pollers stopped before swap; `/api/*`
+passthrough wrapped by `onRequest`/`onResponse` middleware; the recorder's
+always-on engine subscription tapped via `onEvent` (headless, survives closed
+tabs); per-extension persistent KV (`server/ext/kv.ts`).
+
 ## Client-only — valid routes, no dedicated UI (by decision)
 
 | API group | Paths | Client | Reason |

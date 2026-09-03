@@ -1,83 +1,93 @@
 import { type ReactNode, Component, useSyncExternalStore } from "react";
 import type { MessageInfo, ToolPart } from "../api/types";
-import { enabled } from "../../ui-extensions/config";
 
 /**
- * The extension registry — the ONLY stable contract between the app and
- * ui-extensions. Kinds are versioned here; extensions register against them.
- * See ui-extensions/README.md for the authoring guide.
+ * Extension registry v2 — the stable contract between the app and extensions.
+ * See docs/extension-system-spec.md §5.
  *
- * Kinds (every one gated per-id by `enabled` in config.ts):
- *  - "region"              — markup rendered wherever a `<Slot region="…"/>`
- *                            marker sits; session/message/part ctx flows in.
- *  - "command"             — command-palette entries (title + run, order).
- *  - "slash"               — UI-only slash entry for Composer `/name` (local run, not engine; engine slash via engine plugin + GET /api/command).
- *  - "message.decoration"  — extra UI attached to a transcript message.
- *  - "message.part"        — injection after each text/tool/reasoning part.
- *  - "message"             — full replacement for a message type (like
- *                            tool.renderer for tools); first non-null render
- *                            wins, fallback is core renderMessageBody.
- *  - "hook"                — intercept/observe (known: store.dispatch,
- *                            session.prompt, message.render; event is open string so new seams need no registry bump).
- *  - "page"                — a full page; App routes `/ext/{id}` implicitly
- *                            for every registered page (no path is stored).
- *  - "tool.renderer"       — custom card for a specific tool name.
- *  - "settings"            — titled section inside Settings › Extensions.
+ * Five kinds, one job each:
+ *  - "wrap"       — flow-through tweak of any registered unit. Receives
+ *                     props + a `next()` thunk, delegates to live core by
+ *                     default. THE DEFAULT PATH FOR EDITS: core updates
+ *                     always render *through* it, so wraps are stale-proof
+ *                     by construction.
+ *  - "replace"    — take ownership of one registered target. Wins outright
+ *                     at its priority (frozen-snapshot semantics: the owner
+ *                     opts out of core updates for that target — the marked
+ *                     escape hatch). Receives (props, core) so it *can*
+ *                     compose. Fall-through on `null`: return null to defer
+ *                     to the next candidate / core default.
+ *  - "contribute" — add an item to a named collection. Collections are
+ *                     registry-owned lists ("palette", "slash", "pages",
+ *                     "settings", "contextMenu.message", "contextMenu.session",
+ *                     "contextMenu.file", …). Adding a collection is data in
+ *                     core, not a new kind.
+ *  - "hook"       — interception at instrumented boundaries. Open event
+ *                     strings; new seams = new event names, never a registry
+ *                     change.
+ *  - "service"    — provide/consume named logic. `getService(id)` returns
+ *                     the highest-precedence provider; doubles as value
+ *                     overrides (core consults services for pluggable values
+ *                     like the timestamp formatter).
+ *
+ * Target chains (§5.2): every registered unit is a target with an ordered
+ * chain — [wraps… (outermost first), replace candidates by ascending
+ * priority, core default last]. Wraps nest outside-in; the first replace
+ * candidate returning non-null wins; `null` falls through to core.
+ *
+ * Gating (§4): presence = installed, manifest `disabled: true` = paused.
+ * The loaders (webui-extensions/index.ts, src/lib/runtimeExtensions.ts)
+ * simply never register a paused extension and unregister removed ones —
+ * the registry itself is ungated. No config list, no localStorage.
+ *
+ * Contract (§5.3): target ids, collection ids, service ids are versioned.
+ * Renaming/moving one = deliberate version bump + migration note, never a
+ * silent break. Core components self-register via `registerTarget` /
+ * `autoRegister` at boot — no hand-maintained lists.
  */
 
-/** Context handed to region/command/page/slash renderers; all fields optional. */
-export interface ExtensionContext {
-  sessionID?: string;
-  messageID?: string;
-  part?: ToolPart;
-}
+// ---------------------------------------------------------------------------
+// v2 kinds — the contract
+// ---------------------------------------------------------------------------
 
-/** Context for a message decoration: the id plus the message itself. */
-export interface MessageDecorationCtx {
-  messageID: string;
-  message: MessageInfo;
-}
-
-export interface RegionExtension {
-  kind: "region";
+/** Flow-through tweak of a registered target. Outermost-first ordering. */
+export interface WrapExtension<P = Record<string, unknown>> {
+  kind: "wrap";
   id: string;
-  region: string;
-  render: (ctx: ExtensionContext) => ReactNode;
-}
-
-export interface CommandExtension {
-  kind: "command";
-  id: string;
-  title: string;
-  run: (ctx: ExtensionContext) => void;
+  /** Registered target id this wrap applies to. */
+  target: string;
+  /** Lower runs outermost. Defaults to 100. */
   order?: number;
-  keybind?: string;
+  render: (props: P, next: () => ReactNode) => ReactNode;
 }
 
-export interface SlashExtension {
-  kind: "slash";
+/** Take ownership of a registered target. Ascending-priority chain. */
+export interface ReplaceExtension<P = Record<string, unknown>> {
+  kind: "replace";
   id: string;
-  name: string;
-  description?: string;
-  aliases?: string[];
-  run: (args: string, ctx: ExtensionContext) => void | Promise<void>;
+  /** Registered target id this replace applies to. */
+  target: string;
+  /** Lower is tried first; first non-null wins. Defaults to 100. */
+  priority?: number;
+  /**
+   * Return `null` to fall through to the next candidate (or core).
+   * `core` re-invokes the core default with (possibly modified) props.
+   */
+  render: (props: P, core: (props: P) => ReactNode) => ReactNode | null;
 }
 
-export interface MessagePartDecorationExtension {
-  kind: "message.part";
+/** One item added to a registry-owned named collection. */
+export interface ContributeExtension<T = unknown> {
+  kind: "contribute";
   id: string;
-  render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null;
-}
-
-export interface ContextMenuExtension {
-  kind: "contextMenu";
-  id: string;
-  target: "message" | "session" | "file";
-  label: string;
-  run: (ctx: ExtensionContext) => void;
+  /** Collection id, e.g. "palette", "slash", "pages", "contextMenu.message". */
+  collection: string;
+  item: T;
+  /** Lower sorts first. Defaults to 100. */
   order?: number;
 }
 
+/** Interception at an instrumented boundary. `event` is an open string. */
 export interface HookExtension {
   kind: "hook";
   id: string;
@@ -85,100 +95,100 @@ export interface HookExtension {
   handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void>;
 }
 
-export interface MessageDecorationExtension {
-  kind: "message.decoration";
+/** Named logic provision. Highest `precedence` wins `getService`. */
+export interface ServiceExtension<T = unknown> {
+  kind: "service";
   id: string;
-  render: (ctx: MessageDecorationCtx) => ReactNode | null;
+  /** Service id, e.g. "format.timestamp". */
+  service: string;
+  value: T;
+  /** Higher wins. Defaults to 0. */
+  precedence?: number;
 }
 
-/**
- * A full page. Its route is DERIVED, never stored: App serves `/ext/{id}`
- * for every enabled page, so ids double as URL slugs.
- */
-export interface PageExt {
-  kind: "page";
-  id: string;
+/** What register() accepts: the five v2 kinds. Nothing else. */
+export type ExtInput =
+  | WrapExtension<Record<string, unknown>>
+  | ReplaceExtension<Record<string, unknown>>
+  | ContributeExtension<unknown>
+  | HookExtension
+  | ServiceExtension<unknown>;
+
+// ---------------------------------------------------------------------------
+// Collection item shapes — the data half of the contract
+// ---------------------------------------------------------------------------
+// `contribute` items are untyped at the registry boundary (`item: unknown`);
+// these interfaces document what core actually reads per collection, so
+// producers and consumers agree without importing each other's modules.
+
+/** Item for the "palette" collection (command palette + keybinds). */
+export interface PaletteContribution {
+  title: string;
+  run: (ctx: { sessionID?: string }) => void;
+  keybind?: string;
+}
+
+/** Item for the "slash" collection (Composer `/name` entries). */
+export interface SlashContribution {
+  name: string;
+  description?: string;
+  aliases?: string[];
+  run: (args: string, ctx: { sessionID?: string }) => void | Promise<void>;
+}
+
+/** Item for the "pages" collection (full surfaces at `/ext/{id}`). */
+export interface PageContribution {
   title: string;
   description?: string;
-  render: (ctx: ExtensionContext) => ReactNode;
+  render: (ctx: { sessionID?: string }) => ReactNode;
 }
 
-/** A titled section inside the app's Settings page ("settings" kind). */
-export interface SettingsExtension {
-  kind: "settings";
-  id: string;
+/** Item for the "settings" collection (Settings › Extensions sections). */
+export interface SettingsContribution {
   title: string;
   description?: string;
   render: () => ReactNode;
 }
 
-export interface ToolRendererExtension {
-  kind: "tool.renderer";
-  id: string;
-  toolName: string;
-  render: (part: ToolPart) => ReactNode;
+/** Item for the "contextMenu.message/session/file" collections. */
+export interface ContextMenuContribution {
+  label: string;
+  run: (ctx: { sessionID?: string; messageID?: string }) => void;
 }
 
-export interface MessageExtension {
-  kind: "message";
-  id: string;
-  /** Message type this renderer handles; "*" matches any type. Defaults to "*". */
-  type?: MessageInfo["type"] | "*";
-  render: (ctx: { message: MessageInfo; sessionID?: string }) => ReactNode | null;
+/** Item for the "message.decoration" collection (row under the body). */
+export interface MessageDecorationContribution {
+  render: (ctx: { messageID: string; message: MessageInfo }) => ReactNode | null;
 }
 
-/** What register() accepts: first-class kinds only (no legacy slot shapes). */
-export type ExtInput =
-  | { kind: "region"; id: string; region: string; render: (ctx: ExtensionContext) => ReactNode }
-  | { kind: "command"; id: string; title: string; run: (ctx: ExtensionContext) => void; order?: number; keybind?: string }
-  | { kind: "slash"; id: string; name: string; description?: string; aliases?: string[]; run: (args: string, ctx: ExtensionContext) => void | Promise<void> }
-  | { kind: "message.decoration"; id: string; render: (ctx: MessageDecorationCtx) => ReactNode | null }
-  | { kind: "message.part"; id: string; render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null }
-  | { kind: "message"; id: string; type?: MessageInfo["type"] | "*"; render: (ctx: { message: MessageInfo; sessionID?: string }) => ReactNode | null }
-  | { kind: "contextMenu"; id: string; target: "message" | "session" | "file"; label: string; run: (ctx: ExtensionContext) => void; order?: number }
-  | { kind: "hook"; id: string; event: string; handler: (ctx: Record<string, unknown>, next: () => void) => void | Promise<void> }
-  | { kind: "page"; id: string; title: string; description?: string; render: (ctx: ExtensionContext) => ReactNode }
-  | { kind: "settings"; id: string; title: string; description?: string; render: () => ReactNode }
-  | { kind: "tool.renderer"; id: string; toolName: string; render: (part: ToolPart) => ReactNode };
+/** Item for the "message.part" collection (inline below one content part). */
+export interface MessagePartContribution {
+  render: (ctx: {
+    messageID: string;
+    message: MessageInfo;
+    part: ToolPart;
+    partIndex: number;
+  }) => ReactNode | null;
+}
 
-/** Internal storage: every input normalized into one discriminated union. */
+/** Internal storage: v2 entries only. */
 type StoredExt =
-  | RegionExtension
-  | CommandExtension
-  | SlashExtension
-  | MessageDecorationExtension
-  | MessagePartDecorationExtension
-  | MessageExtension
-  | ContextMenuExtension
+  | WrapExtension<Record<string, unknown>>
+  | ReplaceExtension<Record<string, unknown>>
+  | ContributeExtension<unknown>
   | HookExtension
-  | PageExt
-  | SettingsExtension
-  | ToolRendererExtension;
+  | ServiceExtension<unknown>;
 
 const registry: StoredExt[] = [];
-const enabledSet = new Set(enabled);
 
-/**
- * Gating check with ANCESTRY: "dev-sandbox.header" is on when its owner id
- * "dev-sandbox" is enabled. One config entry (or one runtime plugin id)
- * therefore gates every registration the extension made under it.
- */
-function isIdEnabled(id: string): boolean {
-  if (enabledSet.has(id)) return true;
-  let cut = id.lastIndexOf(".");
-  while (cut > 0) {
-    const parent = id.slice(0, cut);
-    if (enabledSet.has(parent)) return true;
-    cut = parent.lastIndexOf(".");
-  }
-  return false;
-}
+/** Core defaults: target id → default render. Self-registered at boot. */
+const coreTargets = new Map<string, (props: Record<string, unknown>) => ReactNode>();
 
 /**
  * Registry mutations are observable so extension hot updates repaint
- * WITHOUT a page reload: an edited (self-accepting) extension module
- * re-registers with the same id, `register()` swaps it in and bumps the
- * version, and every mounted Slot re-reads the fresh render fns.
+ * WITHOUT a page reload: an edited extension module re-registers with the
+ * same id, `register()` swaps it in and bumps the version, and every
+ * mounted Target re-reads the fresh render fns.
  */
 let registryVersion = 0;
 const listeners = new Set<() => void>();
@@ -194,38 +204,17 @@ function notifyRegistryChange() {
 }
 
 /**
- * Drops registrations whose ids are missing from `seenIds` — called after
- * extension re-discovery so a DELETED folder's slot disappears without a
- * page reload. Only ever fed ids harvested from live extension modules.
- * Id-keyed by design, so it prunes every kind uniformly — no change needed.
+ * Unregister everything under the given ids — called by the loaders when a
+ * folder is deleted/moved or paused via manifest `disabled: true`, so the
+ * entries disappear without a page reload. Core targets are never
+ * unregistered (they are core, not extensions).
  */
-export function pruneExtensions(seenIds: Set<string>) {
-  let removed = false;
-  for (let i = registry.length - 1; i >= 0; i--) {
-    if (!seenIds.has(registry[i]!.id)) {
-      registry.splice(i, 1);
-      removed = true;
-    }
-  }
-  if (removed) notifyRegistryChange();
-}
-
-/**
- * Runtime (plugin-shipped) extensions discover their ids only after boot —
- * the enabled set is seeded from the static config list, so the loader
- * allow-lists discovered ids here before importing their bundles.
- */
-export function enableRuntimeIds(ids: string[]) {
-  for (const id of ids) enabledSet.add(id);
-}
-
-/** Turn runtime ids off: revoke gating AND unregister everything they added. */
-export function disableRuntimeIds(ids: string[]) {
+export function unregisterIds(ids: string[]) {
+  if (ids.length === 0) return;
   const drop = new Set(ids);
-  for (const id of drop) enabledSet.delete(id);
   let removed = false;
   for (let i = registry.length - 1; i >= 0; i--) {
-    if (!isIdEnabled(registry[i]!.id)) {
+    if (drop.has(registry[i]!.id)) {
       registry.splice(i, 1);
       removed = true;
     }
@@ -238,179 +227,240 @@ export function getRegisteredIds(): string[] {
   return registry.map((e) => e.id);
 }
 
-/** Route App implicitly serves for a page — derived from its id, never stored. */
-function pageRoute(id: string): string {
-  return `/ext/${id}`;
-}
+// ---------------------------------------------------------------------------
+// v2 core API: targets, contributions, services, hooks
+// ---------------------------------------------------------------------------
 
-export function register(ext: ExtInput) {
-  const existing = registry.findIndex((e) => e.id === ext.id);
-  if (existing !== -1) {
-    registry[existing] = ext as StoredExt;
-    notifyRegistryChange();
-    return;
-  }
-  if (ext.kind === "page") {
-    const route = pageRoute(ext.id);
-    const clash = registry.find(
-      (e) => e.kind === "page" && e.id !== ext.id && pageRoute(e.id) === route,
-    );
-    if (clash) {
-      console.warn(
-        `[extensions] page "${ext.id}" rejected: route ${route} is already taken by page "${clash.id}"`,
-      );
-      return;
-    }
-  }
-  if (ext.kind === "slash") {
-    const name = ext.name.toLowerCase();
-    if (!/^[a-z0-9_-]+$/.test(name)) {
-      console.warn(`[extensions] slash "${ext.id}" rejected: name "${ext.name}" must match /^[a-z0-9_-]+$/`);
-      return;
-    }
-  }
-  registry.push(ext as StoredExt);
+/**
+ * Register a core default render for a single target id — the primitive.
+ * Called by core components at module boot (`autoRegister` below is the
+ * batch helper over this for groups). Re-registering the
+ * same id swaps the default (HMR-safe).
+ */
+export function registerTarget(
+  target: string,
+  render: (props: Record<string, unknown>) => ReactNode,
+) {
+  coreTargets.set(target, render);
   notifyRegistryChange();
 }
 
-export function getRegions(
-  region: string,
-): { id: string; render: (ctx: ExtensionContext) => ReactNode }[] {
-  return registry.filter(
-    (e): e is RegionExtension => e.kind === "region" && e.region === region && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-  );
+/**
+ * Auto-registration helper (§5.3): the batch form of `registerTarget` —
+ * register a batch of core defaults in one call (one notify) instead of one
+ * `registerTarget` per target — no hand-maintained lists. A core module calls this once at the top
+ * level with every tweakable unit it owns (leaves, not just roots):
+ *
+ *   autoRegister({ "message.timestamp": (p) => <Timestamp {...p} />, ... });
+ */
+export function autoRegister(
+  targets: Record<string, (props: Record<string, unknown>) => ReactNode>,
+) {
+  for (const [target, render] of Object.entries(targets)) {
+    coreTargets.set(target, render);
+  }
+  notifyRegistryChange();
 }
 
-const DEFAULT_COMMAND_ORDER = 100;
+/** Ordered chain for one target: wraps outermost-first, replaces by priority. */
+export interface TargetChain {
+  wraps: WrapExtension<Record<string, unknown>>[];
+  replaces: ReplaceExtension<Record<string, unknown>>[];
+  core: ((props: Record<string, unknown>) => ReactNode) | undefined;
+}
 
-/** Sorted by order ?? 100, then title; ties keep registration order (stable sort). */
-export function getCommands(): { id: string; title: string; run: (ctx: ExtensionContext) => void }[] {
-  return registry
-    .filter((e): e is CommandExtension => e.kind === "command" && (enabledSet.has(e.id) || isIdEnabled(e.id)))
+export function getTargetChain(target: string): TargetChain {
+  const wraps = registry
+    .filter(
+      (e): e is WrapExtension<Record<string, unknown>> =>
+        e.kind === "wrap" && e.target === target,
+    )
+    .sort((a, b) => (a.order ?? 100) - (b.order ?? 100) || a.id.localeCompare(b.id));
+  const replaces = registry
+    .filter(
+      (e): e is ReplaceExtension<Record<string, unknown>> =>
+        e.kind === "replace" && e.target === target,
+    )
     .sort(
-      (a, b) =>
-        (a.order ?? DEFAULT_COMMAND_ORDER) - (b.order ?? DEFAULT_COMMAND_ORDER) ||
-        a.title.localeCompare(b.title),
+      (a, b) => (a.priority ?? 100) - (b.priority ?? 100) || a.id.localeCompare(b.id),
     );
+  return { wraps, replaces, core: coreTargets.get(target) };
 }
 
-export function getSlashCommands(): SlashExtension[] {
-  return registry.filter(
-    (e): e is SlashExtension => e.kind === "slash" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+/** True when the target has a core default or any wrap/replace entries. */
+export function hasTarget(target: string): boolean {
+  if (coreTargets.has(target)) return true;
+  return registry.some(
+    (e) =>
+      (e.kind === "wrap" || e.kind === "replace") &&
+      (e as WrapExtension | ReplaceExtension).target === target,
   );
 }
 
-export function getMessageDecorations(): {
-  id: string;
-  render: (ctx: MessageDecorationCtx) => ReactNode | null;
-}[] {
-  return registry.filter(
-    (e): e is MessageDecorationExtension => e.kind === "message.decoration" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+function renderChainLeaf(
+  chain: TargetChain,
+  props: Record<string, unknown>,
+): ReactNode {
+  const core = chain.core ?? (() => null);
+  for (const r of chain.replaces) {
+    let out: ReactNode | null = null;
+    try {
+      out = r.render(props, core);
+    } catch (err) {
+      console.error(`[extensions] replace "${r.id}" crashed:`, err);
+      continue;
+    }
+    if (out !== null) return out;
+  }
+  try {
+    return core(props);
+  } catch (err) {
+    console.error(`[extensions] core target crashed:`, err);
+    return null;
+  }
+}
+
+function renderWithWraps(
+  wraps: WrapExtension<Record<string, unknown>>[],
+  index: number,
+  props: Record<string, unknown>,
+  leaf: () => ReactNode,
+): ReactNode {
+  if (index >= wraps.length) return leaf();
+  const w = wraps[index]!;
+  try {
+    return w.render(props, () => renderWithWraps(wraps, index + 1, props, leaf));
+  } catch (err) {
+    console.error(`[extensions] wrap "${w.id}" crashed, falling through:`, err);
+    return renderWithWraps(wraps, index + 1, props, leaf);
+  }
+}
+
+/**
+ * Evaluate a target chain to a node. Call during render (it invokes user
+ * wrap/replace fns). Wraps nest outermost-first; the first replace
+ * returning non-null wins; `null` falls through to the core default.
+ */
+const warnedNoCore = new Set<string>();
+export function renderTarget(target: string, props: Record<string, unknown> = {}): ReactNode {
+  const chain = getTargetChain(target);
+  if (!chain.core && chain.replaces.length === 0 && !warnedNoCore.has(target)) {
+    warnedNoCore.add(target);
+    console.warn(
+      `[extensions] target "${target}" has no core default — its module's autoRegister never ran (is it imported at boot?). Rendering null.`,
+    );
+  }
+  return renderWithWraps(chain.wraps, 0, props, () => renderChainLeaf(chain, props));
+}
+
+/**
+ * The universal target marker: evaluates the registered chain for `id`.
+ * Extra props flow to wraps / replaces / core. Repaints live on registry
+ * swaps. Crash-isolated per target so one broken extension cannot blank
+ * the surrounding tree.
+ */
+export function Target(props: { id: string; [key: string]: unknown }): ReactNode {
+  useSyncExternalStore(subscribeRegistry, () => registryVersion);
+  const { id, ...rest } = props;
+  return (
+    <TargetErrorBoundary id={id}>
+      {renderTarget(id, rest as Record<string, unknown>)}
+    </TargetErrorBoundary>
   );
 }
 
-export function getPages(): {
-  id: string;
-  title: string;
-  description?: string;
-  render: (ctx: ExtensionContext) => ReactNode;
-}[] {
-  return registry.filter((e): e is PageExt => e.kind === "page" && (enabledSet.has(e.id) || isIdEnabled(e.id)));
-}
-
-/** Settings-page sections contributed by extensions ("settings" kind). */
-export function getSettings(): {
-  id: string;
-  title: string;
-  description?: string;
-  render: () => ReactNode;
-}[] {
-  return registry.filter(
-    (e): e is SettingsExtension => e.kind === "settings" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-  );
-}
-
-export function getMessagePartDecorations(): {
-  id: string;
-  render: (ctx: { messageID: string; message: MessageInfo; part: ToolPart; partIndex: number }) => ReactNode | null;
-}[] {
-  return registry.filter(
-    (e): e is MessagePartDecorationExtension => e.kind === "message.part" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-  );
-}
-
-export function getContextMenus(target: ContextMenuExtension["target"]): {
-  id: string;
-  label: string;
-  run: (ctx: ExtensionContext) => void;
-}[] {
+/**
+ * Items contributed to a named collection, sorted by order then id.
+ * Collections are data ("palette", "slash", "pages", "settings",
+ * "contextMenu.message", …) — never new kinds.
+ */
+export function getContributions<T = unknown>(
+  collection: string,
+): { id: string; item: T; order: number }[] {
   return registry
-    .filter((e): e is ContextMenuExtension => e.kind === "contextMenu" && e.target === target && (enabledSet.has(e.id) || isIdEnabled(e.id)))
-    .sort((a, b) => (a.order ?? 100) - (b.order ?? 100) || a.label.localeCompare(b.label));
+    .filter(
+      (e): e is ContributeExtension<T> =>
+        e.kind === "contribute" && e.collection === collection,
+    )
+    .map((e) => ({ id: e.id, item: e.item, order: e.order ?? 100 }))
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+}
+
+/**
+ * Consume a named logic service. Highest `precedence` wins — this doubles
+ * as value overrides: core consults services for pluggable values (e.g.
+ * the timestamp formatter) so tiny logic tweaks stay stale-proof.
+ */
+export function getService<T = unknown>(id: string): T | undefined {
+  let best: ServiceExtension<T> | undefined;
+  let bestPrecedence = -Infinity;
+  for (const e of registry) {
+    if (e.kind !== "service") continue;
+    const s = e as ServiceExtension<T>;
+    if (s.service !== id) continue;
+    const p = s.precedence ?? 0;
+    if (p > bestPrecedence) {
+      best = s;
+      bestPrecedence = p;
+    }
+  }
+  return best?.value;
+}
+
+/** Every provider for a service id, highest precedence first. */
+export function getServiceProviders<T = unknown>(
+  id: string,
+): { id: string; value: T; precedence: number }[] {
+  return registry
+    .filter(
+      (e): e is ServiceExtension<T> =>
+        e.kind === "service" && e.service === id,
+    )
+    .map((e) => ({ id: e.id, value: e.value, precedence: e.precedence ?? 0 }))
+    .sort((a, b) => b.precedence - a.precedence || a.id.localeCompare(b.id));
 }
 
 export function getHooks(event: string): HookExtension[] {
-  return registry.filter((e): e is HookExtension => e.kind === "hook" && e.event === event && (enabledSet.has(e.id) || isIdEnabled(e.id)));
-}
-
-export function getPage(id: string): PageExt | undefined {
-  return registry.find((e): e is PageExt => e.kind === "page" && e.id === id && (enabledSet.has(e.id) || isIdEnabled(e.id)));
-}
-
-export function getToolRenderer(toolName: string): ToolRendererExtension | undefined {
-  return registry.find(
-    (e): e is ToolRendererExtension =>
-      e.kind === "tool.renderer" && e.toolName === toolName && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-  );
-}
-
-export function getMessageRenderer(type: MessageInfo["type"]): MessageExtension | undefined {
-  const exact = registry.find(
-    (e): e is MessageExtension => e.kind === "message" && (e.type ?? "*") === type && (enabledSet.has(e.id) || isIdEnabled(e.id)),
-  );
-  if (exact) return exact;
-  return registry.find(
-    (e): e is MessageExtension => e.kind === "message" && (e.type ?? "*") === "*" && (enabledSet.has(e.id) || isIdEnabled(e.id)),
+  return registry.filter(
+    (e): e is HookExtension => e.kind === "hook" && e.event === event,
   );
 }
 
 /**
- * The universal region marker: renders every "region" extension registered
- * for `region`, passing session/message/part ctx through. Renders nothing
- * (or `fallback`) when the region has no enabled extensions. Tracks registry
- * swaps so extension hot updates repaint without any reload.
+ * NOTE: the live hook runner is `fireHooks` in `./hooks` (sequential,
+ * crash-isolated; `next()` is accepted but a no-op — every handler runs).
+ * It lives there, not here, so this module has no runner of its own: one
+ * method per concern, no divergent duplicates.
  */
-export function Slot(props: {
-  region: string;
-  sessionID?: string;
-  messageID?: string;
-  part?: ToolPart;
-  fallback?: ReactNode;
-}): ReactNode {
-  useSyncExternalStore(subscribeRegistry, () => registryVersion);
-  const items = getRegions(props.region);
-  if (items.length === 0) return props.fallback ?? null;
-  const ctx: ExtensionContext = {
-    sessionID: props.sessionID,
-    messageID: props.messageID,
-    part: props.part,
-  };
-  return (
-    <>
-      {items.map((e) => (
-        <SlotErrorBoundary key={e.id} id={e.id}>
-          <div>{e.render(ctx)}</div>
-        </SlotErrorBoundary>
-      ))}
-    </>
-  );
+
+// ---------------------------------------------------------------------------
+// register()
+// ---------------------------------------------------------------------------
+
+/**
+ * Register one v2 extension entry. Same-id re-registration swaps in place
+ * (hot-swap, no reload). There are no legacy kinds: `region`, `message`,
+ * `message.decoration`, `message.part`, `tool.renderer`, `command`,
+ * `slash`, `page`, `settings`, `contextMenu` are gone — use
+ * wrap / replace / contribute (spec §10).
+ */
+export function register(ext: ExtInput) {
+  const stored = ext as StoredExt;
+  const existing = registry.findIndex((e) => e.id === stored.id);
+  if (existing !== -1) {
+    registry[existing] = stored;
+    notifyRegistryChange();
+    return;
+  }
+  registry.push(stored);
+  notifyRegistryChange();
 }
 
 /**
- * One broken extension must not blank the app region it renders into —
- * crash isolation is per slot item; the rest of the slot keeps working.
+ * One broken extension must not blank the tree it renders into —
+ * crash isolation is per target item; the rest keeps working.
  */
-class SlotErrorBoundary extends Component<
+export class TargetErrorBoundary extends Component<
   { children: ReactNode; id: string },
   { failed: boolean }
 > {
@@ -419,7 +469,7 @@ class SlotErrorBoundary extends Component<
     return { failed: true };
   }
   componentDidCatch(err: unknown) {
-    console.error(`[extensions] slot item "${this.props.id}" crashed:`, err);
+    console.error(`[extensions] target "${this.props.id}" crashed:`, err);
   }
   render() {
     return this.state.failed ? null : this.props.children;

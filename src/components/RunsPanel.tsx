@@ -269,7 +269,7 @@ export function RunsPanel({ sessionID, paneKey = "main" }: { sessionID: string; 
   if (!open) return null;
 
   return (
-    <div ref={rootRef} className="border-t border-[color:var(--border-weak-base)] px-3 pb-2 pt-2">
+    <div ref={rootRef} className="border-t border-[color:var(--border-weak-base)] px-3 pb-2 pt-2" data-oc-runs-panel>
       <div className="mx-auto max-w-3xl">
         <div
           ref={boxRef}
