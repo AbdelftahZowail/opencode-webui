@@ -29,12 +29,15 @@ import {
   SANDBOX,
   guardRequest,
   handleLogin,
+  hostnameOf,
   isAuthed,
   isLoopbackHostname,
+  isWildcardHostname,
   loadSecret,
   loginPageResponse,
   logoutResponse,
   peerIP,
+  resolveAllowedHosts,
   resolveAuthPolicy,
   unauthorizedResponse,
 } from "./auth";
@@ -674,6 +677,9 @@ if (process.argv.includes("--install-skill")) {
 
 // Exits with a clear message when a wildcard bind has no WEBUI_PASSWORD.
 const AUTH = resolveAuthPolicy(HOST);
+// Operator-controlled Host allowlist (WEBUI_ALLOWED_HOSTS) — resolved once,
+// consulted on every request by guardRequest below.
+const ALLOWED_HOSTS = resolveAllowedHosts();
 const SECRET = loadSecret();
 const SKILL = await syncSkill(); // best-effort — never blocks the banner below it
 
@@ -715,7 +721,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     const path = url.pathname;
 
     // DNS-rebinding + cross-origin guard — before ANY route, login included.
-    const guarded = guardRequest(req, HOST);
+    const guarded = guardRequest(req, HOST, ALLOWED_HOSTS);
     if (guarded) return guarded;
 
     // The unauthenticated surface: login page, login POST, logout.
@@ -1043,6 +1049,21 @@ const server: Server<Record<string, unknown>> = Bun.serve({
   },
 });
 
+// Operator-visible access summary: who the Host guard lets in, so a 403 is
+// never a mystery. Loopback + bind host are always allowed; the rest comes
+// from WEBUI_ALLOWED_HOSTS.
+function describeHosts(): string {
+  const parts = ["localhost (loopback always allowed)"];
+  const bind = hostnameOf(HOST);
+  if (isWildcardHostname(bind)) parts.push(`${HOST} (all interfaces — Host header still checked)`);
+  else if (!isLoopbackHostname(bind)) parts.push(bind);
+  for (const e of ALLOWED_HOSTS.entries) {
+    if (e === "*") parts.push("ANY host (WEBUI_ALLOWED_HOSTS=*)");
+    else if (!parts.includes(e)) parts.push(e);
+  }
+  return parts.join(", ");
+}
+
 // First-boot banner — the entire onboarding. The generated password is
 // printed exactly once and never logged anywhere else.
 const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST) ? "localhost" : HOST;
@@ -1052,6 +1073,7 @@ console.log(
     SANDBOX()
       ? `[webui] sandbox — loopback only, NO password; extensions (scratch): ${globalUserExtensionsDir()}`
       : `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
+    `[webui] hosts: ${describeHosts()}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
     `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/ (index.tsx + manifest.json)`,
     SKILL.ok

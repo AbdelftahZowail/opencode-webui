@@ -33,6 +33,8 @@ Options:
 | --- | --- | --- |
 | `WEBUI_PASSWORD` | generated on first boot | Log in with this passphrase. Set it to pin your own instead of the generated one. |
 | `WEBUI_HOST` | `127.0.0.1` | Bind address. A wildcard (`0.0.0.0` / `::`) is refused without a password. |
+| `WEBUI_ALLOWED_HOSTS` | loopback + bind host | Extra hostnames/IPs accepted (comma-separated, e.g. `192.168.1.5,myserver.lan`). `*` accepts everything — your call, your risk. |
+| `WEBUI_TRUST_PROXY` | unset | Set to `1` when a trusted reverse proxy sits in front, so `X-Forwarded-Host`/`Proto` are honored. Without it those headers are ignored. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Adds a higher-precedence source shadowing both (the sandbox uses this to keep WIP isolated; shipped extensions still load underneath). |
 
@@ -52,9 +54,10 @@ chmod +x opencode-webui-linux-x64
 ## Security
 
 - One shared passphrase for the whole UI. Generated on first boot if `WEBUI_PASSWORD` is unset, printed once.
-- Login sets a signed **HttpOnly `SameSite=Strict`** cookie — `Secure` too when the request arrived over https (`X-Forwarded-Proto`).
-- Login is rate-limited per IP with constant-time comparison; `Host`/`Origin` headers are validated.
+- Login sets a signed **HttpOnly `SameSite=Strict`** cookie — `Secure` too when the request arrived over https (`X-Forwarded-Proto`, honored with `WEBUI_TRUST_PROXY=1`).
+- Login is rate-limited per IP with constant-time comparison; `Host`/`Origin` headers are validated against loopback + bind host + `WEBUI_ALLOWED_HOSTS` (`*` opts out — explicit, logged at boot).
 - Wildcard bind is refused unless a password is set — the refusal names the env var.
+- Remote access in one line: `WEBUI_HOST=<this-machine's-LAN-IP> WEBUI_PASSWORD='<you-pick>' bunx opencode-webui`, then open `http://<that-IP>:4097` on the other device. DHCP may reassign the IP — pin a static one on your router if it annoys you.
 
 Behind a reverse proxy (Caddy / nginx samples, incl. websocket + SSE timeouts):
 [docs/reverse-proxy.md](docs/reverse-proxy.md).

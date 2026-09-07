@@ -71,6 +71,8 @@ server {
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WEBUI_HOST` | `127.0.0.1` | Bind address. Leave loopback — only the proxy needs to reach it. `0.0.0.0`/`::` is refused unless `WEBUI_PASSWORD` is set. |
+| `WEBUI_ALLOWED_HOSTS` | loopback + bind host | Your public hostname(s), e.g. `webui.example.com` — otherwise the Host guard 403s proxied requests. `*` accepts everything. |
+| `WEBUI_TRUST_PROXY` | unset | Set to `1` so `X-Forwarded-Host`/`Proto` from your proxy are honored (needed for the `Secure` cookie flag and correct origin checks when the proxy rewrites `Host`). |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*` (what your proxy forwards to). |
 | `WEBUI_PASSWORD` | generated on first boot, printed once | Shared login passphrase. Set it before exposing the UI beyond localhost. |
 | `WEBUI_DEBUG` | unset | `1` — server/proxy debug logs to stdout. |

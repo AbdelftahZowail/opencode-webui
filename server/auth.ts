@@ -10,10 +10,13 @@
  *   32-byte secret persisted at ~/.local/state/opencode-webui/secret.key
  *   (chmod 600) so sessions survive proxy restarts. No plaintext secret ever
  *   leaves this module, and no password or token is ever logged.
- * - DNS-rebinding: the Host header is validated on EVERY request (loopback
- *   names + the configured bind host, plus the reverse-proxy-forwarded
- *   X-Forwarded-Host when present). State-changing methods additionally get
- *   an Origin check: same-origin or no Origin (curl/scripts) passes.
+ * - DNS-rebinding: the Host header is validated on EVERY request against an
+ *   operator-controlled allowlist — loopback names and the configured bind
+ *   host always, plus WEBUI_ALLOWED_HOSTS (`"*"` accepts everything, loudly
+ *   logged). X-Forwarded-Host is honored only with WEBUI_TRUST_PROXY=1, so a
+ *   direct client can't spoof its Host through the guard. State-changing
+ *   methods additionally get an Origin check: same-origin or no Origin
+ *   (curl/scripts) passes.
  * - Login attempts are rate-limited per peer IP: 5 failures/min, then 429
  *   with Retry-After. A successful login clears the counter.
  *
@@ -327,23 +330,70 @@ function forbidden(reason: string): Response {
 }
 
 /**
- * Runs before EVERY route (login included). Returns a 403 Response to reject,
- * or null to continue. X-Forwarded-Host (when present, e.g. behind a reverse
- * proxy) names the public host and is allowed; otherwise the Host header must
- * be a loopback name or the configured bind host — anything else is exactly
- * what a DNS-rebinding attack looks like.
+ * Who may reach this proxy, stated by the operator — not hardcoded.
+ *
+ * WEBUI_ALLOWED_HOSTS is a comma-separated list of extra hostnames/IPs the
+ * Host-header guard accepts (ports are ignored, matching is case-insensitive).
+ * `"*"` accepts everything: explicit, logged at boot, your responsibility.
+ * Loopback names and the configured bind host are always allowed on top.
  */
-export function guardRequest(req: Request, configuredHost: string): Response | null {
-  const forwardedHost = firstHeaderValue(req, "x-forwarded-host");
+export interface AllowedHosts {
+  /** Normalized entries from WEBUI_ALLOWED_HOSTS (lowercased, no ports). */
+  entries: string[];
+  /** True when the list contains "*". */
+  acceptAll: boolean;
+}
+
+export function resolveAllowedHosts(): AllowedHosts {
+  const entries = (process.env.WEBUI_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((s) => hostnameOf(s.trim()))
+    .filter((s) => s.length > 0);
+  return { entries, acceptAll: entries.includes("*") };
+}
+
+export function isHostAllowed(hostname: string, configuredHost: string, allowed: AllowedHosts): boolean {
+  if (isLoopbackHostname(hostname)) return true;
+  if (hostname === hostnameOf(configuredHost)) return true;
+  if (allowed.acceptAll) return true;
+  return allowed.entries.includes(hostname);
+}
+
+/**
+ * Only honor X-Forwarded-Host / X-Forwarded-Proto when the operator says a
+ * trusted reverse proxy is in front (WEBUI_TRUST_PROXY=1). Honoring them
+ * unconditionally lets any direct client spoof its Host straight through
+ * the guard above.
+ */
+export function trustProxy(): boolean {
+  return process.env.WEBUI_TRUST_PROXY === "1";
+}
+
+/**
+ * Runs before EVERY route (login included). Returns a 403 Response to reject,
+ * or null to continue. With WEBUI_TRUST_PROXY=1, X-Forwarded-Host (set by
+ * your reverse proxy) names the public host and is allowed; otherwise the
+ * Host header must be a loopback name, the configured bind host, or a
+ * WEBUI_ALLOWED_HOSTS entry — anything else is exactly what a DNS-rebinding
+ * attack looks like.
+ */
+export function guardRequest(
+  req: Request,
+  configuredHost: string,
+  allowed: AllowedHosts = resolveAllowedHosts(),
+): Response | null {
+  const forwardedHost = trustProxy() ? firstHeaderValue(req, "x-forwarded-host") : undefined;
   const hostHeader = req.headers.get("host") ?? "";
   const effectiveHost = forwardedHost ?? hostHeader;
   if (!effectiveHost) return forbidden("missing host header");
 
   if (!forwardedHost) {
     const hostname = hostnameOf(hostHeader);
-    const allowed =
-      isLoopbackHostname(hostname) || hostname === hostnameOf(configuredHost);
-    if (!allowed) return forbidden("untrusted host header");
+    if (!isHostAllowed(hostname, configuredHost, allowed)) {
+      return forbidden(
+        `untrusted host header ${JSON.stringify(hostname)} — add it to WEBUI_ALLOWED_HOSTS (comma-separated, "*" accepts all)`,
+      );
+    }
   }
 
   const method = req.method;
