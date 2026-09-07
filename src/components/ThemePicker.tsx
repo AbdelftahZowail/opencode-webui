@@ -27,7 +27,8 @@ export function ThemePicker() {
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="sm" className="text-xs text-muted-foreground">
           <Palette />
-          {label}
+          {/* Below lg: icon-only so the session title keeps its room. */}
+          <span className="hidden lg:inline">{label}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-40">

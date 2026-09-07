@@ -371,7 +371,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
       };
       return (
         <div className="group flex w-full justify-end mb-3.5">
-          <div className="relative max-w-[85%] rounded-lg px-3 py-2">
+          <div className="relative max-w-[92%] min-w-0 rounded-lg px-3 py-2 sm:max-w-[85%]">
             {/* Hover actions — anchored to the whole row (group), not just the bubble, so moving the cursor to the buttons doesn't lose hover */}
             {canAct && (
               <div className="absolute top-1/2 right-full mr-3 hidden -translate-y-1/2 items-center gap-1.5 group-hover:flex">
@@ -390,7 +390,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
               You
             </div>
             {message.files && message.files.length > 0 && <UserFiles files={message.files} />}
-            <div className="mt-1 text-sm leading-relaxed text-[var(--text-strong)] whitespace-pre-wrap">
+            <div className="mt-1 text-sm leading-relaxed text-[var(--text-strong)] whitespace-pre-wrap break-words">
               {message.text}
             </div>
           </div>
@@ -705,7 +705,7 @@ function ShellCard({ message }: { message: ShellMessage }) {
   const truncated = output?.truncated;
 
   return (
-    <div className="w-full max-w-[85%] overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)]">
+    <div className="w-full max-w-full overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)] sm:max-w-[85%]">
       {/* Header: hover highlights the whole row; click toggles full command when truncated */}
       <button
         type="button"
@@ -773,7 +773,7 @@ function CompactionCard({
   const shouldCollapse = !!summary && summary.length > 400;
   const showSummary = !shouldCollapse || expanded ? summary : summary ? `${summary.slice(0, 400).trim()}…` : undefined;
   return (
-    <div className="w-full max-w-[85%] overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)]">
+    <div className="w-full max-w-full overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)] sm:max-w-[85%]">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -810,9 +810,9 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
   const showTimestamps = useTimestamps();
   return (
     <Row align="left">
-      <div className="group w-full space-y-2.5 text-sm leading-relaxed">
+      <div className="group w-full min-w-0 space-y-2.5 text-sm leading-relaxed">
         {!compact && (
-          <div className="flex items-center gap-2 text-xs text-[var(--text-weak)]">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--text-weak)]">
             <span className="font-medium text-[var(--text-strong)]">{message.agent ?? "assistant"}</span>
             {message.model && (
               <span className="font-mono text-[var(--text-weaker)]">
@@ -950,7 +950,7 @@ function markdownUrlTransform(url: string): string {
 
 export function Markdown({ text }: { text: string }) {
   return (
-    <div className="text-sm leading-relaxed text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-inherit [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
+    <div className="min-w-0 text-sm leading-relaxed break-words text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_a]:break-all [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:break-all [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-normal [&_pre_code]:text-inherit [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
       <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform}>
         {text}
       </ReactMarkdown>

@@ -240,9 +240,9 @@ export default function App() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <Target id="sidebar" />
-        <div className="flex min-w-0 flex-1 overflow-x-auto">
+        <div className="flex min-w-0 flex-1 overflow-hidden">
           {/* Main pane: always the routed surface, even while a split holds focus. */}
           <section
             className="flex min-w-0 flex-1 flex-col"

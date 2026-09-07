@@ -318,3 +318,12 @@ pre {
     animation: none;
   }
 }
+
+/* Mobile: horizontal chip/picker rails scroll without a visible scrollbar. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

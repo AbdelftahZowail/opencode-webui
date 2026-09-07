@@ -54,7 +54,8 @@ export function WorkspacePicker({ sessionID }: { sessionID: string }) {
           className="max-w-44 text-xs text-muted-foreground"
         >
           <Folder />
-          <span className="truncate font-mono">{dir ? dir : "workspace"}</span>
+          {/* Below lg: icon-only so the session title keeps its room. */}
+          <span className="hidden truncate font-mono lg:inline">{dir ? dir : "workspace"}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-56">

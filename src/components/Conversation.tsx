@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowUp, X } from "lucide-react";
+import { ArrowUp, Menu, X } from "lucide-react";
 import {
   applyRevertView,
   childSessionsOf,
   isDraftSession,
   liveToolPart,
   loadMessages,
+  openMobileSidebar,
   pendingRequests,
   revertMarkerFor,
   revealSubagentComposer,
@@ -330,7 +331,7 @@ function SubagentGate({
   );
 
   return (
-    <div className="border-t border-[var(--border-base)] px-4 py-1.5">
+    <div className="border-t border-[var(--border-base)] px-2.5 py-1.5 sm:px-4">
       <div className="mx-auto flex max-w-3xl flex-col gap-1">
         <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
           {siblings.map((c) => (
@@ -497,7 +498,7 @@ function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
  */
 const TranscriptList = React.memo(function TranscriptList({ sessionID, messages, live, running }: TranscriptProps) {
   return (
-    <MessageScrollerContent className="mx-auto w-full max-w-3xl px-4 py-6" data-oc-transcript>
+    <MessageScrollerContent className="mx-auto w-full max-w-3xl px-3 py-4 sm:px-4 sm:py-6" data-oc-transcript>
       {messages.length === 0 && live.length === 0 && !running && (
         <>
           <MessageScrollerItem>
@@ -567,8 +568,8 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
 
 function EmptyHint() {
   return (
-    <div className="flex justify-center pt-16">
-      <div className="flex max-w-md flex-col items-center gap-1.5 rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-weak)] px-8 py-10 text-center">
+    <div className="flex justify-center px-2 pt-10 sm:pt-16">
+      <div className="flex w-full max-w-md flex-col items-center gap-1.5 rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-weak)] px-5 py-8 text-center sm:px-8 sm:py-10">
         <h1 className="text-[var(--font-size-large)] font-medium text-[var(--text-base)]">
           Start a conversation
         </h1>
@@ -609,8 +610,18 @@ function Header({
   const isDraft = isDraftSession(sessionID);
   const draftWorkspace = useStore((s) => s.draftWorkspace);
   return (
-    <div className="flex items-center justify-between border-b border-[var(--border-base)] px-4 py-2.5" data-oc-session-header>
-      <div className="flex min-w-0 items-center gap-2">
+    <div className="flex items-center justify-between gap-2 border-b border-[var(--border-base)] px-2.5 py-2 sm:px-4 sm:py-2.5" data-oc-session-header>
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+        {/* Mobile navigation: opens the sessions drawer (sidebar is off-canvas <md). */}
+        <button
+          type="button"
+          onClick={openMobileSidebar}
+          title="Open sessions"
+          aria-label="Open sessions"
+          className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-[var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)] md:hidden"
+        >
+          <Menu className="size-4" />
+        </button>
         {parentID && (
           <button
             type="button"
@@ -636,11 +647,11 @@ function Header({
         {isDraft ? (
           // Sidebar groups by workspace with the same "~" collapse; mirror it
           // so the draft's target reads exactly like the sidebar entry.
-          <span className="hidden truncate font-mono text-xs text-[var(--text-weaker)] sm:inline">
+          <span className="hidden truncate font-mono text-xs text-[var(--text-weaker)] lg:inline">
             {draftWorkspace ? workspaceLabel(draftWorkspace) : "default workspace"}
           </span>
         ) : (
-          <span className="hidden font-mono text-xs text-[var(--text-weaker)] sm:inline">
+          <span className="hidden font-mono text-xs text-[var(--text-weaker)] lg:inline">
             {sessionID.slice(0, 12)}
           </span>
         )}
@@ -658,7 +669,7 @@ function Header({
           </Badge>
         )}
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex shrink-0 items-center gap-0.5 sm:gap-1.5">
         {onClose && (
           <button
             type="button"

@@ -69,7 +69,7 @@ export function SettingsDialog() {
           </DialogHeader>
 
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-col">
-            <TabsList className="mb-2 flex w-full flex-wrap justify-start gap-1 rounded-md bg-[var(--surface-base)] p-1">
+            <TabsList className="no-scrollbar mb-2 flex w-full flex-nowrap justify-start gap-1 overflow-x-auto rounded-md bg-[var(--surface-base)] p-1 [&>*]:shrink-0">
               {TABS.map((t) => (
                 <TabsTrigger
                   key={t.id}

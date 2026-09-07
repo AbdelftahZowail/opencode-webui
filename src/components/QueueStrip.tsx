@@ -111,7 +111,7 @@ function QueueRow({ sessionID, row }: { sessionID: string; row: PendingSend }) {
       <span className="min-w-0 flex-1 truncate" title={row.text}>
         {row.text}
       </span>
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-md:opacity-100">
         {/* Delivery toggle */}
         <button
           type="button"

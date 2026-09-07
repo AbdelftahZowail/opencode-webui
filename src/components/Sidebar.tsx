@@ -13,6 +13,7 @@ import {
 import {
   DRAFT_SESSION_ID,
   NEW_SESSION_HREF,
+  closeMobileSidebar,
   loadMoreSessions,
   prefetchSession,
   refreshSessions,
@@ -172,6 +173,36 @@ export function Sidebar() {
   const [resizing, setResizing] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const explorerSignal = useStore((s) => s.uiSignals.explorer);
+  // Mobile navigation drawer (<md): the aside below is fixed-position and
+  // translated off-canvas unless this is true. Desktop ignores it.
+  const mobileOpen = useStore((s) => s.mobileSidebarOpen);
+
+  // Any session change dismisses the drawer (covers selectSession — which
+  // also closes it in the store — plus draft sessions and back/forward).
+  // The setter no-ops when already closed, so this is safe on every nav.
+  useEffect(() => {
+    closeMobileSidebar();
+  }, [current]);
+
+  // While the drawer is open: Esc closes it (capture beats the site-wide
+  // interrupt binding) and the page body stops scrolling behind it.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMobileSidebar();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
 
   // /diff (and any other surface) can request the file explorer open.
   useEffect(() => {
@@ -387,11 +418,20 @@ export function Sidebar() {
   const toggleSidebar = () => setSidebarCollapsed((prev) => !prev);
 
   return (
+    <>
+      {/* Mobile drawer backdrop — desktop never renders it. */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={closeMobileSidebar}
+          aria-hidden
+        />
+      )}
     <aside
       ref={sidebarRef}
       data-oc-sidebar
-      className={`relative flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-border bg-background ${resizing ? "select-none" : ""}`}
-      style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
+      className={`fixed inset-y-0 left-0 z-50 flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-border bg-background transition-transform duration-200 md:static md:z-auto md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"} ${resizing ? "select-none" : ""}`}
+      style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth, maxWidth: "85vw" }}
     >
       <div
         className={`border-b border-border ${
@@ -704,10 +744,11 @@ export function Sidebar() {
             const delta = event.key === "ArrowRight" ? 16 : -16;
             setSidebarWidth((width) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width + delta)));
           }}
-          className="absolute top-0 right-0 z-20 h-full w-1 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-[var(--border-hover)] focus:bg-[var(--border-selected)] focus:outline-none"
+          className="absolute top-0 right-0 z-20 hidden h-full w-1 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-[var(--border-hover)] focus:bg-[var(--border-selected)] focus:outline-none md:block"
         />
       )}
     </aside>
+    </>
   );
 }
 

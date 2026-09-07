@@ -308,6 +308,12 @@ export interface State {
   revertPrompt: string | null;
   runsPanelOpen: boolean;
   /**
+   * Mobile navigation drawer: open while the sidebar drawer is visible on
+   * small screens (<md). Desktop ignores it (sidebar is always docked).
+   * Closed on session select, navigation, and Esc.
+   */
+  mobileSidebarOpen: boolean;
+  /**
    * Last RunsPanel cursor (tab + highlighted rows) — written through by the
    * panel on every change and restored on reopen when it still points at
    * reality (subagent exists / index within bounds). Null until first open.
@@ -416,6 +422,7 @@ const initialState: State = {
   uiSignals: { models: 0, agents: 0, themes: 0, explorer: 0, runsDialog: 0, help: 0, variants: 0 },
   revertPrompt: null,
   runsPanelOpen: false,
+  mobileSidebarOpen: false,
   runsSelection: null,
   subagentComposerOpen: false,
   draftWorkspace: null,
@@ -2769,6 +2776,20 @@ export function closeRunsPanel() {
   setState({ runsPanelOpen: false });
 }
 
+/** Mobile sidebar drawer — open/close/toggle (no-op on desktop). */
+export function setMobileSidebarOpen(open: boolean) {
+  if (state.mobileSidebarOpen === open) return;
+  setState({ mobileSidebarOpen: open });
+}
+
+export function openMobileSidebar() {
+  setMobileSidebarOpen(true);
+}
+
+export function closeMobileSidebar() {
+  setMobileSidebarOpen(false);
+}
+
 /** Persisted RunsPanel cursor — see State.runsSelection. */
 export interface RunsSelection {
   section: "subagents" | "shells";
@@ -2880,6 +2901,7 @@ export async function selectSession(
       // Keep streams of sessions still mounted in other panes; drop the rest.
       live: pruneLiveForPanes(nextPanes),
       subagentComposerOpen: false,
+      mobileSidebarOpen: false,
       panes: nextPanes,
       focusedPane: MAIN_PANE,
     });
@@ -2892,6 +2914,8 @@ export async function selectSession(
     // switches; only unmounted sessions' entries go.
     live: pruneLiveForPanes(nextPanes),
     subagentComposerOpen: false,
+    // A session pick on mobile dismisses the navigation drawer.
+    mobileSidebarOpen: false,
     // Explicit navigation always lands on the routed surface and re-points
     // the main pane — splits keep their pinned sessions untouched.
     panes: nextPanes,

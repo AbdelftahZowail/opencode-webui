@@ -894,7 +894,7 @@ export function Composer({
   const cwd = sessionLocation?.split("/").filter(Boolean).pop();
 
   return (
-    <div className="border-t border-[color:var(--border-weak-base)] px-3 pb-2.5 pt-2">
+    <div className="border-t border-[color:var(--border-weak-base)] px-2 pt-2 pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:px-3">
       <div className="mx-auto max-w-3xl">
         <div className="relative">
           {skillsMenu && (
@@ -1248,7 +1248,7 @@ export function Composer({
                   )}
                 </div>
               </FilePicker>
-              <div className="mt-1 flex items-center gap-1 border-t border-[color:var(--border-weak-base)] px-1 pt-1">
+              <div className="no-scrollbar mt-1 flex flex-nowrap items-center gap-1 overflow-x-auto border-t border-[color:var(--border-weak-base)] px-1 pt-1 [&>*]:shrink-0">
                 <button
                   type="button"
                   data-runs-panel-trigger
