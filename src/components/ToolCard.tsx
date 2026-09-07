@@ -10,6 +10,8 @@ import {
 } from "../extensions/registry";
 import { selectSession, useStore } from "../store";
 import { getPrefs, subscribePrefs } from "../prefs";
+import { api } from "../api/client";
+import { looksLikeImagePath, mimeFromName } from "../lib/attachments";
 import { DiffView } from "./DiffView";
 import { Spinner } from "./ui";
 
@@ -85,21 +87,7 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
     case "execute":
       return <Target id="tool.execute" {...props} />;
     case "read":
-      return (
-        <InlineTool
-          {...props}
-          icon="→"
-          pending="Reading file…"
-          label={
-            <>
-              Read <Path value={input.path} />
-              {input.offset !== undefined && (
-                <span className="text-[var(--text-weaker)]"> from {String(input.offset)}</span>
-              )}
-            </>
-          }
-        />
-      );
+      return <Target id="tool.read" {...props} />;
     case "grep":
       return (
         <InlineTool
@@ -155,6 +143,14 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
   return (
     <div data-oc-tool-card data-oc-tool-name={part.name}>
       {core}
+      {/* Universal image strip: any tool can return `file`-type image content
+          (read, webfetch, custom MCP tools…), so images render at the card
+          level instead of per-renderer. Null-safe when content has none. */}
+      <ToolImages
+        content={
+          state.status === "completed" || state.status === "error" ? state.content : undefined
+        }
+      />
     </div>
   );
 }
@@ -437,6 +433,84 @@ function ToolImageView({ src, name }: { src: string; name?: string }) {
 }
 
 // ---- per-tool renderers ---------------------------------------------------
+
+/**
+ * Read: the one-line row plus a workspace-fetch fallback for image paths.
+ * Engine image bytes render via the card-level ToolImages strip; when the
+ * content carries no image bytes (older engines, truncated payloads) but the
+ * path is an image, fall back to a workspace byte fetch so
+ * `Read docs/shots/week.png` still shows the shot.
+ */
+function ReadTool(props: ToolProps) {
+  const path = str(props.input.path);
+  const content =
+    props.state.status === "completed" || props.state.status === "error"
+      ? props.state.content
+      : undefined;
+  const hasEngineImages = toolImageParts(content).length > 0;
+  return (
+    <div>
+      <InlineTool
+        {...props}
+        icon="→"
+        pending="Reading file…"
+        label={
+          <>
+            Read <Path value={props.input.path} />
+            {props.input.offset !== undefined && (
+              <span className="text-[var(--text-weaker)]"> from {String(props.input.offset)}</span>
+            )}
+          </>
+        }
+      />
+      {!hasEngineImages && looksLikeImagePath(path) && <ReadPathImage filePath={path!} />}
+    </div>
+  );
+}
+
+/**
+ * Workspace byte fetch for an image path (mirrors MessageItem's PathImage):
+ * absolute paths need no workspace; relative paths resolve against the
+ * current session's workspace. Renders nothing until bytes load; any failure
+ * stays silent so text reads are unaffected.
+ */
+function ReadPathImage({ filePath }: { filePath: string }) {
+  const location = useStore(
+    (s) => s.sessions.find((x) => x.id === s.currentSessionID)?.location?.directory,
+  );
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let created: string | null = null;
+    const load = async () => {
+      for (const base of [undefined, location]) {
+        if (cancelled) return;
+        try {
+          const buf = await api.fsReadBytes(filePath, base);
+          if (cancelled) return;
+          const mime = mimeFromName(filePath) ?? "image/png";
+          created = URL.createObjectURL(new Blob([buf], { type: mime }));
+          setSrc(created);
+          return;
+        } catch {
+          /* try the next base */
+        }
+      }
+      // No setFailed — silent null keeps text reads pixel-identical.
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [filePath, location]);
+  if (!src) return null;
+  return (
+    <div className="mt-1.5 pl-1">
+      <ToolImageView src={src} name={filePath.split("/").pop() ?? filePath} />
+    </div>
+  );
+}
 
 function EditTool(props: ToolProps) {
   const files = Array.isArray(props.meta.files)
@@ -865,13 +939,6 @@ function ExecuteTool(props: ToolProps) {
           {props.output.split("\n").slice(0, 4).join("\n")}
         </pre>
       )}
-      <ToolImages
-        content={
-          props.state.status === "completed" || props.state.status === "error"
-            ? props.state.content
-            : undefined
-        }
-      />
     </div>
   );
 }
@@ -903,13 +970,6 @@ function GenericTool(props: ToolProps & { name: string }) {
           </pre>
         </BlockTool>
       )}
-      <ToolImages
-        content={
-          props.state.status === "completed" || props.state.status === "error"
-            ? props.state.content
-            : undefined
-        }
-      />
     </div>
   );
 }
@@ -946,5 +1006,6 @@ autoRegister({
   "tool.shell": (p) => <ShellTool {...(p as unknown as ToolProps)} />,
   "tool.subagent": (p) => <SubagentTool {...(p as unknown as ToolProps)} />,
   "tool.execute": (p) => <ExecuteTool {...(p as unknown as ToolProps)} />,
+  "tool.read": (p) => <ReadTool {...(p as unknown as ToolProps)} />,
   "tool.generic": (p) => <GenericTool {...(p as unknown as ToolProps & { name: string })} />,
 });

@@ -98,7 +98,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | `message.copyButton` | `variant: "user" \| "assistant"`, `text` |
 | `message:<type>` / `message:*` | replace-with-fall-through per message type |
 | `tool.card` | `part: ToolPart`, `stateKey?` |
-| `tool.edit` / `write` / `shell` / `subagent` / `execute` / `generic` | per-tool view props |
+| `tool.edit` / `write` / `shell` / `subagent` / `execute` / `read` / `generic` | per-tool view props |
 | `tool:<name>` | replace-with-fall-through per tool name |
 
 Persisted-vs-live guarantee (streaming authors depend on this): persisted
