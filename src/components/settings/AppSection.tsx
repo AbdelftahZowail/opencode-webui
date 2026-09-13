@@ -12,12 +12,24 @@ import {
   swSupported,
   tileEnabled,
 } from "../../lib/pwa";
+import {
+  STREAM_MODES,
+  STREAM_MODE_DESC,
+  STREAM_MODE_SHORT,
+  getPrefs,
+  setPref,
+  subscribePrefs,
+  type StreamMode,
+} from "../../prefs";
 
 export function AppSection() {
   const [, bump] = useState(0);
   const [tileOn, setTileOn] = useState(() => tileEnabled());
   const [perm, setPerm] = useState(() => notificationPermission());
   const [installable, setInstallable] = useState(false);
+  const [streamMode, setStreamMode] = useState<StreamMode>(() => getPrefs().streamMode);
+
+  useEffect(() => subscribePrefs(() => setStreamMode(getPrefs().streamMode)), []);
 
   useEffect(() => {
     setInstallable(getInstallPrompt() !== null);
@@ -79,6 +91,29 @@ export function AppSection() {
             the app has been visited.
           </p>
         )}
+      </div>
+
+      <div>
+        <SectionHeader
+          title="Response streaming"
+          note="How often the transcript repaints while a run streams"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-[var(--text-weaker)]">{STREAM_MODE_DESC[streamMode]}</p>
+          <div role="radiogroup" aria-label="Response streaming" className="flex shrink-0 gap-1">
+            {STREAM_MODES.map((mode) => (
+              <Button
+                key={mode}
+                size="xs"
+                variant={streamMode === mode ? "secondary" : "ghost"}
+                aria-pressed={streamMode === mode}
+                onClick={() => setPref("streamMode", mode)}
+              >
+                {STREAM_MODE_SHORT[mode]}
+              </Button>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div>

@@ -15,6 +15,7 @@ import { api } from "../api/client";
 import { editAtMessage, forkAtMessage, useStore } from "../store";
 import { notify } from "../lib/notify";
 import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachments";
+import { openImage } from "./ImageViewer";
 import { formatModelRef } from "../lib/modelLabel";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
@@ -582,23 +583,20 @@ function AttachmentThumb({ file }: { file: FileAttachment }) {
   );
 }
 
-/** Image with click-to-expand; collapsed size is the shared thumbnail look. */
+/** Thumbnail; clicking opens the normal full-size viewer (ImageViewer). */
 function ImageView({ src, name, alt }: { src: string; name?: string; alt?: string }) {
-  const [full, setFull] = useState(false);
   return (
     <button
       type="button"
-      onClick={() => setFull((v) => !v)}
-      title={full ? `${name ?? "image"} — click to shrink` : `${name ?? "image"} — click to enlarge`}
-      className={`block cursor-pointer ${full ? "" : "cursor-zoom-in"}`}
+      onClick={() => openImage(src, alt ?? name, name)}
+      title={`${name ?? "image"} — click to view`}
+      className="block cursor-zoom-in"
     >
       <img
         src={src}
         alt={alt ?? name ?? "image"}
         draggable={false}
-        className={`rounded-md border border-[color:var(--border-weak-base)] bg-[var(--surface-inset-base)] object-contain ${
-          full ? "max-h-[70vh] max-w-full" : "max-h-48 max-w-[16rem]"
-        }`}
+        className="max-h-48 max-w-[16rem] rounded-md border border-[color:var(--border-weak-base)] bg-[var(--surface-inset-base)] object-contain"
       />
     </button>
   );
@@ -955,7 +953,17 @@ function markdownUrlTransform(url: string): string {
  */
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
-    <div className="min-w-0 text-sm leading-relaxed break-words text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_a]:break-all [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:break-all [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-normal [&_pre_code]:text-inherit [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
+    <div
+      onClick={(e) => {
+        // Markdown images (`![..](..)`, incl. engine-emitted data: URIs) open
+        // in the same viewer as attachments instead of navigating away.
+        const t = e.target as HTMLElement | null;
+        if (t instanceof HTMLImageElement && t.src) {
+          e.preventDefault();
+          openImage(t.src, t.alt);
+        }
+      }}
+      className="min-w-0 text-sm leading-relaxed break-words text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_a]:break-all [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:break-all [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-normal [&_pre_code]:text-inherit [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
       <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform}>
         {text}
       </ReactMarkdown>

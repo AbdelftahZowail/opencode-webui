@@ -329,3 +329,14 @@ pre {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* Touch-primary devices (phones/tablets) render in the system UI font instead
+   of downloading the 874 KB Inter face. A font is only fetched when rendered
+   text actually uses it, so overriding the family here skips the download
+   entirely on mobile; desktop keeps Inter. Placed after @theme so it wins. */
+@media (pointer: coarse) {
+  :root {
+    --font-family-sans: ui-sans-serif, system-ui, sans-serif;
+    --font-sans: ui-sans-serif, system-ui, sans-serif;
+  }
+}

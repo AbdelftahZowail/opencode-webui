@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette, Puzzle } from "lucide-react";
+import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette, Plug, Puzzle } from "lucide-react";
+import { openConnect } from "./ConnectDialog";
 import { getContributions, type PaletteContribution } from "../extensions/registry";
 import {
   commandMove,
@@ -13,7 +14,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "./ui/command";
-import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
+import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { newSession, selectSession, useStore } from "../store";
 import { useHotkeys } from "../hooks/useHotkeys";
 
@@ -130,9 +131,18 @@ export function CommandPalette() {
             {prefs.showToolDetails ? <EyeOff /> : <Eye />}
             <span>{prefs.showToolDetails ? "Hide" : "Show"} tool details</span>
           </CommandItem>
-          <CommandItem onSelect={() => setPref("streamLive", !prefs.streamLive)}>
-            {prefs.streamLive ? <EyeOff /> : <Eye />}
-            <span>{prefs.streamLive ? "Disable" : "Enable"} live streaming</span>
+          <CommandItem onSelect={() => setPref("streamMode", nextStreamMode(prefs.streamMode))}>
+            {prefs.streamMode === "full" ? <EyeOff /> : <Eye />}
+            <span>Response streaming: {STREAM_MODE_SHORT[prefs.streamMode]}</span>
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              setOpen(false);
+              openConnect();
+            }}
+          >
+            <Plug />
+            <span>Connect providers</span>
           </CommandItem>
         </CommandGroup>
         <CommandSeparator />

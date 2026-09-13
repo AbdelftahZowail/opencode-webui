@@ -8,6 +8,8 @@ import { SplitPicker } from "./components/SplitPicker";
 import { ActivityStrip } from "./components/ActivityStrip";
 import { CommandKeybinds } from "./components/CommandKeybinds";
 import { Toasts } from "./components/Toasts";
+import { ImageViewer } from "./components/ImageViewer";
+import { ConnectDialog } from "./components/ConnectDialog";
 import { Target, getContributions, subscribeRegistry, type PageContribution } from "./extensions/registry";
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { OPEN_SEARCH_EVENT } from "./lib/uiEvents";
@@ -329,6 +331,8 @@ export default function App() {
       <SearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
       <CommandKeybinds />
       <Toasts />
+      <ImageViewer />
+      <ConnectDialog />
       <HelpDialog />
       {/* The app's ONLY ShellPanel instance: trigger-less (hidden-span
           trigger), opened by requestShellPanel() ticks from the runs panel /

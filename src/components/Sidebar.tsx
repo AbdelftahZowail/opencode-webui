@@ -12,9 +12,10 @@ import {
 } from "lucide-react";
 import {
   DRAFT_SESSION_ID,
-  NEW_SESSION_HREF,
   closeMobileSidebar,
+  isDraftSession,
   loadMoreSessions,
+  newSessionHref,
   prefetchSession,
   refreshSessions,
   selectSession,
@@ -27,6 +28,7 @@ import { api } from "../api/client";
 import { registerPoller } from "../lib/scheduler";
 import type { SessionInfo } from "../api/types";
 import { findHome, sameDirectory, workspaceName } from "../lib/workspaces";
+import { isSessionSticky, markSessionActive, markSessionOpened } from "../lib/sessionActivity";
 import { OPEN_SEARCH_EVENT } from "../lib/uiEvents";
 import { Target, autoRegister, getContributions, subscribeRegistry, type ContextMenuContribution, type PageContribution } from "../extensions/registry";
 import { timeAgo } from "./ui";
@@ -43,6 +45,8 @@ import { FileExplorer } from "./FileExplorer";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
 const SECTION_LIMIT = 3;
+/** Rows revealed per "Show more" press — a step, not the whole list. */
+const SECTION_STEP = 5;
 /**
  * Fired after an in-app pushState to an extension page route so App's
  * pathname listener repaints (pushState alone fires no event). Mirrors
@@ -116,10 +120,11 @@ export function Sidebar() {
   const current = useStore((s) => s.currentSessionID);
   const connected = useStore((s) => s.connected);
   const pending = useStore((s) => s.pendingWorkspace);
+  const draftWorkspace = useStore((s) => s.draftWorkspace);
   const running = useStore((s) => s.running);
   const queued = useStore((s) => s.queued);
   const sidebarRef = useRef<HTMLElement>(null);
-  const [showMore, setShowMore] = useState<Record<string, boolean>>({});
+  const [extraShown, setExtraShown] = useState<Record<string, number>>({});
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
@@ -164,8 +169,38 @@ export function Sidebar() {
 
   const home = useMemo(() => findHome(sessions.map((s) => s.location?.directory)), [sessions]);
 
+  /**
+   * Workspace the New session button targets, mirroring startDraftSession's
+   * own preference (pending highlight → open draft → current session's
+   * directory, walking one level up for subagents). Encoding it in the href
+   * lets a refresh or middle-click reopen the draft on the same workspace.
+   */
+  const newSessionWorkspace = useMemo(() => {
+    if (pending) return pending;
+    if (draftWorkspace) return draftWorkspace;
+    if (!current || isDraftSession(current)) return null;
+    const s = sessions.find((x) => x.id === current);
+    if (s?.location?.directory) return s.location.directory;
+    if (s?.parentID) return sessions.find((x) => x.id === s.parentID)?.location?.directory ?? null;
+    return null;
+  }, [pending, draftWorkspace, sessions, current]);
+
   /** Running or queued both read as live here — visibility and markers. */
   const isLive = (id: string) => !!running[id] || !!queued[id];
+
+  // Visibility memory: sessions currently running/queued are remembered as
+  // "was active"; the focused session, once idle, is remembered as viewed. A
+  // finished run the user never looked at therefore stays in the default
+  // slice until they open it (see isSessionSticky).
+  useEffect(() => {
+    for (const s of sessions) if (isLive(s.id)) markSessionActive(s.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, running, queued]);
+  useEffect(() => {
+    if (!current || isDraftSession(current)) return;
+    if (!isLive(current)) markSessionOpened(current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, running, queued]);
 
   // Parents with a currently running/queued subagent child, for the row
   // marker. Children aren't listed top-level but stay present in `sessions`.
@@ -225,7 +260,7 @@ export function Sidebar() {
   const toggleWorkspace = (name: string) => {
     const nextCollapsed = !collapsedWorkspaces[name];
     setCollapsedWorkspaces((prev) => ({ ...prev, [name]: nextCollapsed }));
-    if (nextCollapsed) setShowMore((prev) => ({ ...prev, [name]: false }));
+    if (nextCollapsed) setExtraShown((prev) => ({ ...prev, [name]: 0 }));
   };
 
   /**
@@ -239,8 +274,11 @@ export function Sidebar() {
     if (current === DRAFT_SESSION_ID) startDraftSession(dir);
   };
 
-  const toggleShowMore = (name: string) =>
-    setShowMore((prev) => ({ ...prev, [name]: !prev[name] }));
+  /** Reveal one more step of rows (never the whole list at once). */
+  const showMoreRows = (name: string) =>
+    setExtraShown((prev) => ({ ...prev, [name]: (prev[name] ?? 0) + SECTION_STEP }));
+  /** Collapse back to the default slice. */
+  const showFewerRows = (name: string) => setExtraShown((prev) => ({ ...prev, [name]: 0 }));
 
   const resizeStart = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -300,7 +338,7 @@ export function Sidebar() {
         </div>
         {sidebarCollapsed ? (
           <>
-            <NewSessionLink collapsed />
+            <NewSessionLink collapsed workspace={newSessionWorkspace} />
             <Button variant="ghost" size="icon" onClick={openSearch} title="Search sessions (Ctrl/Cmd+F)">
               <Search />
             </Button>
@@ -316,7 +354,7 @@ export function Sidebar() {
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
             </Button>
-            <NewSessionLink />
+            <NewSessionLink workspace={newSessionWorkspace} />
           </div>
         )}
       </div>
@@ -332,16 +370,23 @@ export function Sidebar() {
               )}
               {groups.map((group) => {
                 const isCollapsed = !!collapsedWorkspaces[group.name];
-                const isShowingMore = !!showMore[group.name];
-                // Default visibility: the newest SECTION_LIMIT sessions PLUS
-                // every running/queued one not already among them — live work
-                // is never buried behind "Show more".
-                const visible = isCollapsed
-                  ? []
-                  : isShowingMore
-                    ? group.list
-                    : group.list.filter((s, i) => i < SECTION_LIMIT || isLive(s.id));
-                const moreCount = group.list.length - visible.length;
+                const extra = extraShown[group.name] ?? 0;
+                // Default slice: the newest SECTION_LIMIT rows, widened to
+                // cover every live or "was active, not opened" session so
+                // neither is ever buried behind "Show more". "Show more"
+                // reveals SECTION_STEP rows per press; "Show less" returns.
+                const stickyIdx = group.list
+                  .map((s, i) => (isLive(s.id) || isSessionSticky(s.id) ? i : -1))
+                  .filter((i) => i >= 0);
+                const defaultCount = isCollapsed
+                  ? 0
+                  : Math.min(
+                      group.list.length,
+                      Math.max(SECTION_LIMIT, stickyIdx.length ? Math.max(...stickyIdx) + 1 : 0),
+                    );
+                const count = isCollapsed ? 0 : Math.min(group.list.length, defaultCount + extra);
+                const visible = isCollapsed ? [] : group.list.slice(0, count);
+                const moreCount = group.list.length - count;
                 // The highlight keys off the real directory, not its display
                 // name ("~/code" vs "/home/z/code"); "Other" (no directory)
                 // can never be a pending target.
@@ -410,10 +455,19 @@ export function Sidebar() {
                     {!isCollapsed && moreCount > 0 && (
                       <button
                         type="button"
-                        onClick={() => toggleShowMore(group.name)}
+                        onClick={() => showMoreRows(group.name)}
                         className="mt-1 w-full cursor-pointer rounded-md px-2.5 py-1.5 text-left text-xs text-[var(--text-weaker)] transition-colors hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
                       >
-                        {isShowingMore ? "Show less" : `Show ${moreCount} more…`}
+                        Show {Math.min(SECTION_STEP, moreCount)} more…
+                      </button>
+                    )}
+                    {!isCollapsed && moreCount === 0 && extra > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => showFewerRows(group.name)}
+                        className="mt-1 w-full cursor-pointer rounded-md px-2.5 py-1.5 text-left text-xs text-[var(--text-weaker)] transition-colors hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
+                      >
+                        Show less
                       </button>
                     )}
                   </section>
@@ -545,11 +599,11 @@ function WebUIVersion() {
  * Instant, offline draft open — no network, so no busy gate. Keeps the
  * /new-session anchor so middle-click/modified clicks still work natively.
  */
-function NewSessionLink({ collapsed = false }: { collapsed?: boolean }) {
+function NewSessionLink({ collapsed = false, workspace }: { collapsed?: boolean; workspace?: string | null }) {
   return (
     <Button asChild variant="default" size={collapsed ? "icon" : "sm"}>
       <a
-        href={NEW_SESSION_HREF}
+        href={newSessionHref(workspace)}
         aria-label="New session"
         title={collapsed ? "New session" : undefined}
         onClick={(event) => {

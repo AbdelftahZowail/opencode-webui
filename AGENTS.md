@@ -17,11 +17,15 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 - **The browser never holds service credentials.** The proxy discovers the
   service with `Service.ensure()` from `@opencode-ai/client/service` and
   attaches auth headers. Do not bypass the proxy.
-- **Dev**: `bun run dev` starts the proxy (config `port`, default 4097) and
-  Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies `/api` to the
-  proxy. Vite binds the config `host` and honors the config `allowedHosts`, so
-  a phone/Tailscale client reaches the dev UI on Vite's port — Settings ›
-  Access drives both servers. Sandbox always forces its Vite child back to
+- **Dev**: `bun run dev` starts the dev proxy on its own port (default 4098,
+  `WEBUI_PROXY_PORT`) and Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies
+  `/api` to the dev proxy. The dev proxy deliberately avoids the configured
+  serve `port` (default 4097, owned by the production server + lifecycle
+  plugin) so `bun run dev` and `bun start` never collide — dev and prod can run
+  side by side and Tailscale points at Vite :5173 for dev, :4097 for prod. Vite
+  binds the config `host` and honors the config `allowedHosts`, so a
+  phone/Tailscale client reaches the dev UI on Vite's port — Settings ›
+  Security drives both servers. Sandbox always forces its Vite child back to
   loopback. HMR applies to every UI edit instantly — no refresh, no restart,
   and the opencode service is never restarted.
 - **Sandbox**: `bun run sandbox` (or `bunx opencode-webui sandbox` / the
@@ -56,7 +60,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `server/setup.ts` | First-run setup: global `opencode-webui` command, lifecycle-plugin install, launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
 | `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
 | `server/config.ts` | Serve/security config: `~/.config/opencode/webui/config.json`, env-override resolution, validation, exposure analysis; `config` CLI |
-| `src/components/settings/AccessSection.tsx` | Settings › Access — the UI for those settings (source badges, restart-to-apply) |
+| `src/components/settings/AccessSection.tsx` | Settings › Security — the UI for those settings (source badges, restart-to-apply). Settings has three tabs: Extensions, Security, and App (phone-only) |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
 | `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
@@ -407,13 +411,13 @@ calls `ensureSetup()` after the port binds:
   hold the banner); a manual run on an occupied port probes `/login` for the
   webui fingerprint and exits 0 instead of dying on EADDRINUSE.
 
-## Serve/security config (Settings › Access)
+## Serve/security config (Settings › Security)
 
 `server/config.ts` owns `~/.config/opencode/webui/config.json` (0600): host,
 port, auth (`password` | `none`), passwordHash, allowedHosts, trustProxy,
 autostart, publicUrl. Precedence per key: explicit env > file > default, so
 existing env deployments are untouched. `opencode-webui config get|set|unset`
-and Settings › Access edit the same file; `resolveConfig()` returns per-key
+and Settings › Security edit the same file; `resolveConfig()` returns per-key
 `source` provenance, and the UI locks env-pinned fields.
 
 - **Apply = restart**: Bun binds once and the auth digest is in memory, so a

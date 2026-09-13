@@ -16,7 +16,9 @@ import "./components/Composer";
 import "./components/MessageItem";
 import "./components/ToolCard";
 import { log } from "./lib/log";
+import { hasCoarsePointer } from "./lib/platform";
 import { registerServiceWorker, startLiveTile } from "./lib/pwa";
+import { ensureMcpStatus } from "./lib/mcpStatus";
 import { installExtensionBridge } from "./lib/extensionApi";
 import { startRuntimeExtensions } from "./lib/runtimeExtensions";
 
@@ -35,6 +37,9 @@ startRuntimeExtensions();
 startStore();
 registerServiceWorker();
 startLiveTile();
+// MCP status is global (one poller, one cache) — warm it at boot so the
+// header indicator paints instantly instead of fetching per session switch.
+ensureMcpStatus();
 log("boot", `app render (console mirror: ${DEBUG_CONSOLE ? "on" : "off"})`);
 
 createRoot(document.getElementById("root")!).render(
@@ -44,3 +49,17 @@ createRoot(document.getElementById("root")!).render(
     </ErrorBoundary>
   </StrictMode>,
 );
+
+/**
+ * Desktop keeps the shell instant: warm the code-split xterm chunk once the
+ * page is idle, so opening a PTY resolves from cache instead of fetching on
+ * click. Phones intentionally skip this — there the whole point is not paying
+ * for xterm at all until a shell is actually opened.
+ */
+if (!hasCoarsePointer()) {
+  const warm = () => void import("./components/TerminalView");
+  const idle = (window as unknown as { requestIdleCallback?: (cb: () => void) => number })
+    .requestIdleCallback;
+  if (idle) idle(warm);
+  else setTimeout(warm, 2500);
+}

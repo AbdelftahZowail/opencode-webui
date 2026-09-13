@@ -28,6 +28,16 @@ pausing: the former keeps the entry loaded but quiet, the latter
 (`disabled: true`) is never bundled or imported and its id unregisters —
 use a settings toggle for "off for now", the manifest for "unplug".
 
+**Settings › Extensions** renders one card per installed extension (its
+`name`/`description` from `manifest.json`) with an on/off switch, plus any
+`settings` collection the extension contributes, inline in that card. The
+switch is just a UI for the folder flag above: it calls
+`POST /api/webui/extensions/<id>/state { disabled }`, which edits the winning
+folder's `manifest.json`. A **shipped** id is never edited in place (an app
+update would clobber the flag) — disabling it writes a user-level shadow
+folder with the same id, removed again on re-enable (shipped browser bundles
+are glob-owned, so re-enabling reloads the page to re-register them).
+
 **Precedence (same id = same swap point, higher wins):**
 
 1. `~/.config/opencode/webui-extensions/<name>/` — user

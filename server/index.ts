@@ -7,7 +7,7 @@
  * headers, and proxies /api/* with streaming. In production it also serves
  * the built frontend from dist/.
  *
- * Dev flow:  vite (5173) --/api--> this server (4097) --> opencode service
+ * Dev flow:  vite (5173) --/api--> dev proxy (4098) --> opencode service
  * Prod flow: this server (4097) serves dist/ + proxies /api
  *
  * Access control (server/auth.ts): every route except the login round-trip and
@@ -69,6 +69,7 @@ import {
   extensionSourceRoots,
   globalUserExtensionsDir,
   invalidateExtensionCache,
+  setExtensionDisabled,
   warnOnce,
   type UIEntry,
 } from "./userExtensions";
@@ -610,20 +611,52 @@ function vendorShimFor(path: string): string | null {
 // ---------------------------------------------------------------------------
 
 type ManifestItem =
-  | { id: string; source: string; origin?: UIEntry["origin"]; url?: string; domUrl?: string }
-  | { id: string; source: string; origin?: UIEntry["origin"]; disabled: true };
+  | {
+      id: string;
+      source: string;
+      origin?: UIEntry["origin"];
+      name?: string;
+      description?: string;
+      url?: string;
+      domUrl?: string;
+    }
+  | {
+      id: string;
+      source: string;
+      origin?: UIEntry["origin"];
+      name?: string;
+      description?: string;
+      disabled: true;
+    };
 
 async function buildExtensionManifest(): Promise<ManifestItem[]> {
   // discoverAllUIEntries never throws; upstream failures collapse to [].
   const entries = await discoverAllUIEntries();
   return entries.map((e) => {
     if (e.disabled || (!e.entry && !e.domEntry)) {
-      return { id: e.id, source: e.source ?? e.entry, origin: e.origin, disabled: true as const };
+      return {
+        id: e.id,
+        source: e.source ?? e.entry,
+        origin: e.origin,
+        name: e.name,
+        description: e.description,
+        disabled: true as const,
+      };
     }
-    const item: { id: string; source: string; origin?: UIEntry["origin"]; url?: string; domUrl?: string } = {
+    const item: {
+      id: string;
+      source: string;
+      origin?: UIEntry["origin"];
+      name?: string;
+      description?: string;
+      url?: string;
+      domUrl?: string;
+    } = {
       id: e.id,
       source: e.source ?? e.entry,
       origin: e.origin,
+      name: e.name,
+      description: e.description,
     };
     // Shipped browser stratum loads via the in-repo Vite glob
     // (webui-extensions/index.ts, Vite HMR) — never via a bundle URL, or
@@ -1107,6 +1140,30 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       const data = await buildExtensionManifest();
       dbg("extensions list:", data.length, "ui entr(ies)");
       return Response.json({ data, version: extManifestVersion });
+    }
+
+    // Pause/resume one folder extension (Settings › Extensions switch). Writes
+    // the winning folder's manifest.json `disabled` field — or, for a shipped
+    // id, a user-level shadow folder so app updates never clobber the flag —
+    // then pushes the manifest so the page unloads the bundle immediately.
+    if (method === "POST" && /^\/api\/webui\/extensions\/[^/]+\/state$/.test(path)) {
+      const id = decodeURIComponent(path.split("/")[4] ?? "");
+      try {
+        const body = (await req.json()) as { disabled?: unknown };
+        if (typeof body?.disabled !== "boolean") {
+          return Response.json({ error: "disabled (boolean) required" }, { status: 400 });
+        }
+        const result = setExtensionDisabled(id, body.disabled);
+        if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+        await checkExtensionManifest(true);
+        dbg("extension", id, body.disabled ? "paused" : "enabled");
+        return Response.json({ ok: true, version: extManifestVersion, reload: result.reload === true });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : String(err) },
+          { status: 400 },
+        );
+      }
     }
 
     // Manifest push channel (spec §6): one event per manifest change plus a

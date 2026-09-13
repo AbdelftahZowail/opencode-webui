@@ -919,6 +919,13 @@ const apiRaw = {
   pluginList: () =>
     request<{ location: unknown; data: PluginInfo[] }>("/api/plugin"),
 
+  // folder extensions (Settings › Extensions on/off switch)
+  webuiExtensionState: (id: string, disabled: boolean) =>
+    post<{ ok: boolean; version?: number; reload?: boolean }>(
+      `/api/webui/extensions/${encodeURIComponent(id)}/state`,
+      { disabled },
+    ),
+
   // websearch
   websearchProviders: () =>
     request<{ location: unknown; data: WebSearchProvider[] }>("/api/websearch/provider"),

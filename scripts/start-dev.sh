@@ -9,8 +9,8 @@ rm -f "$LOG_DIR/webui-debug.log"
 nohup env WEBUI_DEBUG=1 bun run dev > "$LOG_DIR/webui-server.log" 2>&1 &
 echo "dev pid: $!"
 sleep 5
-if ss -tln | grep -qE ":5173|:4097"; then
-  echo "UP: vite 5173 + proxy 4097"
+if ss -tln | grep -qE ":5173|:4098"; then
+  echo "UP: vite 5173 + dev proxy 4098"
 else
   echo "NOT UP — server log tail:"
   tail -20 "$LOG_DIR/webui-server.log"

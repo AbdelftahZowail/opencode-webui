@@ -25,3 +25,17 @@ export function hasCoarsePointer(): boolean {
     return false;
   }
 }
+
+/**
+ * True on phone-sized viewports. The Settings › App tab is phone-only — its
+ * install/tile controls are meaningless on a desktop browser, so it stays
+ * hidden there.
+ */
+export function isPhoneViewport(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  try {
+    return window.matchMedia("(max-width: 767px)").matches;
+  } catch {
+    return false;
+  }
+}

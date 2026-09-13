@@ -114,7 +114,7 @@ export function AccessSection() {
   return (
     <div className="space-y-4">
       <SectionHeader
-        title="Access"
+        title="Security"
         note="who can reach this webui, and how they sign in"
         onRefresh={refresh}
         loading={loading}

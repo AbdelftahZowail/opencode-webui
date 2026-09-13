@@ -528,6 +528,25 @@ export function sessionHref(sessionID: string): string {
   return `/session/${encodeURIComponent(sessionID)}`;
 }
 
+/**
+ * New-session URL that carries its target workspace. The draft stays
+ * client-only, but encoding the workspace means a refresh — or a
+ * middle-click "open in new tab" on the New session button — reopens the
+ * draft bound to the SAME directory instead of falling back to default.
+ */
+export function newSessionHref(workspace?: string | null): string {
+  if (!workspace) return NEW_SESSION_HREF;
+  return `${NEW_SESSION_HREF}?workspace=${encodeURIComponent(workspace)}`;
+}
+
+/** Workspace encoded in the current /new-session URL, if any. */
+export function newSessionWorkspaceFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  if (window.location.pathname !== NEW_SESSION_HREF) return null;
+  const raw = new URLSearchParams(window.location.search).get("workspace");
+  return raw && raw.trim() ? raw : null;
+}
+
 function sessionIDFromLocation(): string | null {
   if (typeof window === "undefined") return null;
   const match = window.location.pathname.match(/^\/session\/([^/]+)\/?$/);
@@ -547,10 +566,15 @@ function isNewSessionRoute(): boolean {
 
 function updateSessionHistory(sessionID: string | null, mode: "push" | "replace") {
   if (typeof window === "undefined") return;
-  // The draft session lives at /new-session — it IS the new-session route.
+  // The draft session lives at /new-session — it IS the new-session route,
+  // carrying its target workspace so a refresh/middle-click remembers it.
   const next =
-    sessionID === DRAFT_SESSION_ID ? NEW_SESSION_HREF : sessionID ? sessionHref(sessionID) : "/";
-  if (window.location.pathname === next && !window.location.search && !window.location.hash) return;
+    sessionID === DRAFT_SESSION_ID
+      ? newSessionHref(state.draftWorkspace)
+      : sessionID
+        ? sessionHref(sessionID)
+        : "/";
+  if (window.location.pathname + window.location.search === next && !window.location.hash) return;
   window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", next);
 }
 
@@ -2568,11 +2592,11 @@ const pendingEvents: V2Event[] = [];
 let eventFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Event types that only advance an in-flight stream. With the `streamLive`
- * pref OFF a batch made purely of these is applied to state but NOT emitted to
- * React — no transcript repaint, no markdown re-parse, no scroll churn. The
- * text still arrives whole on `*.ended` (and via the run-end history settle),
- * so this trades token-by-token animation for a calm, part-at-a-time render.
+ * Event types that only advance an in-flight stream. With streaming turned
+ * down (see `streamMode`) a batch made purely of these is applied to state but
+ * NOT emitted to React — no transcript repaint, no markdown re-parse, no scroll
+ * churn. The text still arrives whole on `*.ended` (and via the run-end history
+ * settle), so this trades token-by-token animation for a calmer render.
  */
 const QUIET_EVENT_TYPES = new Set<string>([
   "session.text.delta",
@@ -2584,13 +2608,41 @@ function isQuietBatch(events: V2Event[]): boolean {
   return events.length > 0 && events.every((e) => QUIET_EVENT_TYPES.has(e.type));
 }
 
+/**
+ * Relaxed mode: coalesce quiet batches into one commit every RELAXED_NOTIFY_MS
+ * instead of 16ms, so text still advances visibly without a render per token.
+ */
+const RELAXED_NOTIFY_MS = 200;
+let relaxedNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRelaxedNotify() {
+  if (relaxedNotifyTimer) return;
+  relaxedNotifyTimer = setTimeout(() => {
+    relaxedNotifyTimer = null;
+    emit();
+  }, RELAXED_NOTIFY_MS);
+}
+
+function cancelRelaxedNotify() {
+  if (relaxedNotifyTimer) {
+    clearTimeout(relaxedNotifyTimer);
+    relaxedNotifyTimer = null;
+  }
+}
+
 function enqueueEvent(event: V2Event) {
   pendingEvents.push(event);
   if (eventFlushTimer) return;
   eventFlushTimer = setTimeout(() => {
     eventFlushTimer = null;
     const events = pendingEvents.splice(0, pendingEvents.length);
-    const silent = !getPrefs().streamLive && isQuietBatch(events);
+    const quiet = isQuietBatch(events);
+    const mode = getPrefs().streamMode;
+    // `full` notifies every batch; `relaxed`/`off` hold quiet batches back
+    // (relaxed flushes on a slower timer, off waits for a part boundary).
+    const silent = quiet && mode !== "full";
+    if (quiet && mode === "relaxed") scheduleRelaxedNotify();
+    else if (!quiet) cancelRelaxedNotify();
     batchState(() => {
       for (const item of events) {
         // One poisoned event (malformed payload, engine surprise) must not
@@ -2617,9 +2669,10 @@ export function startStore() {
       if (sessionID) {
         void selectSession(sessionID, { history: "none" });
       } else if (isNewSessionRoute()) {
-        // /new-session is now the free draft — nothing is created until the
-        // first message is sent (materializeDraft).
-        startDraftSession(null);
+        // /new-session is the free draft — nothing is created until the first
+        // message is sent (materializeDraft). A ?workspace= on the URL (from a
+        // refresh or a middle-click new tab) binds the draft to that directory.
+        startDraftSession(newSessionWorkspaceFromLocation());
         void reopenLastSession().catch(() => undefined); // no-op while draft holds
       } else {
         void selectSession(null, { history: "none" });

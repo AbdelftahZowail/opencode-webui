@@ -3,6 +3,7 @@ import { ArrowUp, Menu, X } from "lucide-react";
 import {
   applyRevertView,
   childSessionsOf,
+  clearHighlightMessage,
   isDraftSession,
   liveToolPart,
   loadMessages,
@@ -28,6 +29,7 @@ import {
 } from "./ui/message-scroller";
 import { Badge } from "./ui/badge";
 import { useKeyboardOpen } from "../hooks/useKeyboardOpen";
+import { McpIndicator } from "./McpIndicator";
 import { MessageItem, MessagePart } from "./MessageItem";
 import { PendingRequestsPanel } from "./PendingRequestsPanel";
 import { QueueStrip } from "./QueueStrip";
@@ -167,6 +169,10 @@ export function Conversation({
               (parent as Element).normalize?.();
             }
           }, 2800);
+          // Consume the request: without this the `messages` dependency re-runs
+          // the effect on every poll (and after each send) and keeps yanking the
+          // view back up to the same hit. The DOM highlight fades on its own.
+          clearHighlightMessage();
           return true;
         }
       }
@@ -175,6 +181,8 @@ export function Conversation({
       container.scrollIntoView({ behavior: "smooth", block: "center" });
       container.classList.add("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg");
       setTimeout(() => container.classList.remove("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg"), 1800);
+      // Same consume-once rule as the text-match branch above.
+      clearHighlightMessage();
       return true;
     };
 
@@ -691,6 +699,7 @@ function Header({
             <X className="size-3.5" />
           </button>
         )}
+        <McpIndicator />
         <WorkspacePicker sessionID={sessionID} />
         <ThemePicker />
         <SessionMenu sessionID={sessionID} />

@@ -104,7 +104,10 @@ self.addEventListener("message", (event) => {
         ongoing: true,
         renotify: false,
         icon: "/icons/icon-192.png",
-        badge: "/icons/icon-192.png",
+        // Small (status-bar) icon on Android: a MONOCHROME silhouette on a
+        // transparent background. Chrome tints the alpha, so the old full-color
+        // 192px icon rendered as a solid white square.
+        badge: "/icons/badge-96.png",
         timestamp: Date.now(),
         data: { url: typeof url === "string" ? url : "/" },
       });

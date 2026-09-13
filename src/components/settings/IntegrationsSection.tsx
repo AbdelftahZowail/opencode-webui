@@ -324,8 +324,8 @@ export function IntegrationsSection() {
   return (
     <div>
       <SectionHeader
-        title="Integrations"
-        note="Connect providers — API keys, OAuth, CLI commands"
+        title="Providers"
+        note="API keys · OAuth · CLI commands"
         onRefresh={refresh}
         loading={loading}
       />

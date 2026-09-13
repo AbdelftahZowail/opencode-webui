@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListTree, Pencil, Send, Terminal, X } from "lucide-react";
+import { ListTree, Pencil, Send, Square, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, LocationInfo, ProjectInfo, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
@@ -20,6 +20,7 @@ import {
   exportSession,
   forkSession,
   focusedPaneKey,
+  interrupt,
   isDraftSession,
   loadSessionDetail,
   materializeDraft,
@@ -45,9 +46,9 @@ import {
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
 import { hasCoarsePointer } from "../lib/platform";
-import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
+import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
-import { openSettings } from "./settings/SettingsDialog";
+import { openConnect } from "./ConnectDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
 import { downloadTranscript, formatTranscript } from "./SessionMenu";
@@ -515,10 +516,8 @@ export function Composer({
       {
         name: "streaming",
         aliases: ["toggle-streaming", "stream"],
-        description: getPrefs().streamLive
-          ? "Disable live streaming (render at part boundaries)"
-          : "Enable live streaming (token by token)",
-        run: () => setPref("streamLive", !getPrefs().streamLive),
+        description: `Response streaming: ${STREAM_MODE_SHORT[prefs.streamMode]}`,
+        run: () => setPref("streamMode", nextStreamMode(getPrefs().streamMode)),
       },
       {
         name: "rename",
@@ -551,8 +550,9 @@ export function Composer({
       },
       {
         name: "connect",
-        description: "Connect providers & integrations",
-        run: () => openSettings("integrations"),
+        aliases: ["login"],
+        description: "Connect model providers",
+        run: () => openConnect(),
       },
       {
         name: "models",
@@ -581,16 +581,6 @@ export function Composer({
         run: () => setSkillsMenu(true),
       },
       {
-        name: "mcps",
-        description: "Toggle MCPs",
-        run: () => openSettings("mcp"),
-      },
-      {
-        name: "status",
-        description: "View status",
-        run: () => openSettings("server"),
-      },
-      {
         name: "diff",
         description: "Open diff viewer",
         run: () => signalUI("explorer"),
@@ -601,7 +591,7 @@ export function Composer({
         run: () => signalUI("help"),
       },
     ],
-    [sessionID, prefs.showReasoning, prefs.showTimestamps, prefs.streamLive],
+    [sessionID, prefs.showReasoning, prefs.showTimestamps, prefs.streamMode],
   );
 
   // Skills the engine also exposes as commands accept upstream's
@@ -640,8 +630,12 @@ export function Composer({
         names: [action.name, ...(action.aliases ?? [])],
         description: action.description,
         onSelect: () => {
-          // Client-side slash commands are UI operations, not messages —
-          // running one must not wipe the composer draft.
+          // Client-side slash commands are UI operations. The token that
+          // invoked one is consumed, so clear it: a real draft can't both
+          // start with "/" and be a message, and leaving "/connect" behind
+          // after the Connect surface opens reads as "nothing happened".
+          setText("");
+          setDismissedAt(null);
           action.run("");
         },
       });
@@ -811,7 +805,10 @@ export function Composer({
         const name = parts[0]!;
         const action = slashActions.find((a) => a.name === name || a.aliases?.includes(name));
         if (action) {
-          // UI action, not a message — do not clear the composer.
+          // UI action, not a message: the consumed token is cleared so the
+          // composer doesn't keep showing the command it just ran.
+          setText("");
+          setDismissedAt(null);
           action.run(parts.slice(1).join(" "));
           return;
         }
@@ -1258,12 +1255,29 @@ export function Composer({
                   />
                   {busy ? (
                     <Spinner className="mb-1.5 mr-2" />
+                  ) : !text.trim() && attachments.length === 0 ? (
+                    // Empty composer = the action is STOP, not a dead Send.
+                    // One press aborts the active run (no Esc-style arming).
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-oc-composer-send
+                      disabled={!running && !queued}
+                      onClick={() => void interrupt(sessionID)}
+                      title={
+                        running || queued
+                          ? "Stop the run"
+                          : "Type a message to send, or wait for a run to stop"
+                      }
+                    >
+                      <Square className="fill-current" />
+                      Stop
+                    </Button>
                   ) : (
                     <Button
                       variant="default"
                       size="sm"
                       data-oc-composer-send
-                      disabled={!text.trim() && attachments.length === 0}
                       onClick={() => void submit()}
                       title={running ? "Send (↵ steer · ctrl+↵ queue)" : "Send (Enter)"}
                     >
