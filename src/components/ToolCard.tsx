@@ -13,6 +13,7 @@ import { getPrefs, subscribePrefs } from "../prefs";
 import { api } from "../api/client";
 import { looksLikeImagePath, mimeFromName } from "../lib/attachments";
 import { DiffView } from "./DiffView";
+import { openImage } from "./ImageViewer";
 import { Spinner } from "./ui";
 
 const toolDisclosureState = new Map<string, boolean>();
@@ -411,22 +412,19 @@ function ToolImages({ content }: { content: import("../api/types").ToolContent[]
 }
 
 function ToolImageView({ src, name }: { src: string; name?: string }) {
-  const [full, setFull] = useState(false);
   return (
     <button
       type="button"
-      onClick={() => setFull((v) => !v)}
-      title={full ? `${name ?? "image"} — click to shrink` : `${name ?? "image"} — click to enlarge`}
-      className={`block cursor-pointer ${full ? "" : "cursor-zoom-in"}`}
+      onClick={() => openImage(src, name, name)}
+      title={`${name ?? "image"} — click to view`}
+      className="block cursor-zoom-in"
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={src}
         alt={name ?? "image"}
         draggable={false}
-        className={`rounded-md border border-[color:var(--border-weak-base)] bg-[var(--surface-inset-base)] object-contain ${
-          full ? "max-h-[70vh] max-w-full" : "max-h-48 max-w-[16rem]"
-        }`}
+        className="max-h-48 max-w-[16rem] rounded-md border border-[color:var(--border-weak-base)] bg-[var(--surface-inset-base)] object-contain"
       />
     </button>
   );

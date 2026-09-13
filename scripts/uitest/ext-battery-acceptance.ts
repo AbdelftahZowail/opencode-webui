@@ -31,8 +31,10 @@
  *                   regression guard); vendor shims serve the app's instance.
  *   M1 GEN:SKILL    `bun run gen:skill` exits 0.
  *   M2 TYPECHECK    `bun run typecheck` exits 0.
- *   M3 GREP-CLEAN   no `<Slot`, no legacy kinds/getters, no
- *                   ui-extensions/config refs outside intentional history.
+ *   M3 GREP-CLEAN   no legacy `<Slot region>` markers, no legacy
+ *                   kinds/getters, no ui-extensions/config refs outside
+ *                   intentional history (thin `slot:<id>` contributions —
+ *                   roadmap 6 — are the current contract, not the deleted API).
  *
  * Test-only file: reads src/server/webui-extensions, never modifies them.
  * Cleanup is unconditional (finally): scratch folders removed, proxy killed.
@@ -805,7 +807,11 @@ async function main(): Promise<void> {
   {
     const t0 = Date.now();
     const roots = [join(ROOT, "src"), join(ROOT, "server"), join(ROOT, "scripts"), join(ROOT, "webui-extensions")];
-    const slotHits = grepFiles(roots, /<Slot[\s>]/);
+    // The spec deleted `<Slot region>` markers (regions table + `bun run
+    // regions`), NOT the word "Slot". Thin `slot:<id>` contributions (roadmap
+    // 6) are the current, documented placement contract — match the deleted
+    // REGION form precisely so the guard stays meaningful instead of vacuous.
+    const slotHits = grepFiles(roots, /<Slot\s+region\b/);
     const legacyKindHits = grepFiles(
       roots,
       /kind\s*:\s*["'](region|message|tool\.renderer|command|slash|page|settings|contextMenu)["']/,
@@ -816,10 +822,10 @@ async function main(): Promise<void> {
     const all = [...slotHits, ...legacyKindHits, ...configHits, ...legacyGetterHits];
     const ok = all.length === 0 && !staleDir;
     rows.push({
-      label: "M3 grep-clean (no Slot/legacy/config refs)",
+      label: "M3 grep-clean (no legacy Slot-region/kind/config refs)",
       status: ok ? "PASS" : "FAIL",
       detail: ok
-        ? `0 hits across src/server/scripts/webui-extensions (self excluded) · no ui-extensions/ dir · Radix Slot imports + message.part/decoration contribute-collections intentionally untouched`
+        ? `0 hits across src/server/scripts/webui-extensions (self excluded) · no ui-extensions/ dir · Radix Slot imports, thin slot:<id> contributions, and message.part/decoration contribute-collections intentionally untouched`
         : `hits=${all.length} ${all.slice(0, 5).join(" | ")} · staleDir=${staleDir}`,
       secs: Date.now() - t0,
     });

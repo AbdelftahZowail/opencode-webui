@@ -36,6 +36,12 @@
  *   settings — per-extension declared settings (`settings.forExt(id)`:
  *              resolved get/set/reset/subscribe from the manifest schema)
  *
+ * v2 (roadmap batched bump): `store` is now the CURATED facade — the raw store
+ * module moved to `advanced.store` and is explicitly unsupported. New surface:
+ * `events`, `settings`, `collections`, `bus`, `advanced`. Existing code that
+ * used only the documented store actions keeps working; anything reaching for
+ * an internal store export must switch to the facade or `advanced.store`.
+ *
  * Server-stratum routes (`/api/webui/ext/<id>/…`) need no helper: same-origin
  * `fetch` from the page carries the session cookie, so plain `fetch` IS the
  * one method (documented, not wrapped).
@@ -61,7 +67,7 @@ import {
 import { extKv } from "./extKv";
 
 /** Extension API contract version. Bump on any key/shape change + note. */
-export const EXT_API_VERSION = 1;
+export const EXT_API_VERSION = 2;
 
 export interface ExtensionApi {
   version: number;
