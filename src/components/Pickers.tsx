@@ -1,4 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api/client";
 import type { AgentInfo, ModelInfo, ModelRef } from "../api/types";
 import {
@@ -13,16 +23,75 @@ import { Search } from "lucide-react";
 import { formatModelRef } from "../lib/modelLabel";
 import { Button } from "./ui";
 
-function useMenu(onClose: () => void) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+/**
+ * Anchored menu that escapes `overflow` clipping. The composer meta-row is a
+ * horizontal scroller (`overflow-x-auto`), and CSS forces `overflow-y` to
+ * `auto` alongside it — an inline absolutely-positioned dropdown opens
+ * *outside* that box and gets clipped, so a click looks dead. While `open`,
+ * the caller renders the menu in a fixed-position portal on `document.body`,
+ * aligned to the trigger (above when `openUp`, else below; `align` picks the
+ * left/right edge) and clamped to the viewport. Position follows the trigger
+ * across resize/scroll. Outside mousedown closes; clicks inside the portaled
+ * menu count as inside.
+ */
+function useAnchoredMenu({
+  open,
+  onClose,
+  openUp,
+  align,
+  width,
+}: {
+  open: boolean;
+  onClose: () => void;
+  openUp: boolean;
+  align: "left" | "right";
+  width: number;
+}) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [style, setStyle] = useState<CSSProperties | null>(null);
+
+  const place = useCallback(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const gap = 4;
+    const margin = 8;
+    const left = Math.max(
+      margin,
+      Math.min(align === "right" ? r.right - width : r.left, window.innerWidth - width - margin),
+    );
+    const next: CSSProperties = { position: "fixed", left };
+    if (openUp) next.bottom = window.innerHeight - r.top + gap;
+    else next.top = r.bottom + gap;
+    setStyle(next);
+  }, [openUp, align, width]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setStyle(null);
+      return;
     }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, place]);
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      const t = e.target as Node;
+      if (anchorRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      onClose();
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
   }, [onClose]);
-  return ref;
+
+  return { anchorRef, menuRef, style };
 }
 
 /**
@@ -206,7 +275,13 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [fallback, setFallback] = useState<ModelRef | null>(null);
-  const ref = useMenu(() => setOpen(false));
+  const { anchorRef, menuRef, style: menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    openUp,
+    align,
+    width: 288,
+  });
   const signal = useStore((s) => s.uiSignals.models);
 
   // /models (and the command palette) request this picker to open.
@@ -307,10 +382,8 @@ export function ModelPicker({
     onQueryChange: setQuery,
   });
 
-  const menuPos = `${openUp ? "bottom-full mb-1" : "mt-1"} ${align === "right" ? "right-0" : "left-0"}`;
-
   return (
-    <div ref={ref} className="relative">
+    <div ref={anchorRef} className="relative">
       <Button
         variant="outline"
         onClick={() => setOpen(!open)}
@@ -323,60 +396,64 @@ export function ModelPicker({
           {current ? formatModelRef(current) : "model"}
         </span>
       </Button>
-      {open && (
-        <div
-          className={`absolute z-40 w-72 overflow-hidden rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl ${menuPos}`}
-        >
-          <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[color:var(--border-weak-base)] px-2.5">
-            <Search className="size-3.5 shrink-0 text-[color:var(--text-weaker)]" />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter models…"
-              aria-label="Filter models"
-              autoComplete="off"
-              spellCheck={false}
-              className="h-full w-full bg-transparent font-mono text-[11px] text-[color:var(--text-strong)] outline-none placeholder:text-[color:var(--text-weaker)]"
-            />
-          </div>
+      {open && menuStyle &&
+        createPortal(
           <div
-            id={listId}
-            role="listbox"
-            aria-label="Switch model"
-            aria-activedescendant={filteredModels.length > 0 ? `${listId}-item-${highlight}` : undefined}
-            className="max-h-72 overflow-y-auto"
-            onMouseMove={onListMouseMove}
+            ref={menuRef}
+            style={menuStyle}
+            className="z-50 w-72 overflow-hidden rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl"
           >
-            {filteredModels.length === 0 ? (
-              <div className="px-3 py-4 text-center text-xs text-[color:var(--text-weaker)]">
-                No matching models
-              </div>
-            ) : (
-              filteredModels.map((m, i) => (
-                <button
-                  key={`${m.providerID}/${m.modelID}`}
-                  id={`${listId}-item-${i}`}
-                  type="button"
-                  role="option"
-                  aria-selected={current?.id === m.modelID && current?.providerID === m.providerID}
-                  data-hl={i === highlight || undefined}
-                  className={ITEM_CLASSES}
-                  onClick={() => pickModel(i)}
-                >
-                  <span>
-                    <span className="font-mono text-[color:var(--text-strong)]">{m.name}</span>
-                    <span className="ml-2 font-mono text-[color:var(--text-weaker)]">{m.providerID}</span>
-                  </span>
-                  {current?.id === m.modelID && current?.providerID === m.providerID && (
-                    <span className="text-emerald-500">✓</span>
-                  )}
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+            <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[color:var(--border-weak-base)] px-2.5">
+              <Search className="size-3.5 shrink-0 text-[color:var(--text-weaker)]" />
+              <input
+                ref={inputRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Filter models…"
+                aria-label="Filter models"
+                autoComplete="off"
+                spellCheck={false}
+                className="h-full w-full bg-transparent font-mono text-[11px] text-[color:var(--text-strong)] outline-none placeholder:text-[color:var(--text-weaker)]"
+              />
+            </div>
+            <div
+              id={listId}
+              role="listbox"
+              aria-label="Switch model"
+              aria-activedescendant={filteredModels.length > 0 ? `${listId}-item-${highlight}` : undefined}
+              className="max-h-72 overflow-y-auto"
+              onMouseMove={onListMouseMove}
+            >
+              {filteredModels.length === 0 ? (
+                <div className="px-3 py-4 text-center text-xs text-[color:var(--text-weaker)]">
+                  No matching models
+                </div>
+              ) : (
+                filteredModels.map((m, i) => (
+                  <button
+                    key={`${m.providerID}/${m.modelID}`}
+                    id={`${listId}-item-${i}`}
+                    type="button"
+                    role="option"
+                    aria-selected={current?.id === m.modelID && current?.providerID === m.providerID}
+                    data-hl={i === highlight || undefined}
+                    className={ITEM_CLASSES}
+                    onClick={() => pickModel(i)}
+                  >
+                    <span>
+                      <span className="font-mono text-[color:var(--text-strong)]">{m.name}</span>
+                      <span className="ml-2 font-mono text-[color:var(--text-weaker)]">{m.providerID}</span>
+                    </span>
+                    {current?.id === m.modelID && current?.providerID === m.providerID && (
+                      <span className="text-emerald-500">✓</span>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -394,7 +471,13 @@ export function VariantPicker({
   const pendingModel = useStore((s) => s.pendingModel);
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const ref = useMenu(() => setOpen(false));
+  const { anchorRef, menuRef, style: menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    openUp,
+    align,
+    width: 192,
+  });
   const signal = useStore((s) => s.uiSignals.variants);
 
   // /variants requests this picker to open.
@@ -402,11 +485,16 @@ export function VariantPicker({
     if (signal) setOpen(true);
   }, [signal]);
 
-  useEffect(() => {
-    if (open && models.length === 0) void api.models().then(setModels);
-  }, [open, models.length]);
-
   const current: ModelRef | undefined = pendingModel ?? detail?.model ?? session?.model;
+
+  // This picker decides whether to render at all from the model catalog, so the
+  // catalog must load even while the menu is closed — otherwise the trigger
+  // button can never exist to open it (deadlock). ModelPicker/AgentPicker
+  // always render their trigger, so they can load lazily on open.
+  useEffect(() => {
+    if (current && models.length === 0) void api.models().then(setModels);
+  }, [current, models.length]);
+
   const model = models.find(
     (m) => m.enabled && m.modelID === current?.id && m.providerID === current?.providerID,
   );
@@ -443,10 +531,8 @@ export function VariantPicker({
   // has no variants.
   if (!current || variants.length === 0) return null;
 
-  const menuPos = `${openUp ? "bottom-full mb-1" : "mt-1"} ${align === "right" ? "right-0" : "left-0"}`;
-
   return (
-    <div ref={ref} className="relative">
+    <div ref={anchorRef} className="relative">
       <Button
         variant="outline"
         onClick={() => setOpen(!open)}
@@ -457,44 +543,48 @@ export function VariantPicker({
       >
         <span className="truncate">{activeVariant ? `@${activeVariant}` : "@default"}</span>
       </Button>
-      {open && (
-        <div
-          id={listId}
-          role="listbox"
-          aria-label="Switch model variant"
-          aria-activedescendant={`${listId}-item-${highlight}`}
-          className={`absolute z-40 max-h-80 w-48 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl ${menuPos}`}
-          onMouseMove={onListMouseMove}
-        >
-          <button
-            id={`${listId}-item-0`}
-            type="button"
-            role="option"
-            aria-selected={!activeVariant}
-            data-hl={highlight === 0 || undefined}
-            className={ITEM_CLASSES}
-            onClick={() => pick()}
+      {open && menuStyle &&
+        createPortal(
+          <div
+            ref={menuRef}
+            id={listId}
+            role="listbox"
+            aria-label="Switch model variant"
+            aria-activedescendant={`${listId}-item-${highlight}`}
+            style={menuStyle}
+            className="z-50 max-h-80 w-48 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl"
+            onMouseMove={onListMouseMove}
           >
-            <span className="text-[color:var(--text-strong)]">Default</span>
-            {!activeVariant && <span className="text-emerald-500">✓</span>}
-          </button>
-          {variants.map((v, i) => (
             <button
-              key={v.id}
-              id={`${listId}-item-${i + 1}`}
+              id={`${listId}-item-0`}
               type="button"
               role="option"
-              aria-selected={activeVariant === v.id}
-              data-hl={highlight === i + 1 || undefined}
-              className={`${ITEM_CLASSES} font-mono text-xs`}
-              onClick={() => pick(v.id)}
+              aria-selected={!activeVariant}
+              data-hl={highlight === 0 || undefined}
+              className={ITEM_CLASSES}
+              onClick={() => pick()}
             >
-              <span className="text-[color:var(--text-strong)]">{v.id}</span>
-              {activeVariant === v.id && <span className="text-emerald-500">✓</span>}
+              <span className="text-[color:var(--text-strong)]">Default</span>
+              {!activeVariant && <span className="text-emerald-500">✓</span>}
             </button>
-          ))}
-        </div>
-      )}
+            {variants.map((v, i) => (
+              <button
+                key={v.id}
+                id={`${listId}-item-${i + 1}`}
+                type="button"
+                role="option"
+                aria-selected={activeVariant === v.id}
+                data-hl={highlight === i + 1 || undefined}
+                className={`${ITEM_CLASSES} font-mono text-xs`}
+                onClick={() => pick(v.id)}
+              >
+                <span className="text-[color:var(--text-strong)]">{v.id}</span>
+                {activeVariant === v.id && <span className="text-emerald-500">✓</span>}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -513,7 +603,13 @@ export function AgentPicker({
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [fallback, setFallback] = useState<string | null>(null);
-  const ref = useMenu(() => setOpen(false));
+  const { anchorRef, menuRef, style: menuStyle } = useAnchoredMenu({
+    open,
+    onClose: () => setOpen(false),
+    openUp,
+    align,
+    width: 240,
+  });
   const signal = useStore((s) => s.uiSignals.agents);
 
   // /agents requests this picker to open.
@@ -558,10 +654,8 @@ export function AgentPicker({
     listId,
   });
 
-  const menuPos = `${openUp ? "bottom-full mb-1" : "mt-1"} ${align === "right" ? "right-0" : "left-0"}`;
-
   return (
-    <div ref={ref} className="relative">
+    <div ref={anchorRef} className="relative">
       <Button
         variant="outline"
         onClick={() => setOpen(!open)}
@@ -572,32 +666,36 @@ export function AgentPicker({
       >
         <span className="truncate">{current ?? "agent"}</span>
       </Button>
-      {open && (
-        <div
-          id={listId}
-          role="listbox"
-          aria-label="Switch agent"
-          aria-activedescendant={`${listId}-item-${highlight}`}
-          className={`absolute z-40 max-h-80 w-60 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl ${menuPos}`}
-          onMouseMove={onListMouseMove}
-        >
-          {visibleAgents.map((a, i) => (
-            <button
-              key={a.id}
-              id={`${listId}-item-${i}`}
-              type="button"
-              role="option"
-              aria-selected={current === a.id}
-              data-hl={i === highlight || undefined}
-              className={ITEM_CLASSES}
-              onClick={() => pickAgent(i)}
-            >
-              <span className="text-[color:var(--text-strong)]">{a.name}</span>
-              {current === a.id && <span className="text-emerald-500">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
+      {open && menuStyle &&
+        createPortal(
+          <div
+            ref={menuRef}
+            id={listId}
+            role="listbox"
+            aria-label="Switch agent"
+            aria-activedescendant={`${listId}-item-${highlight}`}
+            style={menuStyle}
+            className="z-50 max-h-80 w-60 overflow-y-auto rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl"
+            onMouseMove={onListMouseMove}
+          >
+            {visibleAgents.map((a, i) => (
+              <button
+                key={a.id}
+                id={`${listId}-item-${i}`}
+                type="button"
+                role="option"
+                aria-selected={current === a.id}
+                data-hl={i === highlight || undefined}
+                className={ITEM_CLASSES}
+                onClick={() => pickAgent(i)}
+              >
+                <span className="text-[color:var(--text-strong)]">{a.name}</span>
+                {current === a.id && <span className="text-emerald-500">✓</span>}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

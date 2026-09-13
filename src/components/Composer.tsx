@@ -612,7 +612,8 @@ export function Composer({
         names: [action.name, ...(action.aliases ?? [])],
         description: action.description,
         onSelect: () => {
-          setText("");
+          // Client-side slash commands are UI operations, not messages —
+          // running one must not wipe the composer draft.
           action.run("");
         },
       });
@@ -624,7 +625,8 @@ export function Composer({
         names: [ext.item.name, ...(ext.item.aliases ?? [])],
         description: ext.item.description,
         onSelect: () => {
-          setText("");
+          // Extension slash items are UI-only too (README: "local run") —
+          // leave the composer untouched.
           void ext.item.run("", { sessionID });
         },
       });
@@ -781,18 +783,13 @@ export function Composer({
         const name = parts[0]!;
         const action = slashActions.find((a) => a.name === name || a.aliases?.includes(name));
         if (action) {
+          // UI action, not a message — do not clear the composer.
           action.run(parts.slice(1).join(" "));
-          setText("");
-          setPickedFiles([]);
-          setAttachments([]);
           return;
         }
         const slashExt = slashExtensions.find((s) => s.item.name === name || s.item.aliases?.includes(name));
         if (slashExt) {
           await slashExt.item.run(parts.slice(1).join(" "), { sessionID });
-          setText("");
-          setPickedFiles([]);
-          setAttachments([]);
           return;
         }
       }
