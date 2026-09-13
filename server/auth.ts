@@ -93,22 +93,30 @@ export function loadSecret(): Buffer {
 export type AuthPolicy = {
   /** SHA-256 digest of the effective password — the ONLY thing kept. */
   digest: Buffer;
+  /** `"none"` = no login at all (sandbox, or auth:none in config). */
+  mode: "password" | "none";
   /** Set when the password was generated here (printed once, then forgotten). */
   generated?: string;
+  /** Where the effective credential came from (for the boot banner/UI). */
+  source?: "env" | "config" | "generated";
 };
 
+/** Effective credential resolution handed in by server/config.ts. */
+export type AuthInput =
+  | { mode: "none" }
+  | { mode: "password"; plaintext?: string; hash?: string };
+
 /**
- * Resolve the password policy at boot. WEBUI_PASSWORD wins; on a wildcard
- * bind with none set we REFUSE to start rather than expose an unauthenticated
- * proxy to the network. Loopback binds get a generated passphrase that is
- * GENERATED ONCE and then persisted (0600) next to the HMAC secret, so
- * restarts keep working without a new password to hunt for in logs.
+ * Resolve the auth policy at boot. Precedence: `WEBUI_PASSWORD` env > config
+ * `passwordHash` > a generated passphrase persisted (0600) next to the HMAC
+ * secret, so restarts keep working without a new password to hunt for.
+ *
+ * Authentication is OPTIONAL (`auth: "none"`, or sandbox mode): we no longer
+ * refuse a reachable bind, because the user may deliberately front it with
+ * Tailscale/a private network. We do warn loudly — the Settings UI surfaces the
+ * same exposure analysis. Sandbox remains loopback-only and IS refused off it.
  */
-export function resolveAuthPolicy(host: string): AuthPolicy {
-  const fromEnv = process.env.WEBUI_PASSWORD;
-  if (fromEnv && fromEnv.length > 0) {
-    return { digest: createHash("sha256").update(fromEnv, "utf8").digest() };
-  }
+export function resolveAuthPolicy(host: string, input: AuthInput = { mode: "password" }): AuthPolicy {
   if (process.env.WEBUI_SANDBOX === "1") {
     // Sandbox mode: loopback-only, no password. The bind address is the
     // guarantee — a non-loopback sandbox is a misconfiguration, refuse it.
@@ -116,14 +124,25 @@ export function resolveAuthPolicy(host: string): AuthPolicy {
       console.error(`[webui] sandbox requires a loopback bind — refusing ${host}`);
       process.exit(1);
     }
-    return { digest: Buffer.alloc(0) };
+    return { digest: Buffer.alloc(0), mode: "none" };
   }
-  if (isWildcardHostname(hostnameOf(host))) {
-    console.error(`[webui] refusing ${host} without WEBUI_PASSWORD — set it or keep the loopback bind`);
-    process.exit(1);
+  if (input.mode === "none") {
+    const bind = hostnameOf(host);
+    if (isWildcardHostname(bind) || !isLoopbackHostname(bind)) {
+      console.warn(
+        `[webui] WARNING: authentication is OFF and this instance is reachable on ${host} — anyone who can reach the port has full access`,
+      );
+    }
+    return { digest: Buffer.alloc(0), mode: "none" };
+  }
+  if (input.plaintext !== undefined && input.plaintext.length > 0) {
+    return { digest: createHash("sha256").update(input.plaintext, "utf8").digest(), mode: "password", source: "env" };
+  }
+  if (input.hash !== undefined && /^[0-9a-f]{64}$/i.test(input.hash)) {
+    return { digest: Buffer.from(input.hash, "hex"), mode: "password", source: "config" };
   }
   const generated = loadOrGeneratePassword();
-  return { digest: createHash("sha256").update(generated, "utf8").digest(), generated };
+  return { digest: createHash("sha256").update(generated, "utf8").digest(), mode: "password", generated, source: "generated" };
 }
 
 /** State dir shared with the HMAC secret (created by loadSecret). */
@@ -344,12 +363,9 @@ export interface AllowedHosts {
   acceptAll: boolean;
 }
 
-export function resolveAllowedHosts(): AllowedHosts {
-  const entries = (process.env.WEBUI_ALLOWED_HOSTS ?? "")
-    .split(",")
-    .map((s) => hostnameOf(s.trim()))
-    .filter((s) => s.length > 0);
-  return { entries, acceptAll: entries.includes("*") };
+export function resolveAllowedHosts(entries: string[] = []): AllowedHosts {
+  const normalized = entries.map((s) => hostnameOf(s.trim())).filter((s) => s.length > 0);
+  return { entries: normalized, acceptAll: normalized.includes("*") };
 }
 
 export function isHostAllowed(hostname: string, configuredHost: string, allowed: AllowedHosts): boolean {
@@ -381,8 +397,9 @@ export function guardRequest(
   req: Request,
   configuredHost: string,
   allowed: AllowedHosts = resolveAllowedHosts(),
+  trust = trustProxy(),
 ): Response | null {
-  const forwardedHost = trustProxy() ? firstHeaderValue(req, "x-forwarded-host") : undefined;
+  const forwardedHost = trust ? firstHeaderValue(req, "x-forwarded-host") : undefined;
   const hostHeader = req.headers.get("host") ?? "";
   const effectiveHost = forwardedHost ?? hostHeader;
   if (!effectiveHost) return forbidden("missing host header");

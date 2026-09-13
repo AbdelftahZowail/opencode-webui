@@ -35,6 +35,7 @@ import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
   LIFECYCLE_PLUGIN_SOURCE,
 } from "./lifecyclePlugin";
+import { runConfigCli } from "./config";
 
 export const SERVICE_NAME = "opencode-webui";
 const REPO_URL = "https://github.com/AbdelftahZowail/opencode-webui";
@@ -66,6 +67,8 @@ export interface SetupOptions {
   /** Explicit `setup`: ignore dev-checkout and declined gates. */
   force?: boolean;
   quiet?: boolean;
+  /** Config `autostart` — false skips first-run setup (unless forced). */
+  autostart?: boolean;
 }
 
 export interface SetupResult {
@@ -505,7 +508,7 @@ export function ensureSetup(opts: SetupOptions): SetupResult {
   const forceEnv = process.env.WEBUI_SETUP === "1";
 
   if (!forced) {
-    if (process.env.WEBUI_NO_SETUP === "1" || process.env.WEBUI_SANDBOX === "1") {
+    if (opts.autostart === false || process.env.WEBUI_NO_SETUP === "1" || process.env.WEBUI_SANDBOX === "1") {
       return { status: "disabled", message: null, wrapper: null, plugin: null };
     }
     if (!forceEnv && isDevCheckout()) {
@@ -606,6 +609,7 @@ const USAGE = `${SERVICE_NAME} [command]
   (none)      start the webui (starting the OpenCode service first if needed)
   update      update to the latest published version and restart
   status      show the command, lifecycle plugin, launch command, and pid
+  config      show/edit serve + security settings (host, port, auth, hosts, …)
   stop        stop the running webui
   restart     restart the running webui
   uninstall   remove the global command + lifecycle plugin (remembered; no auto-reinstall)
@@ -704,8 +708,10 @@ function runInternalSetup(entryUrl: string): number {
   return 0;
 }
 
-export function runSetupCli(action: string | undefined, entryUrl: string): number {
+export async function runSetupCli(action: string | undefined, entryUrl: string, rest: string[] = []): Promise<number> {
   switch (action) {
+    case "config":
+      return runConfigCli(rest);
     case "internal:setup":
       return runInternalSetup(entryUrl);
     case "update":

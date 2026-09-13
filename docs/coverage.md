@@ -49,6 +49,8 @@ and are intentionally excluded from `scripts/diff-openapi.ts`.
 | `GET /api/webui/extensions/{id}/bundle.js?v=mtime` | `server/index.ts` via `Bun.build` | Per-extension browser bundle (`index.tsx` entry), ESM cache-busted on the query so hot edits repaint live with no refresh |
 | `/api/webui/ext/<id>/…` | `server/ext/registry.ts` `dispatchExtRequest` | Proxy-stratum `server.ts` routes, auto-mounted and namespaced per extension (unknown id/route never falls through to the engine) |
 | `GET /api/webui/config` → `{ version, reportRepo }` | `server/index.ts` | Pinned version exposure for the agent skill (`skills/webui/SKILL.md` links pin to the released tag) |
+| `GET/PUT /api/webui/settings` | `server/index.ts` via `server/config.ts` | Serve/security settings: file + effective + per-key source, exposure analysis, restart delta; PUT validates and can require `confirm`. Passwords are hashed/redacted. |
+| `POST /api/webui/settings/restart` | `server/index.ts` + `server/setup.ts` | Detached restart (stop self + start new) so config changes apply |
 
 Loader behavior: user dir → project dir → shipped dir precedence (same id =
 same swap point, higher wins); `manifest.json` `{ id?, disabled? }`;

@@ -41,6 +41,15 @@ Options:
 | `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode lifecycle plugin. |
 | `WEBUI_SETUP` | unset | `1` forces setup even in a repo checkout (testing). |
 
+The serve/security vars above can also be set **durably** — no shell needed —
+in `~/.config/opencode/webui/config.json`, edited from **Settings › Access** in
+the UI or `opencode-webui config` on the CLI. Precedence per key is
+**explicit env var → config file → default**; changes apply after a restart
+(the Access tab has a "Restart now" button). The file is `0600`; a password set
+there is stored as a SHA-256 hash, never plaintext. Setting a reachable bind or
+`allowedHosts: ["*"]` is allowed but warned about, and a *reachable* instance
+with **no password** needs an explicit confirmation.
+
 Sessions are shared with the `opencode` TUI — open a session in the TUI, continue it in the browser.
 
 ### Setup (run once) — the `opencode-webui` command + OpenCode plugin
@@ -70,9 +79,20 @@ opencode-webui uninstall  # remove the command + plugin (remembered; no auto-rei
 
 A repo checkout (`bun run dev` / `bun run start`) never self-installs, so
 development cannot fight your installed command. `WEBUI_NO_SETUP=1` skips
-setup for one run, `WEBUI_NO_PLUGIN=1` installs the command but not the plugin.
-The plugin only ever starts a webui that is already installed; it installs
-only its own folder and removes it cleanly on `uninstall`.
+setup for one run, `WEBUI_NO_PLUGIN=1` installs the command but not the plugin,
+and `autostart: false` in the config (the **Startup** toggle in Settings ›
+Access) turns it off persistently. The plugin only ever starts a webui that is
+already installed; it installs only its own folder and removes it cleanly on
+`uninstall`.
+
+```sh
+opencode-webui config                 # show effective serve settings + source
+opencode-webui config set host 0.0.0.0
+opencode-webui config set allowed-hosts 192.168.1.5,myserver.lan
+opencode-webui config set password    # read from stdin
+opencode-webui config set auth none --confirm   # no login (warned)
+opencode-webui restart                # apply
+```
 
 ## Install (no Bun)
 
@@ -164,6 +184,7 @@ bun run build && bun start   # production: dist/ + API on 4097
 - Extension authoring guide: [webui-extensions/README.md](webui-extensions/README.md)
 - Extension contract check: `bun run scripts/uitest/extensions-check.ts`
 - Setup check: `bun run check:setup` (global command + lifecycle plugin + CLI, isolated HOME/XDG)
+- Config check: `bun run check:config` (resolution/precedence, validation, exposure, `config` CLI)
 - Architecture, editing rules, roadmap: [AGENTS.md](AGENTS.md)
 
 ## License

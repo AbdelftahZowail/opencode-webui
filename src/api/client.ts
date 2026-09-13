@@ -375,8 +375,73 @@ export interface ReferenceInfo {
   source: unknown;
 }
 
+// ---- serve/security settings (proxy-owned; server/config.ts) ----------------
+export type WebuiAuthMode = "password" | "none";
+
+export interface WebuiConfigShape {
+  host: string;
+  port: number;
+  auth: WebuiAuthMode;
+  passwordSet: boolean;
+  allowedHosts: string[];
+  trustProxy: boolean;
+  autostart: boolean;
+  publicUrl: string | null;
+}
+
+export interface WebuiExposure {
+  level: "ok" | "warn" | "danger";
+  exposed: boolean;
+  unauthenticated: boolean;
+  message: string | null;
+}
+
+export interface WebuiSettings {
+  file: WebuiConfigShape;
+  effective: WebuiConfigShape & { sources: Record<string, "env" | "file" | "default"> };
+  runtime: { host: string; port: number; auth: WebuiAuthMode; version: string; configPath: string };
+  exposure: WebuiExposure;
+  restartRequired: boolean;
+  envPinned: string[];
+}
+
+export type WebuiConfigPatch = Partial<{
+  host: string;
+  port: number;
+  auth: WebuiAuthMode;
+  password: string;
+  clearPassword: boolean;
+  allowedHosts: string[];
+  trustProxy: boolean;
+  autostart: boolean;
+  publicUrl: string | null;
+}>;
+
+export type WebuiUpdateResult =
+  | { ok: true; settings: WebuiSettings }
+  | { ok: false; needConfirm: true; exposure: WebuiExposure }
+  | { ok: false; error: string };
+
 const apiRaw = {
   health: () => request<{ ok: boolean; service?: string; error?: string }>("/api/webui/status"),
+
+  // serve/security settings — GET, save (with a danger-confirm path), restart
+  webuiSettings: () => request<WebuiSettings>("/api/webui/settings"),
+  webuiSettingsUpdate: async (patch: WebuiConfigPatch, confirm = false): Promise<WebuiUpdateResult> => {
+    const res = await fetch("/api/webui/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...patch, confirm }),
+    });
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (res.status === 409 && body.needConfirm === true) {
+      return { ok: false, needConfirm: true, exposure: body.exposure as WebuiExposure };
+    }
+    if (!res.ok) return { ok: false, error: String(body.error ?? `${res.status} ${res.statusText}`) };
+    return { ok: true, settings: body as unknown as WebuiSettings };
+  },
+  webuiRestart: () =>
+    request<{ ok: boolean; restarting: boolean }>("/api/webui/settings/restart", { method: "POST" }),
 
   // sessions
   /**

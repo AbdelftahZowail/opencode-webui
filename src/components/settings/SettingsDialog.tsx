@@ -1,12 +1,13 @@
 import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Blocks, Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, XIcon } from "lucide-react";
+import { Blocks, Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, ShieldCheck, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { registerPoller } from "../../lib/scheduler";
 import { getContributions, getRegisteredIds, subscribeRegistry, type SettingsContribution } from "../../extensions/registry";
+import { AccessSection } from "./AccessSection";
 import { ConfigSection } from "./ConfigSection";
 import { IntegrationsSection } from "./IntegrationsSection";
 import { McpSection } from "./McpSection";
@@ -34,6 +35,7 @@ const TABS = [
   { id: "config", label: "Config", icon: FileJson2 },
   { id: "websearch", label: "Websearch", icon: Globe },
   { id: "server", label: "Server", icon: Server },
+  { id: "access", label: "Access", icon: ShieldCheck },
 ] as const;
 
 export function SettingsDialog() {
@@ -106,6 +108,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="server">
                 <ServerSection />
+              </TabsContent>
+              <TabsContent value="access">
+                <AccessSection />
               </TabsContent>
             </ScrollArea>
           </Tabs>

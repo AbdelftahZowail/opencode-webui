@@ -43,9 +43,22 @@ import {
 } from "./auth";
 import { syncSkill } from "./skillSync";
 import {
+  analyzeExposure,
+  applyConfigPatch,
+  configPath,
+  mergePatch,
+  readFileConfig,
+  redact,
+  resolveConfig,
+  validatePatch,
+  type ConfigPatch,
+} from "./config";
+import {
   clearPidFile,
   ensureSetup,
+  resolveLaunchCommand,
   runSetupCli,
+  spawnDetached,
   writePidFile,
 } from "./setup";
 import {
@@ -81,7 +94,10 @@ if (process.argv.includes("sandbox")) {
   }
 }
 
-const PROXY_PORT = Number(process.env.WEBUI_PROXY_PORT ?? 4097);
+// Serve/security settings: env > ~/.config/opencode/webui/config.json > default
+// (server/config.ts). Read once — changing them requires a restart.
+const CONFIG = resolveConfig();
+const PROXY_PORT = CONFIG.port;
 // Client headers never forwarded to the engine: transport (recomputed by Bun
 // from the proxied request), identity (must WIN over anything the client
 // sends), and credentials the browser has no business relaying.
@@ -96,7 +112,7 @@ const FORBIDDEN_CLIENT_HEADERS = new Set([
   "expect",
   "proxy-authorization",
 ]);
-const HOST = process.env.WEBUI_HOST ?? "127.0.0.1";
+const HOST = CONFIG.host;
 // Bun binds 0.0.0.0 by default; keep the safe loopback default and only pass
 // through what the operator actually asked for ("localhost" binds 127.0.0.1).
 const BIND_HOST = HOST === "localhost" ? "127.0.0.1" : HOST;
@@ -712,6 +728,7 @@ const SETUP_ACTIONS = new Set([
   "status",
   "stop",
   "restart",
+  "config",
   "internal:setup",
   "help",
   "--help",
@@ -719,7 +736,7 @@ const SETUP_ACTIONS = new Set([
 ]);
 const SETUP_ARGV = process.argv.findIndex((arg) => SETUP_ACTIONS.has(arg));
 if (SETUP_ARGV !== -1) {
-  process.exit(runSetupCli(process.argv[SETUP_ARGV], import.meta.url));
+  process.exit(await runSetupCli(process.argv[SETUP_ARGV], import.meta.url, process.argv.slice(SETUP_ARGV + 1)));
 }
 
 /** `--install-skill`: copy the skill and exit without starting the server. */
@@ -730,11 +747,18 @@ if (process.argv.includes("--install-skill")) {
   process.exit(result.ok ? 0 : 1);
 }
 
-// Exits with a clear message when a wildcard bind has no WEBUI_PASSWORD.
-const AUTH = resolveAuthPolicy(HOST);
-// Operator-controlled Host allowlist (WEBUI_ALLOWED_HOSTS) — resolved once,
-// consulted on every request by guardRequest below.
-const ALLOWED_HOSTS = resolveAllowedHosts();
+// Auth policy from config/env (server/config.ts). Sandbox and `auth: "none"`
+// disable the login; a reachable unauthenticated bind is warned about, not
+// refused (the user may front it with Tailscale/a private network).
+const AUTH = resolveAuthPolicy(HOST, {
+  mode: SANDBOX() || CONFIG.auth === "none" ? "none" : "password",
+  plaintext: CONFIG.envPassword ?? undefined,
+  hash: CONFIG.passwordHash ?? undefined,
+});
+// Operator-controlled Host allowlist — config/env, consulted on every request
+// by guardRequest below.
+const ALLOWED_HOSTS = resolveAllowedHosts(CONFIG.allowedHosts);
+const EXPOSURE = analyzeExposure(CONFIG);
 const SECRET = loadSecret();
 const SKILL = await syncSkill(); // best-effort — never blocks the banner below it
 
@@ -821,7 +845,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     const path = url.pathname;
 
     // DNS-rebinding + cross-origin guard — before ANY route, login included.
-    const guarded = guardRequest(req, HOST, ALLOWED_HOSTS);
+    const guarded = guardRequest(req, HOST, ALLOWED_HOSTS, CONFIG.trustProxy);
     if (guarded) return guarded;
 
     // The unauthenticated surface: login page, login POST, logout.
@@ -834,7 +858,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     // Everything below — /api/* (JSON 401), pages, dist/ static, SSE, and
     // WebSocket upgrades — requires a valid session cookie. A SANDBOX
     // instance (loopback-only, passwordless) skips the gate entirely.
-    if (!SANDBOX() && !isAuthed(req, SECRET)) return unauthorizedResponse(url);
+    if (AUTH.mode !== "none" && !SANDBOX() && !isAuthed(req, SECRET)) return unauthorizedResponse(url);
 
     if (method === "GET" && path === "/api/webui/status") {
       try {
@@ -851,6 +875,39 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     // Proxy metadata: app version + where to report issues.
     if (method === "GET" && path === "/api/webui/config") {
       return Response.json({ version: PKG_VERSION, reportRepo: REPORT_REPO });
+    }
+
+    // Serve/security settings — one file, edited by this UI and the CLI.
+    // A dangerous change (unauthenticated + reachable) needs explicit confirm.
+    if (method === "GET" && path === "/api/webui/settings") {
+      return Response.json(settingsPayload());
+    }
+    if (method === "PUT" && path === "/api/webui/settings") {
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json({ error: "invalid JSON body" }, { status: 400 });
+      }
+      const patch = sanitizePatch(body);
+      const errors = validatePatch(patch);
+      if (errors.length > 0) return Response.json({ error: errors.join("; "), errors }, { status: 400 });
+      const pending = analyzeExposure(mergePatch(readFileConfig(), patch));
+      const confirm = (body as { confirm?: unknown } | null)?.confirm === true;
+      if (pending.level === "danger" && !confirm) {
+        return Response.json({ error: "confirmation required", needConfirm: true, exposure: pending }, { status: 409 });
+      }
+      applyConfigPatch(patch);
+      dbg("settings updated:", Object.keys(patch).join(",") || "(no-op)");
+      return Response.json(settingsPayload());
+    }
+    // Restart to apply — spawn the detached `restart` (stop self + start new),
+    // after this response has a chance to flush. The socket may drop; the UI
+    // treats a dropped response as "restarting".
+    if (method === "POST" && path === "/api/webui/settings/restart") {
+      const launch = resolveLaunchCommand(import.meta.url);
+      setTimeout(() => spawnDetached({ cmd: [...launch.cmd, "restart"], display: "restart" }), 300);
+      return Response.json({ ok: true, restarting: true });
     }
 
     if (method === "POST" && path === "/api/debug") {
@@ -1164,24 +1221,88 @@ function describeHosts(): string {
   return parts.join(", ");
 }
 
+// ---------------------------------------------------------------------------
+// Serve/security settings (`/api/webui/settings`).
+//
+// The config file is the DESIRED state; this process holds the APPLIED state
+// (read at boot). GET compares them so the UI can say "restart to apply".
+// Values are redacted of any password/hash before they leave the process.
+// ---------------------------------------------------------------------------
+
+function sanitizePatch(body: unknown): ConfigPatch {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const patch: ConfigPatch = {};
+  if (typeof b.host === "string") patch.host = b.host;
+  if (typeof b.port === "number") patch.port = b.port;
+  if (b.auth === "password" || b.auth === "none") patch.auth = b.auth;
+  if (typeof b.password === "string" && b.password.length > 0) patch.password = b.password;
+  if (b.clearPassword === true) patch.clearPassword = true;
+  if (Array.isArray(b.allowedHosts) && b.allowedHosts.every((v) => typeof v === "string")) {
+    patch.allowedHosts = b.allowedHosts as string[];
+  }
+  if (typeof b.trustProxy === "boolean") patch.trustProxy = b.trustProxy;
+  if (typeof b.autostart === "boolean") patch.autostart = b.autostart;
+  if (b.publicUrl === null || typeof b.publicUrl === "string") patch.publicUrl = b.publicUrl as string | null;
+  return patch;
+}
+
+/** Effective state + provenance + restart delta, safe to send to the browser. */
+function settingsPayload() {
+  const file = readFileConfig();
+  const now = resolveConfig();
+  const restartRequired =
+    now.host !== CONFIG.host ||
+    now.port !== CONFIG.port ||
+    (now.auth === "none") !== (CONFIG.auth === "none") ||
+    now.passwordHash !== CONFIG.passwordHash ||
+    now.envPassword !== CONFIG.envPassword ||
+    JSON.stringify(now.allowedHosts) !== JSON.stringify(CONFIG.allowedHosts) ||
+    now.trustProxy !== CONFIG.trustProxy;
+  const envPinned = (Object.keys(CONFIG.sources) as Array<keyof typeof CONFIG.sources>).filter(
+    (key) => CONFIG.sources[key] === "env",
+  );
+  return {
+    file: redact(file),
+    effective: {
+      ...redact(now, now.envPassword !== null || now.passwordHash !== null),
+      sources: CONFIG.sources,
+    },
+    runtime: { host: HOST, port: PROXY_PORT, auth: AUTH.mode, version: PKG_VERSION, configPath: configPath() },
+    exposure: analyzeExposure(file),
+    restartRequired,
+    envPinned,
+  };
+}
+
 // First-run setup: the global command + OpenCode lifecycle plugin. A matching
 // install is a no-op; the first install (and a refresh after an upgrade) shows
 // a one-time notice with the undo. The pidfile lets `stop`/`restart`/`update`
 // find this server.
 writePidFile(server.port ?? PROXY_PORT);
 process.on("exit", clearPidFile);
-const SETUP = ensureSetup({ entryUrl: import.meta.url, port: server.port ?? PROXY_PORT, version: PKG_VERSION });
+const SETUP = ensureSetup({
+  entryUrl: import.meta.url,
+  port: server.port ?? PROXY_PORT,
+  version: PKG_VERSION,
+  autostart: CONFIG.autostart,
+});
 
 // First-boot banner — the entire onboarding. The generated password is
 // printed exactly once and never logged anywhere else.
 const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST) ? "localhost" : HOST;
 console.log(
   [
-    `[webui] ready → http://${displayHost}:${server.port}`,
+    `[webui] ready → ${CONFIG.publicUrl ?? `http://${displayHost}:${server.port}`}`,
     SANDBOX()
       ? `[webui] sandbox — loopback only, NO password; extensions (scratch): ${globalUserExtensionsDir()}`
-      : `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
+      : AUTH.mode === "none"
+        ? `[webui] auth: NONE — anyone who can reach this port has full access`
+        : `[webui] password: ${
+            AUTH.generated ??
+            (AUTH.source === "env" ? "from WEBUI_PASSWORD" : AUTH.source === "config" ? "set in config" : "set")
+          }`,
     ENGINE_LINE,
+    ...(EXPOSURE.level === "ok" ? [] : [`[webui] exposed: ${EXPOSURE.message}`]),
     `[webui] hosts: ${describeHosts()}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
     `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/ (index.tsx + manifest.json)`,

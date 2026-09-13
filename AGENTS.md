@@ -52,6 +52,8 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
 | `server/setup.ts` | First-run setup: global `opencode-webui` command, lifecycle-plugin install, launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
 | `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
+| `server/config.ts` | Serve/security config: `~/.config/opencode/webui/config.json`, env-override resolution, validation, exposure analysis; `config` CLI |
+| `src/components/settings/AccessSection.tsx` | Settings › Access — the UI for those settings (source badges, restart-to-apply) |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
 | `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
@@ -243,6 +245,9 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - `bun run check:setup` — global-wrapper + lifecycle-plugin + CLI contract, and a
   real plugin `setup()` spawn, in an isolated HOME/XDG tree (never touches the
   real command, plugin dir, or state)
+- `bun run check:config` — serve/security config: resolution precedence,
+  validation, password hashing/redaction, exposure, and the `config` CLI
+  (isolated XDG_CONFIG_HOME)
 - `bun run build && bun start` — production build, served on 4097
 - `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check).
@@ -398,6 +403,28 @@ calls `ensureSetup()` after the port binds:
 - The engine is ensured **eagerly** at boot with a 6s bound (a cold spawn can't
   hold the banner); a manual run on an occupied port probes `/login` for the
   webui fingerprint and exits 0 instead of dying on EADDRINUSE.
+
+## Serve/security config (Settings › Access)
+
+`server/config.ts` owns `~/.config/opencode/webui/config.json` (0600): host,
+port, auth (`password` | `none`), passwordHash, allowedHosts, trustProxy,
+autostart, publicUrl. Precedence per key: explicit env > file > default, so
+existing env deployments are untouched. `opencode-webui config get|set|unset`
+and Settings › Access edit the same file; `resolveConfig()` returns per-key
+`source` provenance, and the UI locks env-pinned fields.
+
+- **Apply = restart**: Bun binds once and the auth digest is in memory, so a
+  change never hot-applies; the API returns `restartRequired` and the UI offers
+  "Restart now" (the same detached restart the CLI uses).
+- **Password optional**: `auth: "none"` is allowed because a user may front the
+  proxy with Tailscale/a private network. `analyzeExposure()` drives warnings;
+  a *reachable unauthenticated* change (wildcard/non-loopback + no password)
+  needs an explicit `confirm: true` (HTTP 409 otherwise). Env and CLI can still
+  do it deliberately.
+- **Never leak secrets**: the API returns `passwordSet: boolean` only; the file
+  holds a SHA-256 `passwordHash`; `WEBUI_PASSWORD` stays plaintext env and wins.
+- Proxy-owned routes: `GET/PUT /api/webui/settings` and
+  `POST /api/webui/settings/restart` (behind the normal auth gate).
 
 ## Debug logging
 

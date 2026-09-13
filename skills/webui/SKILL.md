@@ -17,6 +17,13 @@ running at that port. Check before starting another (a second run reports "alrea
 running" and exits 0). Manage it with `opencode-webui update|status|stop|restart|uninstall`;
 `WEBUI_NO_SETUP=1` skips setup for a one-off run.
 
+Serve/security settings (host, port, auth, allowed hosts, trust proxy, autostart)
+persist in `~/.config/opencode/webui/config.json` — environment variables
+override the file — and are edited with `opencode-webui config get|set|unset` or
+in **Settings › Access**; changes apply after a restart. Authentication is
+optional (`auth: none`) for private networks/proxies, but reachable-without-a-
+password changes need explicit confirmation.
+
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
 - **This skill's version**: 2.4.0 (matches the `v2.4.0` git tag —
   the file links below are pinned to it, so they always describe the code

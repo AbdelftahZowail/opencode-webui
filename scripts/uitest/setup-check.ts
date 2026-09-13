@@ -45,7 +45,7 @@ function check(name: string, condition: boolean, detail = ""): void {
 }
 
 type EnvOverrides = Record<string, string | undefined>;
-function withEnv(overrides: EnvOverrides, fn: () => void): void {
+async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>): Promise<void> {
   const keys = Object.keys(overrides);
   const saved = new Map(keys.map((key) => [key, process.env[key]]));
   try {
@@ -54,7 +54,7 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    fn();
+    await fn();
   } finally {
     for (const key of keys) {
       const value = saved.get(key);
@@ -173,7 +173,7 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
   mkdirSync(state, { recursive: true });
   mkdirSync(bin, { recursive: true });
   try {
-    withEnv(
+    await withEnv(
       {
         XDG_CONFIG_HOME: config,
         XDG_STATE_HOME: state,
@@ -183,7 +183,7 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
         WEBUI_NO_PLUGIN: undefined,
         WEBUI_SANDBOX: undefined,
       },
-      () => {
+      async () => {
         const wrapper = join(bin, "opencode-webui");
         const pluginIndex = join(config, "opencode", "plugins", "opencode-webui", "index.js");
         const launch = join(state, "opencode-webui", "launch.json");
@@ -204,7 +204,7 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
         check("uninstall: files gone", !existsSync(wrapper) && !existsSync(pluginIndex) && !existsSync(launch));
         check("uninstall: decline recorded", setupStatus().declined);
 
-        runSetupCli("setup", "file:///opt/app/server/index.ts");
+        await runSetupCli("setup", "file:///opt/app/server/index.ts");
         check("setup: re-enables after uninstall", existsSync(wrapper) && existsSync(pluginIndex) && !setupStatus().declined);
       },
     );
@@ -228,7 +228,7 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
     const foreign = join(bin, "opencode-webui");
     Bun.write(foreign, "#!/bin/sh\necho not ours\n");
     Bun.write(join(config, "opencode", "plugins", "opencode-webui", "index.js"), "// someone else\n");
-    withEnv(
+    await withEnv(
       { XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, HOME: tmp, WEBUI_BIN_DIR: bin },
       () => {
         ensureSetup({ entryUrl: "file:///opt/app/server/index.ts", port: 4097, version: "9.9.9", force: true, quiet: true });
@@ -290,9 +290,9 @@ function withEnv(overrides: EnvOverrides, fn: () => void): void {
 // update guardrails (no network): unknown action, dev checkout, help
 // ---------------------------------------------------------------------------
 {
-  check("cli: unknown command exits 1", runSetupCli("definitely-not-a-command", "file:///opt/app/server/index.ts") === 1);
-  check("cli: update on a dev checkout exits 1 (no network)", runSetupCli("update", import.meta.url) === 1);
-  check("cli: compiled binary update refuses", runSetupCli("update", "file:///$bunfs/root/x") === 1);
+  check("cli: unknown command exits 1", (await runSetupCli("definitely-not-a-command", "file:///opt/app/server/index.ts")) === 1);
+  check("cli: update on a dev checkout exits 1 (no network)", (await runSetupCli("update", import.meta.url)) === 1);
+  check("cli: compiled binary update refuses", (await runSetupCli("update", "file:///$bunfs/root/x")) === 1);
 }
 
 console.log(`\nRESULT: ${passed} pass · ${failed} fail → exit ${failed > 0 ? 1 : 0}`);
