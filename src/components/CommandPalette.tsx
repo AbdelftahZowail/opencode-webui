@@ -130,6 +130,10 @@ export function CommandPalette() {
             {prefs.showToolDetails ? <EyeOff /> : <Eye />}
             <span>{prefs.showToolDetails ? "Hide" : "Show"} tool details</span>
           </CommandItem>
+          <CommandItem onSelect={() => setPref("streamLive", !prefs.streamLive)}>
+            {prefs.streamLive ? <EyeOff /> : <Eye />}
+            <span>{prefs.streamLive ? "Disable" : "Enable"} live streaming</span>
+          </CommandItem>
         </CommandGroup>
         <CommandSeparator />
         <CommandGroup heading="Sessions">

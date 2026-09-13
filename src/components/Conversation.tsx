@@ -27,6 +27,7 @@ import {
   useMessageScroller,
 } from "./ui/message-scroller";
 import { Badge } from "./ui/badge";
+import { useKeyboardOpen } from "../hooks/useKeyboardOpen";
 import { MessageItem, MessagePart } from "./MessageItem";
 import { PendingRequestsPanel } from "./PendingRequestsPanel";
 import { QueueStrip } from "./QueueStrip";
@@ -80,6 +81,9 @@ export function Conversation({
   // history). The marker is event/local-owned (see State.revertMarkers) —
   // reading the detail's field directly here would resurrect a cleared cut.
   const revertMarker = useStore((s) => revertMarkerFor(s, sessionID));
+  // Mobile keyboard open = only the input box stays above it; the strips
+  // below gate on this (hidden <sm while typing).
+  const kbOpen = useKeyboardOpen();
   const messages = useMemo(
     () => applyRevertView(allMessages, revertMarker),
     [allMessages, revertMarker],
@@ -235,10 +239,17 @@ export function Conversation({
         </div>
       </MessageScrollerProvider>
 
-      <SendErrorStrip sessionID={sessionID} />
+      {/* Mobile keyboard: every strip above the input box docks away while
+          typing — only the input field rides above the keyboard. Wrappers
+          stay mounted (state-safe), hidden <sm only; desktop unaffected. */}
+      <div className={kbOpen ? "hidden sm:block" : ""}>
+        <SendErrorStrip sessionID={sessionID} />
+      </div>
       {/* Pending busy-sends (steer/queue) — above the whole composer slot so
           it also shows while RunsPanel/gate replace the composer. */}
-      <QueueStrip sessionID={sessionID} />
+      <div className={kbOpen ? "hidden sm:block" : ""}>
+        <QueueStrip sessionID={sessionID} />
+      </div>
       {!focused ? (
         // Unfocused panes stream their own live projection but carry none of
         // the focused pane's global chrome — always the plain composer,
@@ -610,7 +621,7 @@ function Header({
   const isDraft = isDraftSession(sessionID);
   const draftWorkspace = useStore((s) => s.draftWorkspace);
   return (
-    <div className="flex items-center justify-between gap-2 border-b border-[var(--border-base)] px-2.5 py-2 sm:px-4 sm:py-2.5" data-oc-session-header>
+    <div className="sticky top-0 z-10 flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-base)] bg-[var(--background-base)] px-2.5 py-2 sm:px-4 sm:py-2.5" data-oc-session-header>
       <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
         {/* Mobile navigation: opens the sessions drawer (sidebar is off-canvas <md). */}
         <button

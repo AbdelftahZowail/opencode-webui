@@ -15,6 +15,7 @@ import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { fireHooks } from "./extensions/hooks";
 import { log } from "./lib/log";
 import { registerPoller, startScheduler } from "./lib/scheduler";
+import { getPrefs } from "./prefs";
 import type {
   AssistantMessage,
   InboxInfo,
@@ -462,7 +463,13 @@ function emit() {
   for (const fn of listeners) fn();
 }
 
-function batchState(fn: () => void) {
+/**
+ * Run `fn` inside one notification window. `silent` skips the React notify at
+ * the end: used for batches that only advanced in-flight streaming (see
+ * QUIET_EVENT_TYPES) while the user has streaming turned off — state is still
+ * mutated and correct, the transcript just repaints at part boundaries.
+ */
+function batchState(fn: () => void, silent = false) {
   stateBatchDepth += 1;
   try {
     fn();
@@ -470,7 +477,7 @@ function batchState(fn: () => void) {
     stateBatchDepth -= 1;
     if (stateBatchDepth === 0 && stateBatchPending) {
       stateBatchPending = false;
-      emit();
+      if (!silent) emit();
     }
   }
 }
@@ -932,12 +939,44 @@ function persistLiveForSession(sessionID: string) {
 }
 
 function clearPersistedLive(sessionID: string) {
+  cancelScheduledPersist(sessionID);
   try {
     if (typeof localStorage === "undefined") return;
     localStorage.removeItem(liveStorageKey(sessionID));
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Coalesce reload-restore snapshots. `persistLiveForSession` serializes the
+ * whole in-flight message and writes localStorage; doing that on every 16ms
+ * delta batch (ensureLiveAssistant + patchLiveAssistant both call it) is
+ * main-thread jank on slow devices. Writes now trail by PERSIST_THROTTLE_MS —
+ * the in-memory state is always current, only the reload snapshot lags a
+ * little, and the proxy event replay covers any gap after a reload.
+ */
+const PERSIST_THROTTLE_MS = 500;
+const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelScheduledPersist(sessionID: string) {
+  const timer = persistTimers.get(sessionID);
+  if (timer) {
+    clearTimeout(timer);
+    persistTimers.delete(sessionID);
+  }
+}
+
+function schedulePersistLive(sessionID: string) {
+  if (!sessionID || isDraftSession(sessionID)) return;
+  if (persistTimers.has(sessionID)) return;
+  persistTimers.set(
+    sessionID,
+    setTimeout(() => {
+      persistTimers.delete(sessionID);
+      persistLiveForSession(sessionID);
+    }, PERSIST_THROTTLE_MS),
+  );
 }
 
 function tryRestoreLiveFromStorage(sessionID: string): boolean {
@@ -1445,7 +1484,9 @@ function patchLiveAssistant(id: string, patch: Partial<LiveAssistant>) {
       return patch.content ? withLiveContent(next, patch.content) : next;
     }),
   });
-  if (sid) persistLiveForSession(sid);
+  // Throttled: this runs for every streaming delta, and serializing + writing
+  // the whole message to localStorage each time is jank on slow devices.
+  if (sid) schedulePersistLive(sid);
 }
 
 function ensureLiveContentPart(
@@ -2526,12 +2567,30 @@ let started = false;
 const pendingEvents: V2Event[] = [];
 let eventFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Event types that only advance an in-flight stream. With the `streamLive`
+ * pref OFF a batch made purely of these is applied to state but NOT emitted to
+ * React — no transcript repaint, no markdown re-parse, no scroll churn. The
+ * text still arrives whole on `*.ended` (and via the run-end history settle),
+ * so this trades token-by-token animation for a calm, part-at-a-time render.
+ */
+const QUIET_EVENT_TYPES = new Set<string>([
+  "session.text.delta",
+  "session.reasoning.delta",
+  "session.tool.input.delta",
+]);
+
+function isQuietBatch(events: V2Event[]): boolean {
+  return events.length > 0 && events.every((e) => QUIET_EVENT_TYPES.has(e.type));
+}
+
 function enqueueEvent(event: V2Event) {
   pendingEvents.push(event);
   if (eventFlushTimer) return;
   eventFlushTimer = setTimeout(() => {
     eventFlushTimer = null;
     const events = pendingEvents.splice(0, pendingEvents.length);
+    const silent = !getPrefs().streamLive && isQuietBatch(events);
     batchState(() => {
       for (const item of events) {
         // One poisoned event (malformed payload, engine surprise) must not
@@ -2543,7 +2602,7 @@ function enqueueEvent(event: V2Event) {
           console.warn("event handler failed:", item.type, err);
         }
       }
-    });
+    }, silent);
   }, 16);
 }
 

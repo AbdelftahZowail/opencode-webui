@@ -17,9 +17,12 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 - **The browser never holds service credentials.** The proxy discovers the
   service with `Service.ensure()` from `@opencode-ai/client/service` and
   attaches auth headers. Do not bypass the proxy.
-- **Dev**: `bun run dev` starts the proxy (port 4097, `WEBUI_PROXY_PORT`)
-  and Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies `/api` to the
-  proxy. HMR applies to every UI edit instantly — no refresh, no restart,
+- **Dev**: `bun run dev` starts the proxy (config `port`, default 4097) and
+  Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies `/api` to the
+  proxy. Vite binds the config `host` and honors the config `allowedHosts`, so
+  a phone/Tailscale client reaches the dev UI on Vite's port — Settings ›
+  Access drives both servers. Sandbox always forces its Vite child back to
+  loopback. HMR applies to every UI edit instantly — no refresh, no restart,
   and the opencode service is never restarted.
 - **Sandbox**: `bun run sandbox` (or `bunx opencode-webui sandbox` / the
   binary's `sandbox` arg) starts a SECOND instance on `127.0.0.1:4099` —

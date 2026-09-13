@@ -19,15 +19,15 @@ import {
   refreshSessions,
   selectSession,
   sessionHref,
-  setHighlightMessage,
   setPendingWorkspace,
   startDraftSession,
   useStore,
 } from "../store";
 import { api } from "../api/client";
+import { registerPoller } from "../lib/scheduler";
 import type { SessionInfo } from "../api/types";
-import { searchContent, type ContentHits, type MessageHit } from "../lib/searchIndex";
-import { SEARCH_KBD, IS_MAC } from "../lib/platform";
+import { findHome, sameDirectory, workspaceName } from "../lib/workspaces";
+import { OPEN_SEARCH_EVENT } from "../lib/uiEvents";
 import { Target, autoRegister, getContributions, subscribeRegistry, type ContextMenuContribution, type PageContribution } from "../extensions/registry";
 import { timeAgo } from "./ui";
 import {
@@ -38,15 +38,11 @@ import {
 } from "./ui/context-menu";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileExplorer } from "./FileExplorer";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
 const SECTION_LIMIT = 3;
-const CONTENT_GROUP_LIMIT = 20;
-/** Content/server search kicks in from this query length. */
-const SEARCH_DEBOUNCE_MIN_LENGTH = 2;
 /**
  * Fired after an in-app pushState to an extension page route so App's
  * pathname listener repaints (pushState alone fires no event). Mirrors
@@ -113,43 +109,6 @@ function SessionContextMenu({ sessionID, children }: { sessionID: string; childr
   );
 }
 
-function isHomeDir(dir: string): boolean {
-  return /^\/home\/[^/]+$/.test(dir) || /^\/Users\/[^/]+$/.test(dir);
-}
-
-function findHome(dirs: (string | undefined)[]): string | undefined {
-  const counts = new Map<string, number>();
-  for (const d of dirs) {
-    if (!d) continue;
-    const t = d.replace(/\/+$/, "");
-    if (isHomeDir(t)) counts.set(t, (counts.get(t) ?? 0) + 1);
-  }
-  let best: string | undefined;
-  let bestN = 0;
-  for (const [dir, n] of counts) {
-    if (n > bestN) {
-      best = dir;
-      bestN = n;
-    }
-  }
-  return best;
-}
-
-function workspaceName(directory: string | undefined, home?: string): string {
-  if (!directory) return "Other";
-  const trimmed = directory.replace(/\/+$/, "");
-  if (home && isHomeDir(home) && trimmed === home) return "~";
-  if (home && isHomeDir(home) && trimmed.startsWith(home + "/")) {
-    return "~/" + trimmed.slice(home.length + 1);
-  }
-  return trimmed;
-}
-
-/** Directory equality that tolerates trailing slashes. */
-function sameDirectory(a: string | null | undefined, b: string | null | undefined): boolean {
-  return !!a && !!b && a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
-}
-
 export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sessionsCursor = useStore((s) => s.sessionsCursor);
@@ -159,12 +118,6 @@ export function Sidebar() {
   const pending = useStore((s) => s.pendingWorkspace);
   const running = useStore((s) => s.running);
   const queued = useStore((s) => s.queued);
-  const [query, setQuery] = useState("");
-  // Layer B (server title search) + layer C (message content search).
-  const [serverHits, setServerHits] = useState<SessionInfo[]>([]);
-  const [contentHits, setContentHits] = useState<ContentHits>(new Map());
-  const [contentSearching, setContentSearching] = useState(false);
-  const [collapsedHits, setCollapsedHits] = useState<Set<string>>(new Set());
   const sidebarRef = useRef<HTMLElement>(null);
   const [showMore, setShowMore] = useState<Record<string, boolean>>({});
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({});
@@ -224,61 +177,6 @@ export function Sidebar() {
     return parents;
   }, [sessions, running, queued]);
 
-  const trimmedQuery = query.trim();
-  const normalizedQuery = trimmedQuery.toLowerCase();
-
-  // Layer B: server-side title search, debounced 250ms once the query is
-  // >= 2 chars — catches sessions beyond the currently loaded pages.
-  useEffect(() => {
-    if (trimmedQuery.length < 2) {
-      setServerHits([]);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      api
-        .listSessions({ search: trimmedQuery, limit: 100 })
-        .then((res) => {
-          if (!cancelled) setServerHits(res.data.filter((s) => !s.parentID));
-        })
-        .catch(() => {
-          if (!cancelled) setServerHits([]);
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [trimmedQuery]);
-
-  // Layer C: message content search over the known sessions, debounced
-  // 250ms. Reports partial matches while fetch batches land.
-  useEffect(() => {
-    if (trimmedQuery.length < 2) {
-      setContentHits(new Map());
-      setContentSearching(false);
-      return;
-    }
-    let cancelled = false;
-    setContentSearching(true);
-    const timer = setTimeout(() => {
-      searchContent(trimmedQuery, sessions, (partial) => {
-        if (!cancelled) setContentHits(new Map(partial));
-      })
-        .catch(() => new Map<string, MessageHit[]>())
-        .then((matches) => {
-          if (!cancelled) {
-            setContentHits(new Map(matches));
-            setContentSearching(false);
-          }
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [trimmedQuery, sessions]);
-
   // Pending-workspace highlight yields to any click outside the sidebar.
   useEffect(() => {
     if (!pending) return;
@@ -293,30 +191,10 @@ export function Sidebar() {
 
   const groups = useMemo(() => {
     const buckets = new Map<string, typeof sessions>();
-    const seen = new Set<string>();
     for (const s of sessions) {
       // Subagent (child) sessions are managed inside their parent session,
       // never listed or counted as top-level workspace entries.
       if (s.parentID) continue;
-      if (
-        normalizedQuery &&
-        !(s.title ?? "Untitled session").toLowerCase().includes(normalizedQuery) &&
-        !workspaceName(s.location?.directory, home).toLowerCase().includes(normalizedQuery) &&
-        !(s.location?.directory ?? "").toLowerCase().includes(normalizedQuery)
-      ) {
-        continue;
-      }
-      seen.add(s.id);
-      const key = workspaceName(s.location?.directory, home);
-      const list = buckets.get(key) ?? [];
-      list.push(s);
-      buckets.set(key, list);
-    }
-    // Server hits (layer B): merge in sessions the local list doesn't hold,
-    // grouped under their own workspace like loaded ones.
-    for (const s of serverHits) {
-      if (seen.has(s.id)) continue;
-      seen.add(s.id);
       const key = workspaceName(s.location?.directory, home);
       const list = buckets.get(key) ?? [];
       list.push(s);
@@ -340,40 +218,7 @@ export function Sidebar() {
       return 0;
     });
     return sorted;
-  }, [sessions, serverHits, normalizedQuery, home, running, activeIDs]);
-
-  // Real computation: every known session with a content hit that isn't
-  // already visible in a title/workspace/server group.
-  const contentOnly = useMemo(() => {
-    if (!normalizedQuery || contentHits.size === 0) return [] as SessionInfo[];
-    const listed = new Set(groups.flatMap((g) => g.list.map((s) => s.id)));
-    const byID = new Map(sessions.map((s) => [s.id, s]));
-    const out: SessionInfo[] = [];
-    for (const id of contentHits.keys()) {
-      if (listed.has(id)) continue;
-      const s = byID.get(id);
-      if (s) out.push(s);
-    }
-    return out.sort((a, b) => b.time.updated - a.time.updated).slice(0, CONTENT_GROUP_LIMIT);
-  }, [sessions, groups, contentHits, normalizedQuery]);
-
-  /** Total sessions currently surfaced across all search layers. */
-  const matchedCount =
-    groups.reduce((n, g) => n + g.list.length, 0) + contentOnly.length;
-
-  const toggleHitCollapse = (id: string) => {
-    setCollapsedHits((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleHitClick = (sessionID: string, messageID: string) => {
-    setHighlightMessage(sessionID, messageID, trimmedQuery);
-    void selectSession(sessionID);
-  };
+  }, [sessions, home, running, activeIDs]);
 
   const hasMore = sessionsCursor != null;
 
@@ -417,6 +262,9 @@ export function Sidebar() {
 
   const toggleSidebar = () => setSidebarCollapsed((prev) => !prev);
 
+  /** Open the global search overlay — owned by App, not this subtree. */
+  const openSearch = () => window.dispatchEvent(new Event(OPEN_SEARCH_EVENT));
+
   return (
     <>
       {/* Mobile drawer backdrop — desktop never renders it. */}
@@ -453,12 +301,18 @@ export function Sidebar() {
         {sidebarCollapsed ? (
           <>
             <NewSessionLink collapsed />
+            <Button variant="ghost" size="icon" onClick={openSearch} title="Search sessions (Ctrl/Cmd+F)">
+              <Search />
+            </Button>
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Expand sidebar">
               <PanelLeftOpen />
             </Button>
           </>
         ) : (
           <div className="flex min-w-0 items-center gap-1">
+            <Button variant="ghost" size="icon" onClick={openSearch} title="Search sessions (Ctrl/Cmd+F)">
+              <Search />
+            </Button>
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
             </Button>
@@ -471,102 +325,10 @@ export function Sidebar() {
         <CollapsedSidebar groups={groups} current={current} activeIDs={activeIDs} onExpand={toggleSidebar} />
       ) : (
         <>
-          <div className="border-b border-border p-2">
-            <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                id="session-search"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search sessions"
-                className={`h-7 pl-7 ${IS_MAC ? "pr-8" : "pr-12"}`}
-              />
-              <kbd
-                aria-hidden
-                title={`Focus session search (${IS_MAC ? "Cmd+F" : "Ctrl+F"})`}
-                className="pointer-events-none absolute top-1/2 right-1.5 -translate-y-1/2 rounded border border-[var(--border-weak-base)] bg-[var(--surface-inset-base)] px-1 py-px font-mono text-[9px] leading-[1.4] text-[var(--text-weaker)]"
-              >
-                {SEARCH_KBD}
-              </kbd>
-            </div>
-            {trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH && (
-              <p className="mt-1 px-1 text-[10px] text-[var(--text-weaker)]" aria-live="polite">
-                {matchedCount} matched
-                {contentSearching ? " · searching messages…" : ""}
-              </p>
-            )}
-          </div>
-
           <ScrollArea className="min-h-0 min-w-0 flex-1">
             <div className="w-full min-w-0 max-w-full p-2">
-              {contentOnly.length > 0 && (
-                <section className="mb-4 w-full min-w-0 max-w-full last:mb-1">
-                  <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-[var(--border-weak-base)] px-2 py-1.5">
-                    <span className="min-w-0 truncate text-[11px] font-medium tracking-wide text-[var(--text-weaker)] uppercase">
-                      Content matches
-                    </span>
-                    <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{contentOnly.length}</span>
-                  </div>
-                  {contentOnly.map((s) => {
-                    const hits = contentHits.get(s.id) ?? [];
-                    const collapsed = collapsedHits.has(s.id);
-                    return (
-                      <div key={s.id} className="mb-1">
-                        <Target
-                          id="sidebar.sessionRow"
-                          sessionID={s.id}
-                          title={s.title ?? "Untitled session"}
-                          updated={s.time.updated}
-                          active={activeIDs.includes(s.id)}
-                          selected={s.id === current}
-                          subagentsActive={subagentActiveParents.has(s.id)}
-                          onSelect={() => void selectSession(s.id)}
-                        />
-                        {hits.length > 0 && (
-                          <div className="ml-2 border-l border-[var(--border-weak-base)] pl-2">
-                            <button
-                              type="button"
-                              onClick={() => toggleHitCollapse(s.id)}
-                              className="mb-1 flex w-full cursor-pointer items-center gap-1 text-[10px] text-[var(--text-weaker)] hover:text-[var(--text-weak)]"
-                            >
-                              <ChevronDown className={`size-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
-                              {hits.length} {hits.length === 1 ? "message" : "messages"} match{hits.length === 1 ? "" : "es"}
-                            </button>
-                            {!collapsed && (
-                              <div className="flex flex-col gap-1 pb-1">
-                                {hits.slice(0, 5).map((h: MessageHit) => (
-                                  <button
-                                    key={h.messageID}
-                                    type="button"
-                                    onClick={() => handleHitClick(s.id, h.messageID)}
-                                    className="cursor-pointer rounded-md bg-[var(--surface-inset-base)] px-2 py-1 text-left text-xs leading-relaxed text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
-                                    title="Open session and scroll to message"
-                                  >
-                                    <span className="line-clamp-2">
-                                      {h.snippet.slice(0, h.matchStart)}
-                                      <mark className="rounded-sm bg-yellow-500/30 px-0.5 font-medium text-[var(--text-strong)]">
-                                        {h.snippet.slice(h.matchStart, h.matchEnd)}
-                                      </mark>
-                                      {h.snippet.slice(h.matchEnd)}
-                                    </span>
-                                  </button>
-                                ))}
-                                {hits.length > 5 && (
-                                  <span className="px-2 text-[10px] text-[var(--text-weaker)]">+{hits.length - 5} more in this session</span>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </section>
-              )}
-              {groups.length === 0 && contentOnly.length === 0 && (
-                <p className="px-2.5 py-4 text-xs text-[var(--text-weak)]">
-                  {sessions.length === 0 ? "No sessions yet." : "No matches."}
-                </p>
+              {groups.length === 0 && (
+                <p className="px-2.5 py-4 text-xs text-[var(--text-weak)]">No sessions yet.</p>
               )}
               {groups.map((group) => {
                 const isCollapsed = !!collapsedWorkspaces[group.name];
@@ -630,9 +392,6 @@ export function Sidebar() {
                     </div>
                     {visible.map((s) => {
                       const active = activeIDs.includes(s.id);
-                      const hits = contentHits.get(s.id) ?? [];
-                      const collapsed = collapsedHits.has(s.id);
-                      const showHits = hits.length > 0 && trimmedQuery.length >= SEARCH_DEBOUNCE_MIN_LENGTH;
                       return (
                         <div key={s.id} className="mb-0.5">
                           <Target
@@ -645,42 +404,6 @@ export function Sidebar() {
                             subagentsActive={subagentActiveParents.has(s.id)}
                             onSelect={() => void selectSession(s.id)}
                           />
-                          {showHits && (
-                            <div className="ml-2 border-l border-[var(--border-weak-base)] pl-2">
-                              <button
-                                type="button"
-                                onClick={() => toggleHitCollapse(s.id)}
-                                className="mb-1 flex w-full cursor-pointer items-center gap-1 text-[10px] text-[var(--text-weaker)] hover:text-[var(--text-weak)]"
-                              >
-                                <ChevronDown className={`size-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
-                                {hits.length} {hits.length === 1 ? "message" : "messages"} match{hits.length === 1 ? "" : "es"}
-                              </button>
-                              {!collapsed && (
-                                <div className="flex flex-col gap-1 pb-1">
-                                  {hits.slice(0, 5).map((h: MessageHit) => (
-                                    <button
-                                      key={h.messageID}
-                                      type="button"
-                                      onClick={() => handleHitClick(s.id, h.messageID)}
-                                      className="cursor-pointer rounded-md bg-[var(--surface-inset-base)] px-2 py-1 text-left text-xs leading-relaxed text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
-                                      title="Open session and scroll to message"
-                                    >
-                                      <span className="line-clamp-2">
-                                        {h.snippet.slice(0, h.matchStart)}
-                                        <mark className="rounded-sm bg-yellow-500/30 px-0.5 font-medium text-[var(--text-strong)]">
-                                          {h.snippet.slice(h.matchStart, h.matchEnd)}
-                                        </mark>
-                                        {h.snippet.slice(h.matchEnd)}
-                                      </span>
-                                    </button>
-                                  ))}
-                                  {hits.length > 5 && (
-                                    <span className="px-2 text-[10px] text-[var(--text-weaker)]">+{hits.length - 5} more in this session</span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          )}
                         </div>
                       );
                     })}
@@ -755,25 +478,65 @@ export function Sidebar() {
 type SessionGroup = { name: string; list: SessionInfo[] };
 
 /** One-shot fetch of the proxy's app version (`GET /api/webui/config`),
- * rendered as a muted `v1.0.4` next to the connection dot in the header. */
+ * rendered muted next to the connection dot in the header — `2.4.0-dev` on a
+ * vite dev stack, `2.4.0` on prod builds, plus the served tree's content hash
+ * (`+a3f9c2d`: any effective save flips it). Re-polled so long-lived tabs
+ * follow the tree; on prod the badge self-verifies (own entry bytes vs the
+ * server's entry hash) and shows `!` when stale. */
+type BuildPayload = {
+  tree?: string | null;
+  rev?: string | null;
+  dirty?: boolean;
+  changedAt?: number | null;
+};
+
 function WebUIVersion() {
   const [version, setVersion] = useState<string | null>(null);
+  const [build, setBuild] = useState<BuildPayload | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void fetch("/api/webui/config")
-      .then((r) => (r.ok ? (r.json() as Promise<{ version?: string }>) : null))
-      .then((cfg) => {
-        if (!cancelled && cfg?.version) setVersion(cfg.version);
-      })
-      .catch(() => {});
+    const refresh = () => {
+      void fetch("/api/webui/config")
+        .then((r) => (r.ok ? (r.json() as Promise<{ version?: string; build?: BuildPayload }>) : null))
+        .then((cfg) => {
+          if (cancelled) return;
+          if (cfg?.version) setVersion(cfg.version);
+          if (cfg?.build) setBuild(cfg.build);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    // Re-poll so the badge tracks new saves: the server recomputes build
+    // identity per request (5s cache), so a long-lived tab follows the tree.
+    const stop = registerPoller({ name: "webui-version", minInterval: 30_000, run: refresh });
     return () => {
       cancelled = true;
+      stop();
     };
   }, []);
   if (!version) return null;
+  // Dev: shipped version plus the tree hash (any save flips it). Prod: the
+  // shipped version alone. Commit identity and timestamps live in the tooltip.
+  const isDev = import.meta.env.DEV;
+  const label = isDev ? `${version}-dev${build?.tree ? `+${build.tree}` : ""}` : version;
+  const changed = build?.changedAt
+    ? new Date(build.changedAt).toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+  const title = [
+    `webui ${label}`,
+    build?.tree ? `tree ${build.tree} (git ${build?.rev ?? "?"}${build?.dirty ? ", dirty" : ""})` : null,
+    changed ? `changed ${changed}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]" title={`webui v${version}`}>
-      v{version}
+    <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]" title={title}>
+      {label}
     </span>
   );
 }

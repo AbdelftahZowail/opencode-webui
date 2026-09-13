@@ -80,6 +80,22 @@ const KEYS: Array<keyof WebuiConfig> = [
   "publicUrl",
 ];
 
+/**
+ * The environment variable that pins each key (null = env cannot set it).
+ * Exported so the settings API can tell the UI WHICH variable is overriding a
+ * field — "env" alone leaves the user hunting for a file that does not exist.
+ */
+export const ENV_KEYS: Record<keyof WebuiConfig, string | null> = {
+  host: "WEBUI_HOST",
+  port: "WEBUI_PROXY_PORT",
+  auth: "WEBUI_PASSWORD",
+  passwordHash: "WEBUI_PASSWORD",
+  allowedHosts: "WEBUI_ALLOWED_HOSTS",
+  trustProxy: "WEBUI_TRUST_PROXY",
+  autostart: "WEBUI_NO_SETUP",
+  publicUrl: null,
+};
+
 // ---------------------------------------------------------------------------
 // File I/O
 // ---------------------------------------------------------------------------
@@ -305,7 +321,7 @@ export function analyzeExposure(config: Pick<WebuiConfig, "host" | "auth" | "all
       exposed,
       unauthenticated,
       message: anyHost
-        ? "WEBUI_ALLOWED_HOSTS contains * — the Host check accepts anything. Fine behind a trusted proxy, risky otherwise."
+        ? "The allowed-hosts list contains * — the Host check accepts anything. Fine behind a trusted proxy, risky otherwise."
         : "Reachable beyond this machine. Make sure the network (and your password) is trusted.",
     };
   }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Cable,
   ChevronDown,
@@ -28,8 +28,16 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Separator } from "./ui/separator";
-import { TerminalView } from "./TerminalView";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+
+/**
+ * xterm (plus its CSS) is a large dependency only ever needed once a PTY is
+ * open, so it is code-split out of the initial bundle — slow phones no longer
+ * pay to parse/compile it on cold load. Loaded on first shell open.
+ */
+const TerminalView = lazy(() =>
+  import("./TerminalView").then((m) => ({ default: m.TerminalView })),
+);
 
 const SHELL_DEFAULT_TIMEOUT = 120000;
 
@@ -477,11 +485,19 @@ function TerminalsTab({ active }: { active: boolean }) {
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       {activePty ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <TerminalView
-            ptyID={activePty}
-            onClose={() => setActivePty(null)}
-            onError={(m) => setError(m)}
-          />
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center">
+                <Spinner />
+              </div>
+            }
+          >
+            <TerminalView
+              ptyID={activePty}
+              onClose={() => setActivePty(null)}
+              onError={(m) => setError(m)}
+            />
+          </Suspense>
         </div>
       ) : (
       <>

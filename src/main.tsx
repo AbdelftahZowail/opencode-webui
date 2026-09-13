@@ -16,6 +16,7 @@ import "./components/Composer";
 import "./components/MessageItem";
 import "./components/ToolCard";
 import { log } from "./lib/log";
+import { registerServiceWorker, startLiveTile } from "./lib/pwa";
 import { installExtensionBridge } from "./lib/extensionApi";
 import { startRuntimeExtensions } from "./lib/runtimeExtensions";
 
@@ -32,6 +33,8 @@ installExtensionBridge();
 startRuntimeExtensions();
 
 startStore();
+registerServiceWorker();
+startLiveTile();
 log("boot", `app render (console mirror: ${DEBUG_CONSOLE ? "on" : "off"})`);
 
 createRoot(document.getElementById("root")!).render(

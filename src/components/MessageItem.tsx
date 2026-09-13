@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, Fragment, type ReactNode, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, Fragment, memo, type ReactNode, useSyncExternalStore } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Brain, Check, ChevronRight, Copy, GitBranch, Pencil, Paperclip, User } from "lucide-react";
@@ -278,7 +278,7 @@ function AssistantCopyButton({ text }: { text: string }) {
   );
 }
 
-export function MessageItem({ message, compact = false, sessionID, isTail = false, responseText }: { message: MessageInfo; compact?: boolean; sessionID?: string; isTail?: boolean; responseText?: string }) {
+export const MessageItem = memo(function MessageItem({ message, compact = false, sessionID, isTail = false, responseText }: { message: MessageInfo; compact?: boolean; sessionID?: string; isTail?: boolean; responseText?: string }) {
   // Extension freshness — read before the body so hooks order is stable.
   const registryVersion = useRegistryVersion();
   // Memoized on the registry version only: decorations are a static list
@@ -354,7 +354,7 @@ export function MessageItem({ message, compact = false, sessionID, isTail = fals
       </div>
     </MessageContextMenu>
   );
-}
+});
 
 /** The per-type body exactly as MessageItem always rendered it. */
 function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string, isTail?: boolean, responseText?: string): ReactNode {
@@ -948,7 +948,12 @@ function markdownUrlTransform(url: string): string {
   return defaultUrlTransform(url);
 }
 
-export function Markdown({ text }: { text: string }) {
+/**
+ * Memoized on `text`: react-markdown + remark-gfm re-parse the whole document
+ * on every render, so a streaming parent commit must not re-parse unchanged
+ * historical messages.
+ */
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="min-w-0 text-sm leading-relaxed break-words text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_a]:break-all [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:break-all [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-normal [&_pre_code]:text-inherit [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
       <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform}>
@@ -956,7 +961,7 @@ export function Markdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 export function ToolContentView({ content }: { content?: ToolContent[] }) {
   if (!content || content.length === 0) return null;

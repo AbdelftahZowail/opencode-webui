@@ -116,6 +116,13 @@ chmod +x opencode-webui-linux-x64
 Behind a reverse proxy (Caddy / nginx samples, incl. websocket + SSE timeouts):
 [docs/reverse-proxy.md](docs/reverse-proxy.md).
 
+## Install as app (PWA)
+
+Over HTTPS (e.g. Tailscale serve) Chrome offers install — standalone window, splash, home-screen icon.
+Settings → App shows install state plus the **live activity tile**: one silent notification following
+active sessions (dense strip text, tap opens that session, clears itself when idle). Needs notification
+permission; plain-LAN HTTP stays a browser tab (secure context required).
+
 ## Sandbox
 
 A second, private instance for agents (or you) to test extensions and settings
@@ -175,11 +182,15 @@ session agent instead, so it can file it via `gh`.
 
 ```sh
 bun install
-bun run dev        # proxy (4097) + Vite (5173), HMR
+bun run dev        # proxy (config port, default 4097) + Vite (5173), HMR
 bun run sandbox    # isolated second instance (4099 / 5175, Vite in dev) — see Sandbox above
 bun run typecheck
 bun run build && bun start   # production: dist/ + API on 4097
 ```
+
+To open the dev UI from a phone/Tailscale, set the bind address to `0.0.0.0`
+and add your host under **Settings › Access** — Vite honors the same values, so
+`http://<this-machine>:5173` works (the proxy stays on its own port).
 
 - Extension authoring guide: [webui-extensions/README.md](webui-extensions/README.md)
 - Extension contract check: `bun run scripts/uitest/extensions-check.ts`

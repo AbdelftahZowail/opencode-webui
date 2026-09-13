@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Lock, RotateCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Info, Lock, RotateCw, ShieldCheck } from "lucide-react";
 import {
   api,
   type WebuiConfigPatch,
@@ -8,7 +8,7 @@ import {
 } from "../../api/client";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
-import { ErrorNote, SectionHeader, inputCls, useAsync } from "./shared";
+import { CopyButton, ErrorNote, SectionHeader, inputCls, useAsync } from "./shared";
 
 /**
  * Settings › Access — the ONE place serve/security settings are edited.
@@ -34,7 +34,9 @@ export function AccessSection() {
   useEffect(() => {
     if (!data) return;
     setDraft({ ...data.file });
-    setHostsText(data.file.allowedHosts.join(", "));
+    // Env-pinned fields show what is ACTUALLY in effect, not the shadowed file value.
+    const hosts = data.envPinned.allowedHosts ? data.effective.allowedHosts : data.file.allowedHosts;
+    setHostsText(hosts.join(", "));
     setPassword("");
     setPassword2("");
     setRemovePassword(false);
@@ -47,30 +49,32 @@ export function AccessSection() {
   const settings = data;
   const cfg = draft;
   const file = settings.file;
-  const pinned = (key: string) => settings.envPinned.includes(key);
+  const eff = settings.effective;
+  /** The env var pinning this key, or null when the file is authoritative. */
+  const envOf = (key: string): string | null => settings.envPinned[key] ?? null;
   const set = (patch: Partial<WebuiConfigShape>) => setDraft({ ...cfg, ...patch });
   const passwordMismatch = password.length > 0 && password !== password2;
   const passwordTooShort = password.length > 0 && password.length < 8;
-  const dirty =
-    JSON.stringify(cfg) !== JSON.stringify(file) ||
-    hostsText !== file.allowedHosts.join(", ") ||
-    password.length > 0 ||
-    removePassword;
 
   function buildPatch(): WebuiConfigPatch {
     const patch: WebuiConfigPatch = {};
-    if (cfg.host !== file.host) patch.host = cfg.host;
-    if (cfg.port !== file.port) patch.port = cfg.port;
-    if (cfg.auth !== file.auth) patch.auth = cfg.auth;
-    if (cfg.trustProxy !== file.trustProxy) patch.trustProxy = cfg.trustProxy;
-    if (cfg.autostart !== file.autostart) patch.autostart = cfg.autostart;
-    if ((cfg.publicUrl ?? "") !== (file.publicUrl ?? "")) patch.publicUrl = cfg.publicUrl || null;
-    const hosts = hostsText.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    if (hosts.join(",") !== file.allowedHosts.join(",")) patch.allowedHosts = hosts;
-    if (removePassword) patch.clearPassword = true;
-    if (password.length > 0) patch.password = password;
+    // Env-pinned keys are not editable here (env wins); never send them.
+    if (!envOf("host") && cfg.host !== file.host) patch.host = cfg.host;
+    if (!envOf("port") && cfg.port !== file.port) patch.port = cfg.port;
+    if (!envOf("auth") && cfg.auth !== file.auth) patch.auth = cfg.auth;
+    if (!envOf("trustProxy") && cfg.trustProxy !== file.trustProxy) patch.trustProxy = cfg.trustProxy;
+    if (!envOf("autostart") && cfg.autostart !== file.autostart) patch.autostart = cfg.autostart;
+    if (!envOf("publicUrl") && (cfg.publicUrl ?? "") !== (file.publicUrl ?? "")) patch.publicUrl = cfg.publicUrl || null;
+    if (!envOf("allowedHosts")) {
+      const hosts = hostsText.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+      if (hosts.join(",") !== file.allowedHosts.join(",")) patch.allowedHosts = hosts;
+    }
+    if (!envOf("auth") && removePassword) patch.clearPassword = true;
+    if (!envOf("auth") && password.length > 0) patch.password = password;
     return patch;
   }
+
+  const dirty = Object.keys(buildPatch()).length > 0;
 
   async function save(confirm: boolean): Promise<void> {
     setBusy(true);
@@ -92,7 +96,7 @@ export function AccessSection() {
 
   function reset() {
     setDraft({ ...file });
-    setHostsText(file.allowedHosts.join(", "));
+    setHostsText((envOf("allowedHosts") ? eff.allowedHosts : file.allowedHosts).join(", "));
     setPassword("");
     setPassword2("");
     setRemovePassword(false);
@@ -116,6 +120,29 @@ export function AccessSection() {
         loading={loading}
       />
 
+      {settings.runtime.dev && (
+        <div className="flex items-start gap-2 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-interactive-weak)] px-2.5 py-2 text-[11px] text-[var(--text-interactive-base)]">
+          <Info className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            <strong>Dev mode:</strong> Vite serves this UI on{" "}
+            <span className="font-mono">:{settings.runtime.vitePort ?? 5173}</span> and proxies <code>/api</code> to the
+            proxy on <span className="font-mono">:{settings.runtime.port}</span> — two ports. The bind address and allowed
+            hosts below apply to Vite too, so a phone opens{" "}
+            <span className="font-mono">http://&lt;this-machine&gt;:{settings.runtime.vitePort ?? 5173}</span>. In
+            production the proxy serves the UI on the port below.
+          </span>
+        </div>
+      )}
+
+      <p className="flex flex-wrap items-center gap-1 text-[11px] text-[var(--text-weaker)]">
+        Saved in <code className="font-mono text-[var(--text-weak)]">{settings.runtime.configPath}</code>
+        <CopyButton text={settings.runtime.configPath} />
+        <span className="basis-full">
+          Environment variables override this file. A field pinned by the environment is locked and names its variable
+          — unset that variable and restart to edit it here.
+        </span>
+      </p>
+
       <div className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs ${exposureTone}`}>
         {exposure.level === "ok" ? <ShieldCheck className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
         <span>
@@ -126,32 +153,36 @@ export function AccessSection() {
       </div>
 
       <Card title="Serving" note="where the proxy listens">
-        <Field label="Bind address" source={settings.effective.sources.host} locked={pinned("host")}>
+        <Field label="Bind address" envVar={envOf("host")}>
           <div className="flex flex-wrap items-center gap-1.5">
             <input
               className={inputCls}
-              value={cfg.host}
-              disabled={pinned("host")}
+              value={envOf("host") ? eff.host : cfg.host}
+              disabled={!!envOf("host")}
               onChange={(e) => set({ host: e.target.value })}
               spellCheck={false}
             />
-            <Chip onClick={() => set({ host: "127.0.0.1" })} disabled={pinned("host")}>127.0.0.1</Chip>
-            <Chip onClick={() => set({ host: "0.0.0.0" })} disabled={pinned("host")}>0.0.0.0</Chip>
+            <Chip onClick={() => set({ host: "127.0.0.1" })} disabled={!!envOf("host")}>127.0.0.1</Chip>
+            <Chip onClick={() => set({ host: "0.0.0.0" })} disabled={!!envOf("host")}>0.0.0.0</Chip>
           </div>
           <p className="mt-1 text-[11px] text-[var(--text-weaker)]">
             Loopback is safest. A wildcard/other address reaches the network — pair it with a password or a trusted proxy.
           </p>
         </Field>
-        <Field label="Port" source={settings.effective.sources.port} locked={pinned("port")}>
+        <Field label="Proxy port" envVar={envOf("port")}>
           <input
             className={`${inputCls} max-w-32`}
             type="number"
             min={1}
             max={65535}
-            value={cfg.port}
-            disabled={pinned("port")}
+            value={envOf("port") ? eff.port : cfg.port}
+            disabled={!!envOf("port")}
             onChange={(e) => set({ port: Number(e.target.value) })}
           />
+          <p className="mt-1 text-[11px] text-[var(--text-weaker)]">
+            The port the Bun proxy listens on. In production this is the URL you open; in dev it is internal (Vite is
+            what you open). Don't set it to Vite's port.
+          </p>
         </Field>
         <p className="text-[11px] text-[var(--text-weaker)]">
           Currently running on <span className="font-mono">{settings.runtime.host}:{settings.runtime.port}</span>.
@@ -170,7 +201,7 @@ export function AccessSection() {
           </div>
           <Switch
             checked={cfg.auth === "password"}
-            disabled={pinned("auth")}
+            disabled={!!envOf("auth")}
             onCheckedChange={(checked) => set({ auth: checked ? "password" : "none" })}
           />
         </div>
@@ -193,7 +224,7 @@ export function AccessSection() {
                   autoComplete="new-password"
                   placeholder="leave blank to keep"
                   value={password}
-                  disabled={pinned("auth")}
+                  disabled={!!envOf("auth")}
                   onChange={(e) => setPassword(e.target.value)}
                 />
               </Field>
@@ -203,7 +234,7 @@ export function AccessSection() {
                   type="password"
                   autoComplete="new-password"
                   value={password2}
-                  disabled={pinned("auth")}
+                  disabled={!!envOf("auth")}
                   onChange={(e) => setPassword2(e.target.value)}
                 />
               </Field>
@@ -221,12 +252,12 @@ export function AccessSection() {
       </Card>
 
       <Card title="Allowed hosts" note="extra Host header names accepted (comma-separated)">
-        <Field label="Hostnames / IPs" source={settings.effective.sources.allowedHosts} locked={pinned("allowedHosts")}>
+        <Field label="Hostnames / IPs" envVar={envOf("allowedHosts")}>
           <input
             className={inputCls}
             placeholder="192.168.1.5, myserver.lan"
             value={hostsText}
-            disabled={pinned("allowedHosts")}
+            disabled={!!envOf("allowedHosts")}
             onChange={(e) => setHostsText(e.target.value)}
             spellCheck={false}
           />
@@ -245,8 +276,8 @@ export function AccessSection() {
         <Toggle
           label="Trust X-Forwarded-* headers"
           note="Enable only when a reverse proxy you control sits in front. Without it those headers are ignored (spoofing-safe)."
-          checked={cfg.trustProxy}
-          disabled={pinned("trustProxy")}
+          checked={envOf("trustProxy") ? eff.trustProxy : cfg.trustProxy}
+          disabled={!!envOf("trustProxy")}
           onChange={(v) => set({ trustProxy: v })}
         />
       </Card>
@@ -255,19 +286,19 @@ export function AccessSection() {
         <Toggle
           label="Install the command + lifecycle plugin"
           note="First-run setup: a global `opencode-webui` command and the OpenCode plugin that starts the webui when you use OpenCode."
-          checked={cfg.autostart}
-          disabled={pinned("autostart")}
+          checked={envOf("autostart") ? eff.autostart : cfg.autostart}
+          disabled={!!envOf("autostart")}
           onChange={(v) => set({ autostart: v })}
         />
       </Card>
 
       <Card title="Public URL" note="optional — for the banner and reverse-proxy setups">
-        <Field label="Canonical URL" source={settings.effective.sources.publicUrl} locked={pinned("publicUrl")}>
+        <Field label="Canonical URL" envVar={envOf("publicUrl")}>
           <input
             className={inputCls}
             placeholder="https://webui.example.ts.net"
-            value={cfg.publicUrl ?? ""}
-            disabled={pinned("publicUrl")}
+            value={(envOf("publicUrl") ? eff.publicUrl : cfg.publicUrl) ?? ""}
+            disabled={!!envOf("publicUrl")}
             onChange={(e) => set({ publicUrl: e.target.value })}
             spellCheck={false}
           />
@@ -345,29 +376,34 @@ function Card({ title, note, children }: { title: string; note?: string; childre
 
 function Field({
   label,
-  source,
-  locked,
+  envVar,
   children,
 }: {
   label: string;
-  source?: string;
-  locked?: boolean;
+  /** The environment variable pinning this field, if any. */
+  envVar?: string | null;
   children: React.ReactNode;
 }) {
   return (
     <div>
-      <div className="mb-1 flex items-center gap-1.5">
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
         <span className="text-[12px] text-[var(--text-base)]">{label}</span>
-        {locked && (
+        {envVar && (
           <span
             className="inline-flex items-center gap-1 rounded-sm border border-[var(--border-weak-base)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-weaker)]"
-            title={`Set by an environment variable (${source ?? "env"}); edit that to change it.`}
+            title={`This value comes from the ${envVar} environment variable, which overrides the config file.`}
           >
-            <Lock className="size-2.5" /> env
+            <Lock className="size-2.5" /> {envVar}
           </span>
         )}
       </div>
       {children}
+      {envVar && (
+        <p className="mt-1 text-[11px] text-[var(--surface-warning-strong)]">
+          Overridden by <code>{envVar}</code> in the environment — there is no file for it; unset it where you launch
+          the webui (or run <code>opencode-webui restart</code> from a shell that does not set it) to edit this here.
+        </p>
+      )}
     </div>
   );
 }

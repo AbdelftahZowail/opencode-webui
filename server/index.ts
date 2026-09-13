@@ -10,17 +10,19 @@
  * Dev flow:  vite (5173) --/api--> this server (4097) --> opencode service
  * Prod flow: this server (4097) serves dist/ + proxies /api
  *
- * Access control (server/auth.ts): every route except the login round-trip
- * requires a session cookie. WEBUI_PASSWORD sets the password; unset means a
- * strong passphrase is generated and printed once — but only on a loopback
- * bind, because a wildcard bind without a password refuses to start. The
- * browser never holds service credentials, and neither the password nor
- * session tokens are ever logged.
+ * Access control (server/auth.ts): every route except the login round-trip and
+ * the PWA shell (manifest/icons/service worker — see isPublicPwaAsset) requires
+ * a session cookie. WEBUI_PASSWORD sets the password; unset means a strong
+ * passphrase is generated and printed once — but only on a loopback bind,
+ * because a wildcard bind without a password refuses to start. The browser
+ * never holds service credentials, and neither the password nor session tokens
+ * are ever logged.
  */
 
 import { Service } from "@opencode-ai/client/service";
 import type { Server } from "bun";
-import { existsSync, mkdirSync, readFileSync, statSync, watch, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -43,6 +45,7 @@ import {
 } from "./auth";
 import { syncSkill } from "./skillSync";
 import {
+  ENV_KEYS,
   analyzeExposure,
   applyConfigPatch,
   configPath,
@@ -121,9 +124,32 @@ const BIND_HOST = HOST === "localhost" ? "127.0.0.1" : HOST;
 // path that scripts/embed-shim.ts maps onto the embedded assets.
 const DIST_DIR = fileURLToPath(new URL("../dist/", import.meta.url));
 const APP_ROOT = fileURLToPath(new URL("../", import.meta.url));
+// A repo checkout (vite.config.ts present) runs the two-port dev topology:
+// Vite serves the UI and proxies /api to this proxy. Settings that only make
+// sense for the one-port production topology are flagged in the API below.
+const IS_DEV = existsSync(join(APP_ROOT, "vite.config.ts"));
 const DEBUG_LOG = process.env.WEBUI_DEBUG_LOG ?? "/tmp/webui-debug.log";
 const DEBUG = Bun.env.WEBUI_DEBUG === "1";
 const REPORT_REPO = process.env.WEBUI_REPORT_REPO ?? "AbdelftahZowail/opencode-webui";
+
+/**
+ * PWA shell files that must be reachable WITHOUT a session cookie.
+ *
+ * Chrome fetches the web app manifest — and its icons — with credentials mode
+ * "omit" (only `crossorigin="use-credentials"` on the <link> would include
+ * cookies), so a redirect to /login makes the app look non-installable and
+ * suppresses the install promotion entirely. The service worker script is
+ * included so registration/updates never race the session. None of these files
+ * carry secrets: they are static shell metadata and icons.
+ */
+function isPublicPwaAsset(path: string): boolean {
+  return (
+    path === "/manifest.webmanifest" ||
+    path === "/sw.js" ||
+    path === "/assets/opencode.svg" ||
+    path.startsWith("/icons/")
+  );
+}
 
 function dbg(...args: unknown[]) {
   if (!DEBUG) return;
@@ -774,6 +800,128 @@ function readVersion(): string {
 }
 const PKG_VERSION = readVersion();
 
+// ---------------------------------------------------------------------------
+// Build identity for the footer badge (`GET /api/webui/config` → `build`).
+//
+// The badge shows a content hash of the whole served tree (`+a3f9c2d`): ANY
+// save anywhere produces a new hash, which is what dev needs at a glance.
+// `rev`/`dirty`/`changedAt` ride along for tooltips and debugging. npm
+// installs have no .git — the tree hash still works there. Hashing is
+// skipped unless a cheap mtime sweep sees movement (5s floor either way);
+// git failures collapse to nulls, never to errors.
+// ---------------------------------------------------------------------------
+
+interface BuildInfo {
+  /** Content hash (7 hex) over the source tree: any effective save flips it.
+   * Prod badges show the shipped version only; dev appends this hash. */
+  tree: string | null;
+  rev: string | null;
+  dirty: boolean;
+  changedAt: number | null;
+}
+
+let buildCache: { at: number; mtime: number | null; info: BuildInfo } | null = null;
+const BUILD_CACHE_TTL_MS = 5_000;
+
+function gitOut(args: string[]): string | null {
+  try {
+    const proc = Bun.spawnSync(["git", ...args], { cwd: APP_ROOT });
+    if (proc.exitCode !== 0) return null;
+    return proc.stdout.toString("utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every file shaping the served UI (rel paths, sorted). Skips build output,
+// dependencies, and dot-dirs. Bounded so a stray huge dir can't stall boot. */
+function sourceFiles(): string[] {
+  const roots = ["src", "server", "public", "index.html", "vite.config.ts", "package.json"];
+  const out: string[] = [];
+  const stack = roots.map((r) => join(APP_ROOT, r));
+  let seen = 0;
+  while (stack.length > 0 && seen < 4000) {
+    const p = stack.pop()!;
+    seen++;
+    let st;
+    try {
+      st = statSync(p);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      const base = basename(p);
+      if (base === "node_modules" || base === "dist" || base.startsWith(".")) continue;
+      let kids: string[];
+      try {
+        kids = readdirSync(p);
+      } catch {
+        continue;
+      }
+      for (const k of kids) stack.push(join(p, k));
+    } else {
+      out.push(p);
+    }
+  }
+  return out.sort();
+}
+
+function treeFingerprint(): { tree: string | null; mtime: number | null } {
+  const files = sourceFiles();
+  if (files.length === 0) return { tree: null, mtime: null };
+  let newest = 0;
+  for (const f of files) {
+    try {
+      const m = statSync(f).mtimeMs;
+      if (m > newest) newest = m;
+    } catch {
+      /* raced deletion — skip */
+    }
+  }
+  const mtime = Math.floor(newest);
+  if (buildCache?.info.tree && buildCache.mtime === mtime) {
+    return { tree: buildCache.info.tree, mtime };
+  }
+  try {
+    const hash = createHash("sha256");
+    for (const f of files) {
+      const rel = f.startsWith(APP_ROOT) ? f.slice(APP_ROOT.length + 1) : f;
+      hash.update(rel);
+      hash.update("\0");
+      try {
+        hash.update(readFileSync(f));
+      } catch {
+        /* raced deletion — path already commits to the digest */
+      }
+      hash.update("\0");
+    }
+    return { tree: hash.digest("hex").slice(0, 7), mtime };
+  } catch {
+    return { tree: null, mtime };
+  }
+}
+
+function getBuildInfo(): BuildInfo {
+  const now = Date.now();
+  if (buildCache && now - buildCache.at < BUILD_CACHE_TTL_MS) return buildCache.info;
+  const { tree, mtime } = treeFingerprint();
+  const rev = gitOut(["rev-parse", "--short=7", "HEAD"]);
+  let dirty = false;
+  let changedAt: number | null = null;
+  if (rev) {
+    const st = gitOut(["status", "--porcelain"]);
+    dirty = st !== null && st !== "";
+    if (!dirty) {
+      const ct = gitOut(["log", "-1", "--format=%ct"]);
+      if (ct && /^\d+$/.test(ct)) changedAt = Number(ct) * 1000;
+    }
+  }
+  if (changedAt === null) changedAt = mtime;
+  const info = { tree, rev, dirty, changedAt };
+  buildCache = { at: now, mtime, info };
+  return info;
+}
+
 // The lifecycle plugin starts a webui when OpenCode loads, so a manual start
 // can find the port already held. Probe FIRST and exit before doing any engine
 // work — the running instance is the one the user wants. Fingerprint the login
@@ -857,8 +1005,17 @@ const server: Server<Record<string, unknown>> = Bun.serve({
 
     // Everything below — /api/* (JSON 401), pages, dist/ static, SSE, and
     // WebSocket upgrades — requires a valid session cookie. A SANDBOX
-    // instance (loopback-only, passwordless) skips the gate entirely.
-    if (AUTH.mode !== "none" && !SANDBOX() && !isAuthed(req, SECRET)) return unauthorizedResponse(url);
+    // instance (loopback-only, passwordless) skips the gate entirely. The PWA
+    // shell is exempt: Chrome fetches the manifest/icons without credentials,
+    // so gating them reads as "not installable" (see isPublicPwaAsset).
+    if (
+      AUTH.mode !== "none" &&
+      !SANDBOX() &&
+      !isAuthed(req, SECRET) &&
+      !((method === "GET" || method === "HEAD") && isPublicPwaAsset(path))
+    ) {
+      return unauthorizedResponse(url);
+    }
 
     if (method === "GET" && path === "/api/webui/status") {
       try {
@@ -874,7 +1031,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
 
     // Proxy metadata: app version + where to report issues.
     if (method === "GET" && path === "/api/webui/config") {
-      return Response.json({ version: PKG_VERSION, reportRepo: REPORT_REPO });
+      return Response.json({ version: PKG_VERSION, reportRepo: REPORT_REPO, build: getBuildInfo() });
     }
 
     // Serve/security settings — one file, edited by this UI and the CLI.
@@ -1125,8 +1282,7 @@ const server: Server<Record<string, unknown>> = Bun.serve({
     // installed package (no src/ on disk) vs a dev checkout (vite owns the
     // frontend). Dev with a stale dist/ still goes to vite for HMR.
     const hasDist = existsSync(join(DIST_DIR, "index.html"));
-    const isDevCheckout = existsSync(join(APP_ROOT, "vite.config.ts"));
-    if (Bun.env.NODE_ENV === "production" || (hasDist && !isDevCheckout)) {
+    if (Bun.env.NODE_ENV === "production" || (hasDist && !IS_DEV)) {
       if (method === "GET" || method === "HEAD") {
         // decodeURIComponent throws on malformed escapes (e.g. "/%") — 400,
         // never an unhandled throw.
@@ -1149,11 +1305,13 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           // SPA fallbacks, favicon) must be revalidated — a cached index.html
           // pins the browser to a stale bundle after every update.
           const immutable = /-[A-Za-z0-9_-]{8}\.[a-z0-9]+$/.test(filePath);
-          return new Response(file, {
-            headers: {
-              "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-store",
-            },
-          });
+          const headers: Record<string, string> = {
+            "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-store",
+          };
+          // Bun's MIME guess doesn't cover .webmanifest on every platform;
+          // Chrome ignores a manifest served as octet-stream.
+          if (filePath.endsWith(".webmanifest")) headers["content-type"] = "application/manifest+json";
+          return new Response(file, { headers });
         }
         const index = Bun.file(DIST_DIR + "index.html");
         if (await index.exists())
@@ -1162,10 +1320,10 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       return new Response("not found", { status: 404 });
     }
 
-    return new Response("webui dev server: use vite (port 5173)", {
-      status: 200,
-      headers: { "content-type": "text/plain" },
-    });
+    return new Response(
+      `webui dev server: open the UI at vite (port ${process.env.WEBUI_VITE_PORT ?? 5173})`,
+      { status: 200, headers: { "content-type": "text/plain" } },
+    );
   },
   websocket: {
     open(ws) {
@@ -1258,16 +1416,28 @@ function settingsPayload() {
     now.envPassword !== CONFIG.envPassword ||
     JSON.stringify(now.allowedHosts) !== JSON.stringify(CONFIG.allowedHosts) ||
     now.trustProxy !== CONFIG.trustProxy;
-  const envPinned = (Object.keys(CONFIG.sources) as Array<keyof typeof CONFIG.sources>).filter(
-    (key) => CONFIG.sources[key] === "env",
-  );
+  // key -> the env var overriding it (name included: "env" alone is a dead end).
+  const envPinned: Record<string, string> = {};
+  for (const key of Object.keys(CONFIG.sources) as Array<keyof typeof CONFIG.sources>) {
+    if (CONFIG.sources[key] !== "env") continue;
+    const envVar = ENV_KEYS[key];
+    if (envVar) envPinned[key] = envVar;
+  }
   return {
     file: redact(file),
     effective: {
       ...redact(now, now.envPassword !== null || now.passwordHash !== null),
       sources: CONFIG.sources,
     },
-    runtime: { host: HOST, port: PROXY_PORT, auth: AUTH.mode, version: PKG_VERSION, configPath: configPath() },
+    runtime: {
+      host: HOST,
+      port: PROXY_PORT,
+      auth: AUTH.mode,
+      version: PKG_VERSION,
+      configPath: configPath(),
+      dev: IS_DEV,
+      vitePort: IS_DEV ? Number(process.env.WEBUI_VITE_PORT ?? 5173) : null,
+    },
     exposure: analyzeExposure(file),
     restartRequired,
     envPinned,

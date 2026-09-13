@@ -1,6 +1,6 @@
-import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Blocks, Boxes, Cpu, FileJson2, Globe, Plug, Puzzle, Server, ShieldCheck, XIcon } from "lucide-react";
+import { Blocks, Boxes, ChevronLeft, ChevronRight, Cpu, FileJson2, Globe, Plug, Puzzle, Server, ShieldCheck, Smartphone, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
 import { ScrollArea } from "../ui/scroll-area";
@@ -9,6 +9,7 @@ import { registerPoller } from "../../lib/scheduler";
 import { getContributions, getRegisteredIds, subscribeRegistry, type SettingsContribution } from "../../extensions/registry";
 import { AccessSection } from "./AccessSection";
 import { ConfigSection } from "./ConfigSection";
+import { AppSection } from "./AppSection";
 import { IntegrationsSection } from "./IntegrationsSection";
 import { McpSection } from "./McpSection";
 import { PluginsSection } from "./PluginsSection";
@@ -36,7 +37,64 @@ const TABS = [
   { id: "websearch", label: "Websearch", icon: Globe },
   { id: "server", label: "Server", icon: Server },
   { id: "access", label: "Access", icon: ShieldCheck },
+  { id: "app", label: "App", icon: Smartphone },
 ] as const;
+
+/**
+ * Single-row tab strip: swipe-scroll on touch, edge chevrons on desktop.
+ * Chevrons render only while there is overflow in that direction.
+ */
+function TabRail({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState({ left: false, right: false });
+  const update = () => {
+    const el = ref.current;
+    if (!el) return;
+    setMore({
+      left: el.scrollLeft > 4,
+      right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4,
+    });
+  };
+  useEffect(() => {
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  const nudge = (dir: 1 | -1) => ref.current?.scrollBy({ left: dir * 180, behavior: "smooth" });
+  const chevCls =
+    "absolute top-1/2 z-10 hidden size-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] text-[var(--text-weak)] shadow-sm hover:text-[var(--text-strong)] md:inline-flex";
+  return (
+    <div className="relative mb-2 min-w-0">
+      {more.left && (
+        <button
+          type="button"
+          aria-label="Scroll tabs left"
+          onClick={() => nudge(-1)}
+          className={`${chevCls} left-0.5`}
+        >
+          <ChevronLeft className="size-3.5" />
+        </button>
+      )}
+      <div
+        ref={ref}
+        onScroll={update}
+        className="no-scrollbar flex overflow-x-auto rounded-md bg-[var(--surface-base)] p-1"
+      >
+        <TabsList className="w-max gap-1 bg-transparent p-0 [&>*]:shrink-0">{children}</TabsList>
+      </div>
+      {more.right && (
+        <button
+          type="button"
+          aria-label="Scroll tabs right"
+          onClick={() => nudge(1)}
+          className={`${chevCls} right-0.5`}
+        >
+          <ChevronRight className="size-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function SettingsDialog() {
   const [open, setOpen] = useState(false);
@@ -66,12 +124,12 @@ export function SettingsDialog() {
           <DialogHeader className="pr-8">
             <DialogTitle>Settings</DialogTitle>
             <p className="text-xs text-[var(--text-weaker)]">
-              Providers · integrations · MCP · plugins · extensions · config
+              Providers · integrations · MCP · plugins · extensions · config · app
             </p>
           </DialogHeader>
 
-          <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-col">
-            <TabsList className="no-scrollbar mb-2 flex w-full flex-nowrap justify-start gap-1 overflow-x-auto rounded-md bg-[var(--surface-base)] p-1 [&>*]:shrink-0">
+          <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 min-w-0 flex-col">
+            <TabRail>
               {TABS.map((t) => (
                 <TabsTrigger
                   key={t.id}
@@ -83,7 +141,7 @@ export function SettingsDialog() {
                   {t.label}
                 </TabsTrigger>
               ))}
-            </TabsList>
+            </TabRail>
             <ScrollArea className="min-h-0 flex-1 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] p-3">
               <TabsContent value="providers">
                 <ProvidersSection />
@@ -111,6 +169,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="access">
                 <AccessSection />
+              </TabsContent>
+              <TabsContent value="app">
+                <AppSection />
               </TabsContent>
             </ScrollArea>
           </Tabs>

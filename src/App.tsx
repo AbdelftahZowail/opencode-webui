@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Columns2 } from "lucide-react";
+import { ArrowLeft, Columns2, Menu, Plus } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
 import { HelpDialog } from "./components/HelpDialog";
+import { SearchPanel } from "./components/SearchPanel";
 import { ShellPanel } from "./components/ShellPanel";
 import { SplitPicker } from "./components/SplitPicker";
 import { ActivityStrip } from "./components/ActivityStrip";
@@ -9,8 +10,10 @@ import { CommandKeybinds } from "./components/CommandKeybinds";
 import { Toasts } from "./components/Toasts";
 import { Target, getContributions, subscribeRegistry, type PageContribution } from "./extensions/registry";
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
+import { OPEN_SEARCH_EVENT } from "./lib/uiEvents";
 import { log } from "./lib/log";
 import { useHotkeys } from "./hooks/useHotkeys";
+import { useKeyboardOpen } from "./hooks/useKeyboardOpen";
 import {
   MAIN_PANE,
   MAX_SPLITS,
@@ -19,6 +22,7 @@ import {
   focusedPaneKey,
   isDraftSession,
   navigateFocused,
+  openMobileSidebar,
   openRunsPanel,
   openSplitPicker,
   removeSplitPane,
@@ -78,6 +82,12 @@ export default function App() {
   const mainSessionID = useStore((s) => s.panes[0]?.sessionID ?? null);
   const splits = useStore((s) => s.panes.slice(1));
   const focusedPane = useStore((s) => s.focusedPane);
+  // Mobile keyboard open = only the input box stays above it; the
+  // app-level activity strip below gates on this (hidden <sm while typing).
+  const kbOpen = useKeyboardOpen();
+  // Global search overlay (search panel) — opened by ⌘F/Ctrl+F or the
+  // sidebar's search button (which fires OPEN_SEARCH_EVENT).
+  const [searchOpen, setSearchOpen] = useState(false);
 
   // Extension page route (/ext/{id}): a purely additional branch — when it
   // matches, it replaces the MAIN pane's surface only; the sidebar, splits,
@@ -172,16 +182,19 @@ export default function App() {
   // both text and image attachment staging.
   useEffect(() => setupPasteHandoff(), []);
 
-  // ⌘F / Ctrl+F: jump to the sidebar's session search (the browser's own
-  // find is shadowed while the app handles it). No-ops under overlays and
-  // when the sidebar is collapsed (no search box rendered).
+  // ⌘F / Ctrl+F (or the sidebar button): open the search overlay. The old
+  // always-visible sidebar field is gone; the browser's own find is still
+  // shadowed while the app handles it. No-ops under other overlays.
   function focusSessionSearch() {
     if (overlayOpen()) return;
-    const box = document.getElementById("session-search") as HTMLInputElement | null;
-    if (!box) return;
-    box.focus();
-    box.select();
+    setSearchOpen(true);
   }
+
+  useEffect(() => {
+    const onOpen = () => setSearchOpen(true);
+    window.addEventListener(OPEN_SEARCH_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SEARCH_EVENT, onOpen);
+  }, []);
 
   useHotkeys({
     arrowup: () => {
@@ -305,10 +318,15 @@ export default function App() {
           </div>
         </div>
       </div>
-      <ActivityStrip />
+      {/* Mobile keyboard: the activity strip docks away while typing — only
+          the input box rides above the keyboard. Desktop unaffected. */}
+      <div className={kbOpen ? "hidden sm:block" : ""}>
+        <ActivityStrip />
+      </div>
       <ForeignPendingChip />
       <SplitPicker />
       <CommandPalette />
+      <SearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
       <CommandKeybinds />
       <Toasts />
       <HelpDialog />
@@ -329,6 +347,9 @@ export default function App() {
  */
 function ForeignPendingChip() {
   const foreign = useStore((s) => pendingRequests(s).filter((r) => r.req.sessionID !== s.currentSessionID));
+  // Fixed-position chip would float above the mobile keyboard — dock it away
+  // while typing (<sm only); it returns when the keyboard closes.
+  const kbOpen = useKeyboardOpen();
   const foreignKey = foreign.map((f) => f.req.id).join(",");
   useEffect(() => {
     if (foreignKey) log("chip", `foreign waiting: ${foreignKey}`);
@@ -339,7 +360,7 @@ function ForeignPendingChip() {
       type="button"
       onClick={() => void selectSession(foreign[0]!.req.sessionID, { history: "push" })}
       title={foreign.map((r) => `${r.kind} — ${r.req.sessionID}`).join("\n")}
-      className="fixed right-4 bottom-10 z-40 flex items-center gap-1.5 rounded-full border border-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)] bg-[var(--surface-float-base)] px-2.5 py-1 text-xs text-[var(--text-weak)] shadow-md transition-colors hover:text-[var(--text-strong)]"
+      className={`${kbOpen ? "hidden sm:flex" : "flex"} fixed right-4 bottom-10 z-40 items-center gap-1.5 rounded-full border border-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)] bg-[var(--surface-float-base)] px-2.5 py-1 text-xs text-[var(--text-weak)] shadow-md transition-colors hover:text-[var(--text-strong)]`}
     >
       <span className="size-1.5 animate-pulse rounded-full bg-[color:var(--surface-warning-strong)]" aria-hidden />
       {foreign.length} waiting in other session{foreign.length > 1 ? "s" : ""} — switch
@@ -349,11 +370,46 @@ function ForeignPendingChip() {
 
 function EmptyState({ connected }: { connected: boolean }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 text-neutral-500">
-      <div className={`size-2.5 rounded-full ${connected ? "bg-emerald-500" : "bg-amber-500"}`} />
-      <p className="text-sm">
-        {connected ? "Select or create a session on the left" : "Connecting to the opencode service…"}
-      </p>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Mobile top bar: the sidebar is off-canvas <md and the conversation
+          header (which owns the drawer button) isn't mounted with no session
+          open — without this the user has no way to reach their sessions. */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border-base)] bg-[var(--background-base)] px-2.5 py-2 md:hidden">
+        <button
+          type="button"
+          onClick={openMobileSidebar}
+          title="Open sessions"
+          aria-label="Open sessions"
+          className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-[var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+        >
+          <Menu className="size-4" />
+        </button>
+        <span className="min-w-0 flex-1 truncate text-[var(--font-size-base)] font-medium text-[var(--text-strong)]">
+          OpenCode
+        </span>
+        <button
+          type="button"
+          onClick={() => void startDraftSession(null)}
+          title="New session"
+          className="flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-md bg-[var(--button-primary-base)] px-2.5 text-xs font-medium text-[var(--background-base)]"
+        >
+          <Plus className="size-3.5" />
+          New
+        </button>
+      </div>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center text-neutral-500">
+        <div className={`size-2.5 rounded-full ${connected ? "bg-emerald-500" : "bg-amber-500"}`} />
+        <p className="text-sm">
+          {connected ? "Select or create a session on the left" : "Connecting to the opencode service…"}
+        </p>
+        <button
+          type="button"
+          onClick={openMobileSidebar}
+          className="cursor-pointer rounded-md border border-[var(--border-weak-base)] px-3 py-1.5 text-xs text-[var(--text-weak)] transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)] md:hidden"
+        >
+          Browse sessions
+        </button>
+      </div>
     </div>
   );
 }
@@ -390,6 +446,18 @@ function ExtensionPageSurface({ id }: { id: string }) {
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
+              {/* Mobile sessions drawer: extension pages replace the
+                  conversation pane (which owns the drawer button), so expose
+                  it here — otherwise no way to reach sessions on mobile. */}
+              <button
+                type="button"
+                onClick={openMobileSidebar}
+                title="Open sessions"
+                aria-label="Open sessions"
+                className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-[var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)] md:hidden"
+              >
+                <Menu className="size-4" />
+              </button>
               {back}
               <h1 className="truncate text-[var(--font-size-large)] font-medium text-[var(--text-strong)]">
                 {page ? page.item.title : "Unknown extension page"}

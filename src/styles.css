@@ -9,6 +9,7 @@
   src: url("/assets/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
   font-weight: normal;
   font-style: normal;
+  font-display: swap;
 }
 
 @font-face {
@@ -16,6 +17,7 @@
   src: url("/assets/Inter.ttf") format("truetype");
   font-weight: 100 900;
   font-style: normal;
+  font-display: swap;
 }
 
 /* ============================================================
@@ -80,14 +82,14 @@
   --surface-success-base: #062d04;
   --surface-success-weak: #0a1e08;
   --surface-success-strong: #12c905;
-  --surface-warning-base: #fdf3cf;
-  --surface-warning-weak: #fdfaed;
+  --surface-warning-base: #3f3208;
+  --surface-warning-weak: #271f05;
   --surface-warning-strong: #fcd53a;
   --surface-critical-base: #1f0603;
   --surface-critical-weak: #28110c;
   --surface-critical-strong: #fc533a;
-  --surface-info-base: #feecfe;
-  --surface-info-weak: #fdf7fe;
+  --surface-info-base: #3a1240;
+  --surface-info-weak: #240c28;
   --surface-info-strong: #edb2f1;
 
   /* diff surfaces */

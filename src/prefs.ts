@@ -1,6 +1,22 @@
-export type Prefs = { showReasoning: boolean; showToolDetails: boolean; showTimestamps: boolean };
+export type Prefs = {
+  showReasoning: boolean;
+  showToolDetails: boolean;
+  showTimestamps: boolean;
+  /**
+   * Stream assistant text/reasoning/tool-input as it arrives. Default ON
+   * (TUI parity). Turning it OFF keeps the same final output but repaints the
+   * transcript only at part boundaries — the option for slow phones where
+   * per-token re-renders make the UI feel janky.
+   */
+  streamLive: boolean;
+};
 
-const DEFAULTS: Prefs = { showReasoning: true, showToolDetails: true, showTimestamps: false };
+const DEFAULTS: Prefs = {
+  showReasoning: true,
+  showToolDetails: true,
+  showTimestamps: false,
+  streamLive: true,
+};
 const STORAGE_KEY = "webui.prefs";
 
 function load(): Prefs {

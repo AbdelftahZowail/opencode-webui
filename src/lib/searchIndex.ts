@@ -26,6 +26,14 @@ const MAX_INDEXED_SESSIONS = 300;
 /** Parallel message fetches while building the cache. */
 const FETCH_CONCURRENCY = 4;
 
+/**
+ * Page size / page cap when reading a session's history. The engine caps a
+ * page at 200 messages, and this mirrors the store's display window
+ * (`loadMessages`) so every content hit is reachable in the transcript.
+ */
+const MESSAGES_PER_PAGE = 200;
+const MAX_MESSAGE_PAGES = 5;
+
 /** Chars of context on each side of the match (~80 total). */
 const SNIPPET_CONTEXT = 40;
 
@@ -91,20 +99,38 @@ function buildSnippet(text: string, qLower: string, qLen: number): { snippet: st
 }
 
 async function indexSession(id: string): Promise<void> {
+  const all: MessageInfo[] = [];
   try {
-    const res = await api.messages(id, 100);
-    const msgs = res.data
-      .map((m) => {
-        const t = messageText(m);
-        return t ? { id: m.id, text: t, lower: t.toLowerCase() } : null;
-      })
-      .filter((x): x is { id: string; text: string; lower: string } => !!x);
-    const combinedLower = msgs.map((m) => m.lower).join("\n");
-    index.set(id, { messages: msgs, combinedLower });
+    // Follow the cursor through the whole (bounded) timeline, newest page
+    // first. A single 100-message page used to skip older matches in long
+    // sessions entirely.
+    let cursor: string | null | undefined;
+    let pages = 0;
+    do {
+      const res = cursor
+        ? await api.messagesWithCursor(id, MESSAGES_PER_PAGE, cursor)
+        : await api.messages(id, MESSAGES_PER_PAGE);
+      all.push(...res.data);
+      cursor = res.cursor?.next ?? null;
+      pages++;
+      if (res.data.length < MESSAGES_PER_PAGE) break;
+    } while (cursor && pages < MAX_MESSAGE_PAGES);
   } catch {
-    // Unreachable/deleted session: cache an empty doc so it is never retried.
-    index.set(id, { messages: [], combinedLower: "" });
+    // First-page failure (unreachable/deleted session): cache an empty doc so
+    // it is never retried. A later-page failure keeps the pages already read.
+    if (all.length === 0) {
+      index.set(id, { messages: [], combinedLower: "" });
+      return;
+    }
   }
+  const msgs = all
+    .map((m) => {
+      const t = messageText(m);
+      return t ? { id: m.id, text: t, lower: t.toLowerCase() } : null;
+    })
+    .filter((x): x is { id: string; text: string; lower: string } => !!x);
+  const combinedLower = msgs.map((m) => m.lower).join("\n");
+  index.set(id, { messages: msgs, combinedLower });
 }
 
 function scan(qLower: string): ContentHits {

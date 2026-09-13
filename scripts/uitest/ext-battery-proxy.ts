@@ -159,6 +159,7 @@ function proxyEnv(): Record<string, string> {
   }
   env["WEBUI_EXTENSION_DIR"] = EXT_ROOT;
   env["WEBUI_PROXY_PORT"] = String(PROXY_PORT);
+  env["WEBUI_HOST"] = "127.0.0.1";
   env["WEBUI_SANDBOX"] = "1";
   env["XDG_STATE_HOME"] = STATE_DIR;
   env["WEBUI_DEBUG_LOG"] = SERVER_LOG;

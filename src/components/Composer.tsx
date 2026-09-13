@@ -19,6 +19,7 @@ import {
   consumeRevertPrompt,
   exportSession,
   forkSession,
+  focusedPaneKey,
   isDraftSession,
   loadSessionDetail,
   materializeDraft,
@@ -43,6 +44,7 @@ import {
 } from "../store";
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
+import { hasCoarsePointer } from "../lib/platform";
 import { getPrefs, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
 import { openSettings } from "./settings/SettingsDialog";
@@ -61,6 +63,7 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
+import { useKeyboardOpen } from "../hooks/useKeyboardOpen";
 
 let modelsCache: Promise<ModelInfo[]> | null = null;
 function loadModels(): Promise<ModelInfo[]> {
@@ -239,6 +242,11 @@ export function Composer({
   // send. No labels, no UI — switching away and back just works.
   const [text, setText] = useState(() => loadDraft(sessionID));
   const [busy, setBusy] = useState(false);
+  // Mobile keyboard: while a text entry owns focus (keyboard open) only the
+  // typing box rides above it — the meta-row (runs/shell/pickers) and hint
+  // line collapse on <sm. Shared hook so strips/activity/chip gate on the
+  // same value. Desktop keeps everything visible.
+  const inputFocused = useKeyboardOpen();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const prefs = usePrefs();
@@ -392,8 +400,11 @@ export function Composer({
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.focus();
     placeCaretEnd(el);
+    // Mobile: don't steal focus on mount / session switch — no user gesture has
+    // happened yet, so it would yank up the on-screen keyboard. Desktop keeps
+    // the TUI-style "ready to type" focus. Caret state stays honest either way.
+    if (!hasCoarsePointer()) el.focus();
     // Keep the caret STATE honest too — a restored draft ending in "/" must
     // not flash the slash menu from a stale offset-0 region.
     setCaret(el.value.length);
@@ -406,8 +417,17 @@ export function Composer({
     if (revertPrompt) {
       setText(revertPrompt);
       consumeRevertPrompt();
-      setCaret(0);
-      requestAnimationFrame(() => textareaRef.current?.setSelectionRange(0, 0));
+      // Land the caret at the END so an Edit/undo puts the text in the
+      // composer ready to continue typing, not with the cursor at offset 0.
+      setCaret(revertPrompt.length);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        // Only the focused pane's composer takes focus — a split view mounts
+        // one per pane and the global revertPrompt reaches all of them.
+        if (focusedPaneKey() === paneKey) el.focus();
+        placeCaretEnd(el);
+      });
     }
   }, [revertPrompt]);
 
@@ -493,6 +513,14 @@ export function Composer({
         run: () => setPref("showTimestamps", !getPrefs().showTimestamps),
       },
       {
+        name: "streaming",
+        aliases: ["toggle-streaming", "stream"],
+        description: getPrefs().streamLive
+          ? "Disable live streaming (render at part boundaries)"
+          : "Enable live streaming (token by token)",
+        run: () => setPref("streamLive", !getPrefs().streamLive),
+      },
+      {
         name: "rename",
         description: "Rename session",
         run: (args) => {
@@ -573,7 +601,7 @@ export function Composer({
         run: () => signalUI("help"),
       },
     ],
-    [sessionID, prefs.showReasoning, prefs.showTimestamps],
+    [sessionID, prefs.showReasoning, prefs.showTimestamps, prefs.streamLive],
   );
 
   // Skills the engine also exposes as commands accept upstream's
@@ -891,7 +919,7 @@ export function Composer({
   const cwd = sessionLocation?.split("/").filter(Boolean).pop();
 
   return (
-    <div className="border-t border-[color:var(--border-weak-base)] px-2 pt-2 pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:px-3">
+    <div className="shrink-0 border-t border-[color:var(--border-weak-base)] bg-[var(--background-base)] px-2 pt-2 pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:px-3">
       <div className="mx-auto max-w-3xl">
         <div className="relative">
           {skillsMenu && (
@@ -1245,7 +1273,7 @@ export function Composer({
                   )}
                 </div>
               </FilePicker>
-              <div className="no-scrollbar mt-1 flex flex-nowrap items-center gap-1 overflow-x-auto border-t border-[color:var(--border-weak-base)] px-1 pt-1 [&>*]:shrink-0">
+              <div className={`no-scrollbar mt-1 flex-nowrap items-center gap-1 overflow-x-auto border-t border-[color:var(--border-weak-base)] px-1 pt-1 [&>*]:shrink-0 ${inputFocused ? "hidden sm:flex" : "flex"}`}>
                 <button
                   type="button"
                   data-runs-panel-trigger
@@ -1303,7 +1331,7 @@ export function Composer({
             </Command>
           </PopoverContent>
         </Popover>
-        <div className="mt-1.5 flex items-center justify-between px-1 text-[11px] text-[color:var(--text-weaker)]">
+        <div className={`mt-1.5 items-center justify-between px-1 text-[11px] text-[color:var(--text-weaker)] ${inputFocused ? "hidden sm:flex" : "flex"}`}>
           {hint}
           {cwd && <p className="hidden truncate font-mono sm:block">{cwd}</p>}
         </div>

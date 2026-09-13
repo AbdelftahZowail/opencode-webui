@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ENV_KEYS,
   analyzeExposure,
   applyConfigPatch,
   configPath,
@@ -75,6 +76,7 @@ try {
     check("env: host overrides file", cfg.host === "127.0.0.1" && cfg.sources.host === "env");
     check("env: port overrides file", cfg.port === 6000 && cfg.sources.port === "env");
     check("env: allowed hosts override file", cfg.allowedHosts.join(",") === "b.lan,c.lan" && cfg.sources.allowedHosts === "env");
+    check("env: pinning names the variable", ENV_KEYS.allowedHosts === "WEBUI_ALLOWED_HOSTS" && ENV_KEYS.host === "WEBUI_HOST" && ENV_KEYS.publicUrl === null);
     check("env: trust proxy override", cfg.trustProxy === true && cfg.sources.trustProxy === "env");
     check("env: no-setup disables autostart", cfg.autostart === false && cfg.sources.autostart === "env");
     clearEnv();

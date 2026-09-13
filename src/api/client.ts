@@ -399,10 +399,20 @@ export interface WebuiExposure {
 export interface WebuiSettings {
   file: WebuiConfigShape;
   effective: WebuiConfigShape & { sources: Record<string, "env" | "file" | "default"> };
-  runtime: { host: string; port: number; auth: WebuiAuthMode; version: string; configPath: string };
+  runtime: {
+    host: string;
+    port: number;
+    auth: WebuiAuthMode;
+    version: string;
+    configPath: string;
+    /** Repo checkout: two-port dev topology (Vite + internal proxy). */
+    dev: boolean;
+    vitePort: number | null;
+  };
   exposure: WebuiExposure;
   restartRequired: boolean;
-  envPinned: string[];
+  /** config key -> the environment variable overriding it. */
+  envPinned: Record<string, string>;
 }
 
 export type WebuiConfigPatch = Partial<{
