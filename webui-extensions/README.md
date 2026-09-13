@@ -583,7 +583,8 @@ One folder becomes pixels through four files — follow them in order:
 3. **Manifest + SSE + bundling (proxy).** `server/index.ts` merges folder
    entries with engine-plugin UI halves, serves
    `GET /api/webui/extensions` (`{ id, url?v=mtime, domUrl?v=mtime,
-   source, origin }`), pushes a `{ type: "webui.extensions", version }`
+   source, origin, name?, description?, disabled?, settings?, requires?,
+   capabilities? }`), pushes a `{ type: "webui.extensions", version }`
    event per manifest change on `GET /api/webui/extensions/events`, and
    bundles each entry standalone with `Bun.build` (`bundleUIEntry` —
    react external, build logs printed loudly, never silent).
@@ -594,7 +595,10 @@ One folder becomes pixels through four files — follow them in order:
    `domUrl` via the DOM kit, and disposes + unregisters ids that vanish or
    flip `disabled: true`. Shipped browser bundles are skipped here (the glob
    owns them — importing twice would run side effects twice) but shipped
-   `domUrl` still mounts and `disabled` still pauses them.
+   `domUrl` still mounts and `disabled` still pauses them. Each sync also
+   parses the declared contract: the settings schema is registered for
+   `ctx.settings`, and unmet `requires` / malformed shapes become visible
+   diagnostics (see **Declared settings + requirements**).
 
 ## What extensions can use (browser stratum)
 
