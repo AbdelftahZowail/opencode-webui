@@ -237,4 +237,9 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
 - [x] **6. Slots** — thin: `contribute` on `slot:<id>` rendered by
   `src/extensions/slots.tsx` (`SLOT_IDS`, `data-oc-slot`); no new kind.
   Battery: `slots: contributions render in order + unregister cleanly`.
-- [ ] **9/10. Peer composition, inspector, secrets, theme** — as demand appears.
+- [x] **9. Peer composition** — `ctx.collections`/bridge `collections`
+  (`get`/`list`, registry `listCollections`) + `src/lib/extBus.ts`
+  extension-to-extension `publish`/`subscribe` (`ctx.bus`), subscriptions
+  disposed with the extension. Battery:
+  `peer composition: collections + extension bus`.
+- [ ] **10. Inspector, secrets, theme, i18n** — as demand appears.

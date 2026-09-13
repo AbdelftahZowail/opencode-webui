@@ -135,8 +135,8 @@ must never touch streaming output can rely on the distinction structurally.
   are built standalone: `import type` from `src/` is erased at build and
   safe, but any *runtime* `src/` import breaks the copy outside the repo.
   Use `window.__opencodeUI` (`register`, `react`, `api`, `store` [the curated
-  facade], `events`, `settings`, `prefs`, `notify`, `services`, `dom`, `kv`;
-  raw modules as `advanced.*`) — shipped code consumes the identical
+  facade], `events`, `settings`, `collections`, `bus`, `prefs`, `notify`,
+  `services`, `dom`, `kv`; raw modules as `advanced.*`) — shipped code consumes the identical
   surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
   tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
@@ -176,6 +176,11 @@ export function activate(ctx) {
 - `ctx.settings` — resolved declared settings (`get`/`set`/`reset`/`subscribe`);
   subscriptions disposed with the extension. See **Declared settings +
   requirements**. No manifest schema → empty handle (use `kv` for ad-hoc data).
+- `ctx.collections` — read other extensions' contributions (`get(collection)`)
+  and every live collection id (`list()`). See **Peer composition**.
+- `ctx.bus` — extension-to-extension events: `publish(channel, payload)`
+  (tagged with this id) and `subscribe(channel, fn)` (disposed with the
+  extension). See **Peer composition**.
 - `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
   `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
   non-React cleanup belongs — no `window.__*Installed` guards.
@@ -273,6 +278,31 @@ spot. `capabilities` is free-form declared metadata.
 
 Static shape problems (bad `settings`/`requires`) are reported the same way —
 never swallowed.
+
+### Peer composition
+
+Extensions cooperate through two read-only surfaces — neither imports the
+other:
+
+- **Collections** — read what any extension contributed:
+  `ctx.collections.get("palette")` (or the bridge's `collections.get`), plus
+  `ctx.collections.list()` for every live collection id. Contributing is the
+  existing `contribute` kind; consuming another's items is just reading.
+- **The peer bus** — extension-to-extension events:
+  `ctx.bus.subscribe(channel, fn)` and `ctx.bus.publish(channel, payload)`
+  (the event carries `from: <publisher id>`). Channels are free-form strings;
+  delivery is synchronous and low-frequency (coordination, not streams).
+  Subscriptions are disposed with the extension.
+
+```tsx
+// provider
+ctx.register({ kind: "contribute", id: "my-metric", collection: "metrics", item: { label: "TPS" } });
+// consumer — same-page, no import
+ctx.bus.subscribe("metrics.changed", ({ from }) => refresh(ctx.collections.get("metrics")));
+ctx.bus.publish("metrics.changed", {});
+```
+
+`service` still covers one-to-one provide/consume; this covers many-to-many.
 
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
@@ -570,6 +600,8 @@ Everything the app can — shipped extensions are the same build:
   shipped components
 - declared settings (`ctx.settings` / `settings.forExt(id)`) — core renders and
   persists the manifest schema
+- other extensions' contributions and the peer bus
+  (`ctx.collections` / `ctx.bus`)
 - `api` from `src/api/client.ts` (every endpoint fires `api.pre/post/error`)
 - the event bus (`ctx.on` / `events.subscribe`) — raw engine events + derived
   lifecycle events, frame-batched
@@ -580,9 +612,9 @@ Everything the app can — shipped extensions are the same build:
 - Toaster via the extension API surface (`notify`)
 
 External (user/project-dir) extensions use the one extension API surface
-(`register`, `react`, `api`, `store` facade, `events`, `settings`, `prefs`,
-`notify`, `services`, `dom` kit, `kv`, `advanced.*` raw modules) — used
-identically by our shipped ones.
+(`register`, `react`, `api`, `store` facade, `events`, `settings`,
+`collections`, `bus`, `prefs`, `notify`, `services`, `dom` kit, `kv`,
+`advanced.*` raw modules) — used identically by our shipped ones.
 
 ## Hot reload guarantees
 

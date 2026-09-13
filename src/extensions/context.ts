@@ -31,9 +31,10 @@
  * `activateExtension` so shipped and external bundles behave identically.
  */
 
-import { register, unregisterIds, getService, getServiceProviders, type ExtInput } from "./registry";
+import { register, unregisterIds, getService, getServiceProviders, getContributions, listCollections, type ExtInput } from "./registry";
 import { registerPoller, type Tier } from "../lib/scheduler";
 import { subscribeEvents, type BusListener } from "../lib/eventBus";
+import { publishPeerEvent, subscribePeerEvents, type PeerListener } from "../lib/extBus";
 import { storeFacade, type StoreFacade } from "../lib/storeFacade";
 import { extensionSettings, type ExtensionSettingsHandle } from "../lib/extSettings";
 import type { State } from "../store";
@@ -113,6 +114,24 @@ export interface ExtensionContext {
   services: {
     getService: typeof getService;
     getServiceProviders: typeof getServiceProviders;
+  };
+  /**
+   * Read other extensions' contributions (peer composition, roadmap 9):
+   * `get(collection)` returns the sorted items, `list()` every live
+   * collection id.
+   */
+  collections: {
+    get: typeof getContributions;
+    list: typeof listCollections;
+  };
+  /**
+   * Extension-to-extension bus (roadmap 9): `publish(channel, payload)` is
+   * tagged with this extension's id; `subscribe(channel, fn)` is disposed with
+   * the extension.
+   */
+  bus: {
+    publish(channel: string, payload: unknown): void;
+    subscribe(channel: string, listener: PeerListener): () => void;
   };
 }
 
@@ -216,6 +235,15 @@ function makeContext(id: string): {
       console.log(`[ext:${id}] ${message}`, ...args);
     },
     services: { getService, getServiceProviders },
+    collections: { get: getContributions, list: listCollections },
+    bus: {
+      publish: (channel, payload) => publishPeerEvent(channel, payload, id),
+      subscribe: (channel, listener) => {
+        const unsub = subscribePeerEvents(channel, listener);
+        disposers.push(unsub);
+        return unsub;
+      },
+    },
   };
 
   const dispose = () => {

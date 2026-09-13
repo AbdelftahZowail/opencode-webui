@@ -28,12 +28,14 @@ import {
   getServiceProviders,
   getTargetChain,
   hasTarget,
+  listCollections,
   register,
   registerTarget,
   renderTarget,
   unregisterIds,
 } from "../../src/extensions/registry";
 import { Slot, SLOT_IDS } from "../../src/extensions/slots";
+import { publishPeerEvent } from "../../src/lib/extBus";
 import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
@@ -1015,6 +1017,69 @@ function testExtensionDiagnostics(): void {
   }
 }
 
+async function testPeerComposition(): Promise<void> {
+  const t0 = Date.now();
+  const label = "peer composition: collections + extension bus";
+  const ids = ["bat-peer-a", "bat-peer-b"];
+  const collection = "bat.peer.collection";
+  unregisterIds(ids);
+  const received: { from: string; payload: unknown }[] = [];
+  const instA = await activateExtension("bat-peer-a", {
+    activate(ctx: ExtensionContext) {
+      ctx.bus.subscribe("bat.peer.channel", (e) =>
+        received.push({ from: e.from, payload: e.payload }),
+      );
+    },
+  });
+  const instB = await activateExtension("bat-peer-b", {
+    activate(ctx: ExtensionContext) {
+      ctx.register({
+        kind: "contribute",
+        id: ids[1]!,
+        collection,
+        item: { label: "b" },
+        order: 20,
+      });
+      ctx.bus.publish("bat.peer.channel", { hello: "a" });
+    },
+  });
+  try {
+    // A contribution from a third registration, ordered before B's.
+    register({ kind: "contribute", id: ids[0]!, collection, item: { label: "a" }, order: 10 });
+    if (!listCollections().includes(collection)) {
+      fail(label, `listCollections() missing ${collection}`, t0);
+      return;
+    }
+    const items = getContributions<{ label: string }>(collection).filter((c) => ids.includes(c.id));
+    if (items.length !== 2 || items[0]!.id !== ids[0] || items[1]!.id !== ids[1]) {
+      fail(label, `peer items wrong: ${JSON.stringify(items.map((i) => i.id))}`, t0);
+      return;
+    }
+    // B published during activation; A subscribed first, so it heard it.
+    if (
+      received.length !== 1 ||
+      received[0]!.from !== "bat-peer-b" ||
+      (received[0]!.payload as { hello?: string }).hello !== "a"
+    ) {
+      fail(label, `peer bus delivery wrong: ${JSON.stringify(received)}`, t0);
+      return;
+    }
+    instA.dispose();
+    publishPeerEvent("bat.peer.channel", { later: true }, "x");
+    if (received.length !== 1) {
+      fail(label, `peer subscription leaked after dispose (${received.length})`, t0);
+      return;
+    }
+    pass(label, `collection enumerated + ordered; peer event from=bat-peer-b; disposed clean`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    instA.dispose();
+    instB.dispose();
+    unregisterIds(ids);
+  }
+}
+
 function testSlots(): void {
   const t0 = Date.now();
   const label = "slots: contributions render in order + unregister cleanly";
@@ -1435,6 +1500,7 @@ async function main(): Promise<void> {
   testManifestContract();
   await testExtensionSettingsStore();
   testExtensionDiagnostics();
+  await testPeerComposition();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();

@@ -25,6 +25,9 @@
  *   notify   — bottom-right toasts (3s)
  *   services — named logic (`getService`/`getServiceProviders`; doubles as
  *              value overrides — the highest-precedence provider wins)
+ *   collections — peer composition (roadmap 9): other extensions'
+ *              contributions (`get`) + every live collection id (`list`)
+ *   bus      — extension-to-extension events (`publish`/`subscribe`; roadmap 9)
  *   dom      — the DOM-stratum kit surface: mount/dispose plumbing plus the
  *              versioned `data-oc-*` anchor table (`dom.ts` modules receive
  *              their kit directly in `mount(kit)` — this is for imperative
@@ -39,13 +42,14 @@
  */
 
 import * as React from "react";
-import { register, getService, getServiceProviders } from "../extensions/registry";
+import { register, getService, getServiceProviders, getContributions, listCollections } from "../extensions/registry";
 import { api } from "../api/client";
 import * as store from "../store";
 import { storeFacade, type StoreFacade } from "./storeFacade";
 import { getPrefs, setPref, subscribePrefs } from "../prefs";
 import { notify } from "./notify";
 import { subscribeEvents } from "./eventBus";
+import { publishPeerEvent, subscribePeerEvents, type PeerListener } from "./extBus";
 import { extensionSettings } from "./extSettings";
 import {
   mountDomExtension,
@@ -77,6 +81,16 @@ export interface ExtensionApi {
   services: {
     getService: typeof getService;
     getServiceProviders: typeof getServiceProviders;
+  };
+  /** Other extensions' contributions + the live collection id list (roadmap 9). */
+  collections: {
+    get: typeof getContributions;
+    list: typeof listCollections;
+  };
+  /** Extension-to-extension bus (roadmap 9); bridge publishes are anonymous. */
+  bus: {
+    publish: (channel: string, payload: unknown) => void;
+    subscribe: (channel: string, listener: PeerListener) => () => void;
   };
   dom: {
     mount: typeof mountDomExtension;
@@ -112,6 +126,11 @@ export function createExtensionApi(): ExtensionApi {
     prefs: { getPrefs, setPref, subscribePrefs },
     notify,
     services: { getService, getServiceProviders },
+    collections: { get: getContributions, list: listCollections },
+    bus: {
+      publish: (channel, payload) => publishPeerEvent(channel, payload),
+      subscribe: subscribePeerEvents,
+    },
     dom: {
       mount: mountDomExtension,
       dispose: disposeDomExtension,

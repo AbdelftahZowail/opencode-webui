@@ -407,6 +407,19 @@ export function getContributions<T = unknown>(
 }
 
 /**
+ * Every collection id currently holding at least one contribution, sorted.
+ * Data introspection for peer composition (roadmap 9): one extension can see
+ * what others contribute without importing them.
+ */
+export function listCollections(): string[] {
+  const ids = new Set<string>();
+  for (const e of registry) {
+    if (e.kind === "contribute") ids.add((e as ContributeExtension<unknown>).collection);
+  }
+  return [...ids].sort();
+}
+
+/**
  * Consume a named logic service. Highest `precedence` wins — this doubles
  * as value overrides: core consults services for pluggable values (e.g.
  * the timestamp formatter) so tiny logic tweaks stay stale-proof.
