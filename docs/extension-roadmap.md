@@ -211,7 +211,9 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
   services); both loaders call `activateExtension` and dispose on
   swap/disable/delete. Battery: `activation context: register + dispose +
   teardown`. Ambient module-scope registration still works (deprecating).
-- [ ] **2. Scheduler access** — as context methods (`poll`/`after`).
+- [x] **2. Scheduler access** — as context methods (`poll`/`after`); tier-aware
+  recurring pollers via the shared scheduler, one-shot delays auto-cleared.
+  Battery: `context scheduler: poll + after, disposed on teardown`.
 - [ ] **3. Event subscription** — derived lifecycle + raw engine events, batched.
 - [ ] **4. Curated store facade + imperative subscribe.**
 - [ ] **5. Per-extension settings** — manifest-declared schema.

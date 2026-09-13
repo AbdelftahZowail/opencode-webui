@@ -150,6 +150,11 @@ export function activate(ctx) {
 
 - `ctx.register(entry)` — the same five kinds; the id is remembered so
   teardown prunes exactly this extension's entries.
+- `ctx.poll({ name, minInterval, intervals?, whenHidden?, run })` — recurring
+  work on the shared scheduler (tier-aware, jittered; the app's only timer
+  owner). Returns an idempotent stop; stopped automatically on dispose.
+- `ctx.after(ms, fn)` — one-shot delay; returns an idempotent cancel; cleared
+  automatically on dispose.
 - `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
   `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
   non-React cleanup belongs — no `window.__*Installed` guards.

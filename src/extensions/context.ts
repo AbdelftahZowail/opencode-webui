@@ -32,9 +32,29 @@
  */
 
 import { register, unregisterIds, getService, getServiceProviders, type ExtInput } from "./registry";
+import { registerPoller, type Tier } from "../lib/scheduler";
 
 /** Teardown returned by an activation entry: a function, or nothing. */
 export type ActivateResult = void | (() => void) | Promise<void | (() => void)>;
+
+/**
+ * A recurring registration for the shared scheduler (the app's only timer
+ * owner). `name` is namespaced with the extension id for debug logs; cadence
+ * is tier-aware exactly like core pollers (LIVE ~2s / IDLE ~12s / HIDDEN ~60s
+ * by default, `minInterval` is the floor). Disposed with the extension.
+ */
+export interface ExtensionPollOptions {
+  /** Short name for debug logs (namespaced `ext:<id>:<name>`). */
+  name: string;
+  /** Floor across all tiers — a tier override can stretch but never go below. */
+  minInterval: number;
+  /** Per-tier cadence overrides; missing tiers fall back to `minInterval`. */
+  intervals?: Partial<Record<Tier, number>>;
+  /** Run while the tab is hidden (default false — most polls can wait). */
+  whenHidden?: boolean;
+  /** The work. May be async; rejections are caught and logged by the scheduler. */
+  run: () => unknown;
+}
 
 /** The context object every activation entry receives. */
 export interface ExtensionContext {
@@ -45,6 +65,18 @@ export interface ExtensionContext {
    * id is remembered so disposal prunes exactly what this extension added.
    */
   register(entry: ExtInput): void;
+  /**
+   * Recurring work on the shared scheduler (tier-aware, jittered, no
+   * component-owned `setInterval`). Returns an idempotent unregister; the
+   * poller is also stopped automatically on dispose.
+   */
+  poll(opts: ExtensionPollOptions): () => void;
+  /**
+   * One-shot delay. Returns an idempotent cancel; the timer is also cleared
+   * automatically on dispose. (One-shots are the documented exception to
+   * "the scheduler owns recurring timers".)
+   */
+  after(ms: number, fn: () => void): () => void;
   /** Run `fn` on dispose (hot-swap, disable, delete). LIFO; crash-isolated. */
   onDispose(fn: () => void): void;
   /** Extension-scoped log line (prefixed with the id). */
@@ -103,6 +135,29 @@ function makeContext(id: string): {
     register(entry) {
       register(entry);
       ownedIds.add(entry.id);
+    },
+    poll(opts) {
+      const stop = registerPoller({ ...opts, name: `ext:${id}:${opts.name}` });
+      disposers.push(stop);
+      return stop;
+    },
+    after(ms, fn) {
+      let handle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        handle = null;
+        try {
+          fn();
+        } catch (err) {
+          console.error(`[extensions] "${id}" after(${ms}) fn failed:`, err);
+        }
+      }, ms);
+      const cancel = () => {
+        if (handle !== null) {
+          clearTimeout(handle);
+          handle = null;
+        }
+      };
+      disposers.push(cancel);
+      return cancel;
     },
     onDispose(fn) {
       disposers.push(fn);

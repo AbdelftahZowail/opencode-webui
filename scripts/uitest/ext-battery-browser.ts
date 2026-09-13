@@ -33,6 +33,7 @@ import {
 } from "../../src/extensions/registry";
 import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
+import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BAT_DIR = "/tmp/opencode/bat-browser";
@@ -659,6 +660,47 @@ async function testActivationContext(): Promise<void> {
   }
 }
 
+async function testContextScheduler(): Promise<void> {
+  const t0 = Date.now();
+  const label = "context scheduler: poll + after, disposed on teardown";
+  let pollCount = 0;
+  let afterFired = 0;
+  let cancelFired = 0;
+  const inst = await activateExtension("bat-sched", {
+    activate(ctx: ExtensionContext) {
+      ctx.poll({ name: "tick", minInterval: 200, run: () => { pollCount++; } });
+      ctx.after(20, () => { afterFired++; });
+      const cancel = ctx.after(20, () => { cancelFired++; });
+      cancel();
+    },
+  });
+  startScheduler({ isBusy: () => true, isSseStale: () => false });
+  try {
+    await sleep(1_250); // one scheduler tick (the loop evaluates every 1s)
+    if (pollCount < 1) {
+      fail(label, `poller never ran (count=${pollCount})`, t0);
+      return;
+    }
+    if (afterFired !== 1 || cancelFired !== 0) {
+      fail(label, `after: fired=${afterFired}, cancelled fired=${cancelFired}`, t0);
+      return;
+    }
+    const atDispose = pollCount;
+    inst.dispose();
+    await sleep(1_250);
+    if (pollCount !== atDispose) {
+      fail(label, `poller ran after dispose (${atDispose} → ${pollCount})`, t0);
+      return;
+    }
+    pass(label, `poller ran ${atDispose}×; one-shot fired once, cancel held; stopped on dispose`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    inst.dispose();
+    stopScheduler();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -1020,6 +1062,7 @@ async function main(): Promise<void> {
   testSameIdSwap();
   testUnregisterRestore();
   await testActivationContext();
+  await testContextScheduler();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();
