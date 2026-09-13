@@ -16,7 +16,9 @@
  *              `react` to the app's node_modules when bundling, so external
  *              bundles render with the same instance)
  *   api      — the typed engine client (one function per endpoint)
- *   store    — full app access: `useStore`, `getState`, and every action
+ *   store    — the curated store facade (supported): `subscribe`/`select`
+ *              (non-React), `useStore`, selectors, and actions. Raw module:
+ *              `advanced.store` (explicitly unsupported — prefer the facade)
  *   events   — subscribe to the event bus by raw engine type or derived
  *              lifecycle name (`subscribe`; `"*"` = all), frame-batched
  *   prefs    — user prefs (`getPrefs`/`setPref`/`subscribePrefs`)
@@ -38,6 +40,7 @@ import * as React from "react";
 import { register, getService, getServiceProviders } from "../extensions/registry";
 import { api } from "../api/client";
 import * as store from "../store";
+import { storeFacade, type StoreFacade } from "./storeFacade";
 import { getPrefs, setPref, subscribePrefs } from "../prefs";
 import { notify } from "./notify";
 import { subscribeEvents } from "./eventBus";
@@ -58,7 +61,9 @@ export interface ExtensionApi {
   register: typeof register;
   react: typeof React;
   api: typeof api;
-  store: typeof store;
+  store: StoreFacade;
+  /** Raw modules kept reachable but explicitly unsupported. */
+  advanced: { store: typeof store };
   events: { subscribe: typeof subscribeEvents };
   prefs: {
     getPrefs: typeof getPrefs;
@@ -95,7 +100,8 @@ export function createExtensionApi(): ExtensionApi {
     register,
     react: React,
     api,
-    store,
+    store: storeFacade,
+    advanced: { store },
     events: { subscribe: subscribeEvents },
     prefs: { getPrefs, setPref, subscribePrefs },
     notify,

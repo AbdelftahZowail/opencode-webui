@@ -34,6 +34,8 @@
 import { register, unregisterIds, getService, getServiceProviders, type ExtInput } from "./registry";
 import { registerPoller, type Tier } from "../lib/scheduler";
 import { subscribeEvents, type BusListener } from "../lib/eventBus";
+import { storeFacade, type StoreFacade } from "../lib/storeFacade";
+import type { State } from "../store";
 
 /** Teardown returned by an activation entry: a function, or nothing. */
 export type ActivateResult = void | (() => void) | Promise<void | (() => void)>;
@@ -85,6 +87,17 @@ export interface ExtensionContext {
    * automatically on dispose.
    */
   on(name: string, handler: BusListener): () => void;
+  /**
+   * Curated store surface (selectors + actions). Same object as the bridge's
+   * `store`.
+   */
+  store: StoreFacade;
+  /**
+   * Derived store subscribe with automatic disposal: fires immediately, then
+   * only when the selected value changes (shallow-equal). The change-aware
+   * companion to `on` (event bus). Returns an idempotent unsubscribe.
+   */
+  subscribe<T>(selector: (s: State) => T, listener: (value: T) => void): () => void;
   /** Run `fn` on dispose (hot-swap, disable, delete). LIFO; crash-isolated. */
   onDispose(fn: () => void): void;
   /** Extension-scoped log line (prefixed with the id). */
@@ -169,6 +182,12 @@ function makeContext(id: string): {
     },
     on(name, handler) {
       const unsub = subscribeEvents(name, handler);
+      disposers.push(unsub);
+      return unsub;
+    },
+    store: storeFacade,
+    subscribe(selector, listener) {
+      const unsub = storeFacade.select(selector, listener);
       disposers.push(unsub);
       return unsub;
     },

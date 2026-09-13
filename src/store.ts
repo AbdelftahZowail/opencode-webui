@@ -551,6 +551,17 @@ export function getState(): State {
   return state;
 }
 
+/**
+ * Non-React store subscription: called on every notification (including
+ * frame-batched streaming updates). Returns an unsubscribe. The supported
+ * imperative seam for extensions (see `src/lib/storeFacade.ts`); components
+ * use `useStore`.
+ */
+export function subscribeStore(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export const NEW_SESSION_HREF = "/new-session";
 
 export function sessionHref(sessionID: string): string {

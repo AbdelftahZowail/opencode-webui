@@ -35,7 +35,7 @@ import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
 import { publishEvent, subscribeEvents, flushEvents } from "../../src/lib/eventBus";
-import { handleEvent } from "../../src/store";
+import { handleEvent, setPendingWorkspace } from "../../src/store";
 import type { V2Event } from "../../src/api/events";
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -811,6 +811,55 @@ async function testStoreEventIntegration(): Promise<void> {
   }
 }
 
+async function testStoreFacade(): Promise<void> {
+  const t0 = Date.now();
+  const label = "store facade: immediate + change-gated subscribe + ctx disposal";
+  const values: (string | null)[] = [];
+  const len = (): number => values.length;
+  let hasActions = false;
+  const inst = await activateExtension("bat-facade", {
+    activate(ctx: ExtensionContext) {
+      hasActions =
+        typeof ctx.store.sendPromptTo === "function" &&
+        typeof ctx.store.subscribe === "function" &&
+        typeof ctx.store.currentSessionID === "function";
+      ctx.subscribe((s) => s.pendingWorkspace, (v) => values.push(v));
+    },
+  });
+  try {
+    if (!hasActions) {
+      fail(label, `ctx.store facade missing the documented surface`, t0);
+      return;
+    }
+    if (len() !== 1) {
+      fail(label, `expected an immediate call, got ${len()}`, t0);
+      return;
+    }
+    setPendingWorkspace("w1");
+    if (len() !== 2 || values[1] !== "w1") {
+      fail(label, `change not delivered: ${JSON.stringify(values)}`, t0);
+      return;
+    }
+    setPendingWorkspace("w1"); // same selected value → no call
+    if (len() !== 2) {
+      fail(label, `same-value update fired (${len()})`, t0);
+      return;
+    }
+    inst.dispose();
+    setPendingWorkspace("w2");
+    if (len() !== 2) {
+      fail(label, `leaked after dispose: ${JSON.stringify(values)}`, t0);
+      return;
+    }
+    pass(label, `immediate + change-gated (${JSON.stringify(values)}), clean on dispose`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    inst.dispose();
+    setPendingWorkspace(null);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -1175,6 +1224,7 @@ async function main(): Promise<void> {
   await testContextScheduler();
   await testEventBus();
   await testStoreEventIntegration();
+  await testStoreFacade();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();

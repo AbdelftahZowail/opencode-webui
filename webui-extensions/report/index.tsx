@@ -129,7 +129,7 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
   const args = rawArgs.trim();
   const agentMode = args.startsWith("--agent");
   const titleArgs = agentMode ? args.replace(/^--agent\b/, "").trim() : args;
-  const diag = await collectDiag(ctx.sessionID ?? ext.store.getState().currentSessionID ?? null);
+  const diag = await collectDiag(ctx.sessionID ?? ext.store.currentSessionID() ?? null);
   const { title, body, url } = buildIssue(titleArgs, diag);
 
   if (agentMode) {
@@ -137,7 +137,7 @@ async function run(rawArgs: string, ctx: { sessionID?: string }) {
       `File a bug against ${diag.reportRepo} using the gh CLI: create an issue with the title and ` +
       `body below, then reply with the issue URL. Do not include any private session content beyond ` +
       `the diagnostics JSON.\n\nTitle: ${title}\n\n${body}`;
-    let sid = ctx.sessionID ?? ext.store.getState().currentSessionID ?? null;
+    let sid = ctx.sessionID ?? ext.store.currentSessionID() ?? null;
     if (sid && ext.store.isDraftSession(sid)) {
       try {
         sid = await ext.store.materializeDraft("");

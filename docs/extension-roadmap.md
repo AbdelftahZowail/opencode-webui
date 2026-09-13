@@ -219,7 +219,11 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
   `message.appended`; `"*"` wildcard; frame-batched, crash-isolated.
   `ctx.on` / bridge `events.subscribe`, disposed with the extension.
   Battery: `event bus: …` + `store event integration: raw + derived (tool/run)`.
-- [ ] **4. Curated store facade + imperative subscribe.**
+- [x] **4. Curated store facade + imperative subscribe** —
+  `src/lib/storeFacade.ts`: the supported selectors/actions + non-React
+  `subscribe`/`select`; bridge `store` is the facade, raw module is
+  `advanced.store` (unsupported). `ctx.store` / `ctx.subscribe` (auto-disposed).
+  Battery: `store facade: immediate + change-gated subscribe + ctx disposal`.
 - [ ] **5. Per-extension settings** — manifest-declared schema.
 - [ ] **8. Manifest `requires` + capability diagnostics.**
 - [ ] **6. Slots** — thin: `contribute` + a slot target.

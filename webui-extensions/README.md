@@ -125,8 +125,9 @@ must never touch streaming output can rely on the distinction structurally.
 - **Runtime code uses the bridge only.** External (user/project-dir) bundles
   are built standalone: `import type` from `src/` is erased at build and
   safe, but any *runtime* `src/` import breaks the copy outside the repo.
-  Use `window.__opencodeUI` (`register`, `react`, `api`, `store`, `events`,
-  `prefs`, `notify`, `services`, `dom`, `kv`) — shipped code consumes the identical
+  Use `window.__opencodeUI` (`register`, `react`, `api`, `store` [the curated
+  facade], `events`, `prefs`, `notify`, `services`, `dom`, `kv`; raw modules as
+  `advanced.*`) — shipped code consumes the identical
   surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
   tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
@@ -158,6 +159,11 @@ export function activate(ctx) {
 - `ctx.on(name, handler)` — subscribe to the event bus (raw engine type or
   derived lifecycle name; `"*"` = all). Returns an unsubscribe; removed
   automatically on dispose. See **Events (observe)** below.
+- `ctx.subscribe(selector, listener)` — derived store read: fires immediately,
+  then only when the selected value changes (shallow-equal). Auto-removed on
+  dispose. See **Store (read + act)** below.
+- `ctx.store` — the curated store facade (selectors + actions); the same
+  object as the bridge's `store`.
 - `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
   `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
   non-React cleanup belongs — no `window.__*Installed` guards.
@@ -197,6 +203,32 @@ Delivery is frame-batched (16ms) so a token burst is one dispatch per frame.
 Listeners are crash-isolated; the subscription is disposed with the
 extension. The bus is notification-only: it never mutates state and
 extensions cannot publish.
+
+### Store (read + act)
+
+`ctx.store` (bridge: `store`) is the curated, **supported** store surface —
+selectors and actions, never the raw module (which stays reachable, and
+explicitly unsupported, as `advanced.store`):
+
+- **observe:** `subscribe(listener)`, `select(selector, listener)`,
+  `useStore(selector)` (React), `getState()` (full snapshot)
+- **read:** `currentSessionID()`, `sessions()`, `sessionDetail(id)`,
+  `messages(id)`, `liveAssistants(id)`, `isRunning(id)`, `isQueued(id)`,
+  `pendingRequests()`, `isDraftSession(id)`, `sessionHref(id)`
+- **act:** `sendPrompt`, `sendPromptTo(id, text, {delivery?})`,
+  `selectSession`, `navigateFocused`, `newSession`, `materializeDraft`,
+  `replyPermission`, `replyForm`, `replyQuestion`, `rejectQuestion`,
+  `interrupt`, `switchAgent`, `switchModel`, `renameSession`,
+  `compactSession`, `undoSession`, `redoSession`, `activateSkill`
+
+```tsx
+// ctx.subscribe auto-disposes; ctx.store.select is the manual form.
+ctx.subscribe((s) => s.currentSessionID, (id) => badge.textContent = id ?? "");
+```
+
+Core keeps adding internal state/actions — those do **not** become API. A new
+extension need means a deliberate addition to the facade (version bump), not
+reaching into `advanced.store`.
 
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
@@ -464,7 +496,8 @@ One folder becomes pixels through four files — follow them in order:
 
 Everything the app can — shipped extensions are the same build:
 
-- `useStore` / store actions from `src/store.ts`
+- the curated store facade (`store` / `ctx.store`), or `useStore` directly in
+  shipped components
 - `api` from `src/api/client.ts` (every endpoint fires `api.pre/post/error`)
 - the event bus (`ctx.on` / `events.subscribe`) — raw engine events + derived
   lifecycle events, frame-batched
@@ -475,8 +508,9 @@ Everything the app can — shipped extensions are the same build:
 - Toaster via the extension API surface (`notify`)
 
 External (user/project-dir) extensions use the one extension API surface
-(`register`, `react`, `api`, `store`, `events`, `prefs`, `notify`, `services`,
-`dom` kit, `kv`) — used identically by our shipped ones.
+(`register`, `react`, `api`, `store` facade, `events`, `prefs`, `notify`,
+`services`, `dom` kit, `kv`, `advanced.*` raw modules) — used identically by
+our shipped ones.
 
 ## Hot reload guarantees
 
