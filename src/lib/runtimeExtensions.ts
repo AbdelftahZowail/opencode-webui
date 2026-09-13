@@ -1,5 +1,6 @@
 import { getRegisteredIds, unregisterIds } from "../extensions/registry";
 import { fireHooks } from "../extensions/hooks";
+import { activateExtension } from "../extensions/context";
 import { installExtensionBridge } from "./extensionApi";
 import {
   disposeDomExtension,
@@ -39,8 +40,9 @@ import {
  *       - the registry is ungated (presence IS installed): no allow-list step;
  *         whatever it registered is served to targets/collections directly;
  *       - imports its browser bundle when we haven't loaded THIS url yet
- *         (module-level `loaded` map id→url; a changed `?v=` re-imports, and
- *         the registry same-id-swaps → live repaint, no refresh);
+ *         (`loaded` map id→{url, owned, dispose}; a changed `?v=` disposes the
+ *         old instance and re-imports, and the registry same-id-swaps → live
+ *         repaint, no refresh);
  *       - imports its DOM bundle when we haven't mounted THIS domUrl yet
  *         (`loadedDom` map id→{url, module}; a changed `?v=` disposes the old
  *         module and mounts the new one — edits repaint clean, never stack
@@ -49,11 +51,13 @@ import {
  *     uninstall. No polling: a `visibilitychange` refetch covers streams that
  *     died while the tab was hidden (EventSource itself auto-reconnects).
  *  3. After each sync, ids still in `loaded`/`loadedDom` but missing from the
- *     sync's enabled set (removed server-side OR newly paused) get
- *     unregistered via their recorded id delta (`loadedIds` — exactly what
- *     the folder's bundle added) + forgotten (browser stratum) or
- *     `disposeDomExtension` + forgotten (DOM stratum) — a paused extension
- *     unregisters on the next event, a re-enabled one imports fresh.
+ *     sync's enabled set (removed server-side OR newly paused) get torn down:
+ *     `dispose` (activation teardown), then the exact ids the folder owned
+ *     (context-owned + import delta; fallback [id]) are unregistered +
+ *     forgotten (browser stratum), or `disposeDomExtension` + forgotten (DOM
+ *     stratum) — a paused extension unregisters on the next event, a
+ *     re-enabled one imports fresh. Activation is the contract (roadmap 7);
+ *     the id delta remains the ambient safety net.
  *
  * Manifest fetch/import failures are silently ignored: the engine or proxy
  * may simply be down, and a transient failure must never unregister
@@ -77,19 +81,24 @@ interface RuntimeExtensionEntry {
 }
 
 /** Loaded browser bundles, id → exact url (with its ?v= version) currently active. */
-const loaded = new Map<string, string>();
+interface LoadedBrowser {
+  url: string;
+  /** Every registry id this folder registered (context-owned + import delta). */
+  owned: Set<string>;
+  /** Activation-module teardown; absent for ambient modules (delta covers them). */
+  dispose?: () => void;
+}
 
 /**
- * Folder-level id-delta tracking (IN-3, G-F2/F4 remainder — IMPLEMENTED,
- * subsumes the one-id doc rule): manifest id → registry ids its bundle
- * added. Snapshotted around each bundle import (before/after
- * getRegisteredIds()); disable/delete unregisters exactly that set, so a
- * multi-id folder (e.g. a hook plus two wraps) leaves no ghosts.
- * The one-id guidance stays as guidance (simpler to reason about) but the
- * loader no longer depends on it. Empty set = bundle added nothing new
- * (re-import swap or zero-id bundle) — uninstall falls back to [id].
+ * Loaded browser bundles: id → the active instance. `url` is the exact `?v=`
+ * version (a change means hot-swap), `owned` is every registry id the folder
+ * registered, and `dispose` runs an activation entry's teardown. A folder's
+ * registrations live only as long as its entry here — disable/delete/swap all
+ * route through `dispose` + `owned`, so a multi-id folder leaves no ghosts.
+ * Activation is the contract (roadmap 7); the id delta stays as the safety
+ * net for ambient module-scope registration, the shape being deprecated.
  */
-const loadedIds = new Map<string, Set<string>>();
+const loaded = new Map<string, LoadedBrowser>();
 
 /** Mounted DOM modules, id → exact domUrl + module (for `dispose` on swap). */
 const loadedDom = new Map<string, { url: string; module: DomExtensionModule }>();
@@ -159,21 +168,34 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
       } else {
         enabledNow.add(entry.id);
 
-        if (loaded.get(entry.id) !== entry.url) {
+        const current = loaded.get(entry.id);
+        if (current?.url !== entry.url) {
+          // Hot-swap / first load: tear the previous instance down BEFORE the
+          // new one runs, so old ids can't collide with the new set (a
+          // same-id swap would otherwise re-map the old registration).
+          if (current) {
+            loaded.delete(entry.id);
+            current.dispose?.();
+            unregisterIds([...current.owned]);
+          }
           const before = new Set(getRegisteredIds());
           try {
-            await import(/* @vite-ignore */ entry.url);
-            loaded.set(entry.id, entry.url);
-            // Id-delta: attribute exactly the registry ids this import added.
+            const imported = await import(/* @vite-ignore */ entry.url);
+            // Activation entry (roadmap 7): the bundle may export `activate`
+            // (or default fn) and receive a disposable context.
+            const instance = await activateExtension(entry.id, imported);
+            // Id-delta: every registry id this import + activation added — the
+            // safety net for ambient modules and stray global registrations.
             const after = getRegisteredIds();
-            let owned = loadedIds.get(entry.id);
-            if (!owned) {
-              owned = new Set<string>();
-              loadedIds.set(entry.id, owned);
-            }
+            const owned = new Set<string>();
             for (const rid of after) {
               if (!before.has(rid)) owned.add(rid);
             }
+            loaded.set(entry.id, {
+              url: entry.url,
+              owned,
+              dispose: instance.activated ? instance.dispose : undefined,
+            });
             // Lifecycle hook (spec §5.1): a runtime extension bundle just loaded —
             // observers see it after registration, before first render.
             void fireHooks("extension.loaded", { id: entry.id, url: entry.url });
@@ -194,20 +216,20 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
   }
 
   // Stale = loaded but no longer in this sync's enabled set (removed from
-  // the server, or newly paused via manifest `disabled: true`). Unregister
-  // exactly the id delta each folder added (fallback [id] when it added
-  // nothing new) + forget so a later re-enable imports fresh.
+  // the server, or newly paused via manifest `disabled: true`). Dispose the
+  // instance (activation teardown), then unregister exactly the ids it owned
+  // (fallback [id] when it added nothing new) + forget, so a later re-enable
+  // imports fresh.
   const toRemove = new Set<string>();
-  for (const id of loaded.keys()) {
+  for (const [id, rec] of loaded) {
     if (!enabledNow.has(id)) {
-      const owned = loadedIds.get(id);
-      if (owned && owned.size > 0) {
-        for (const rid of owned) toRemove.add(rid);
+      rec.dispose?.();
+      if (rec.owned.size > 0) {
+        for (const rid of rec.owned) toRemove.add(rid);
       } else {
         toRemove.add(id);
       }
       loaded.delete(id);
-      loadedIds.delete(id);
     }
   }
   if (toRemove.size > 0) unregisterIds([...toRemove]);

@@ -133,6 +133,35 @@ must never touch streaming output can rely on the distinction structurally.
   `@/components/ui/dialog`) — external copies must still use the bridge,
   never `@/` or relative `src/` paths.
 
+### Activation (lifecycle) — the shape to write
+
+`index.tsx` may export an activation entry instead of registering at module
+scope:
+
+```tsx
+export const id = "my-extension";
+
+export function activate(ctx) {
+  ctx.register({ kind: "wrap", id: "my-wrap", target: "message.timestamp", render: … });
+  const stop = someObserver(); // timer, listener, subscription…
+  ctx.onDispose(stop);          // or: return stop
+}
+```
+
+- `ctx.register(entry)` — the same five kinds; the id is remembered so
+  teardown prunes exactly this extension's entries.
+- `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
+  `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
+  non-React cleanup belongs — no `window.__*Installed` guards.
+- `ctx.log(...)` — prefixed with the extension id.
+- `ctx.services.getService` / `getServiceProviders` — named-logic lookups.
+
+Module-scope `register({…})` still works (the loaders fall back to the
+registry id-delta), but it is the shape being deprecated: nothing outside the
+module can dispose what the module did, so `disabled`/delete/hot-swap can't
+tear down listeners or timers it started. New extensions write `activate`.
+The DOM stratum already has this contract (`mount` returns a cleanup fn).
+
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
 import { register } from "../../src/extensions/registry";
@@ -388,9 +417,10 @@ One folder becomes pixels through four files — follow them in order:
    react external, build logs printed loudly, never silent).
 4. **Import + register (page).** `src/lib/runtimeExtensions.ts` fetches
    the manifest, dynamic-imports each new `?v=` bundle (re-import on
-   mtime move → registry same-id-swap → live repaint), mounts `domUrl`
-   via the DOM kit, and unregisters ids that vanish or flip
-   `disabled: true`. Shipped browser bundles are skipped here (the glob
+   mtime move → dispose the old instance → registry same-id-swap → live
+   repaint), runs the module's `activate(ctx)` entry when present, mounts
+   `domUrl` via the DOM kit, and disposes + unregisters ids that vanish or
+   flip `disabled: true`. Shipped browser bundles are skipped here (the glob
    owns them — importing twice would run side effects twice) but shipped
    `domUrl` still mounts and `disabled` still pauses them.
 

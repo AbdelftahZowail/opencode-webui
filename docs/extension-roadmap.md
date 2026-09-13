@@ -206,7 +206,11 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
 - [x] **1. Prop-transforming wraps** — `next(overrides?)` shallow-merges into the
   remaining wraps + leaf; no-arg behavior unchanged. Battery: `wrap transforms
   props (next overrides merge down-chain)`.
-- [ ] **7. Lifecycle entry + context** — moved up; the host for 2/3/4/5.
+- [x] **7. Lifecycle entry + context** — moved up; the host for 2/3/4/5.
+  `src/extensions/context.ts` (`activate(ctx)` → register/onDispose/log/
+  services); both loaders call `activateExtension` and dispose on
+  swap/disable/delete. Battery: `activation context: register + dispose +
+  teardown`. Ambient module-scope registration still works (deprecating).
 - [ ] **2. Scheduler access** — as context methods (`poll`/`after`).
 - [ ] **3. Event subscription** — derived lifecycle + raw engine events, batched.
 - [ ] **4. Curated store facade + imperative subscribe.**

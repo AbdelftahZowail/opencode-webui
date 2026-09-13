@@ -3,79 +3,124 @@
  * webui-extensions/<name>/index.{ts,tsx}.
  *
  * Gating (spec §4) is owned by the folder itself: presence = installed.
- * Installing = drop the folder in here; removing = delete the folder. Both
- * re-run this module through HMR with a fresh loader set — no page reload.
- * Each entry must `export const id` and self-accept so its own EDITS
- * hot-swap live (same-id registry swap).
+ * Installing = drop the folder in here; removing = delete the folder.
  *
- * Deletion pruning is owned-delta only: this loader snapshots the registry
- * around each bundle import and records the id delta per folder, so
- * disable/delete unregisters exactly what the folder added (a multi-id
- * folder leaves no ghosts). It never touches the runtime loader's ids
- * (those belong to src/lib/runtimeExtensions.ts). The previous seen-set +
- * owned-delta map survive HMR re-runs via `import.meta.hot.data`.
+ * Lifecycle (roadmap 7): a folder may export `activate(ctx)` (or a default
+ * fn) and receive a disposable context — `ctx.register` remembers ids,
+ * `ctx.onDispose`/a returned teardown runs on hot-swap/delete. This loader
+ * calls the shared `activateExtension`, so shipped and external folders obey
+ * the exact same contract (only the transport differs), and it disposes the
+ * previous instance before activating a replaced module (HMR) or dropping a
+ * removed one. Ambient module-scope registration still works: the loader
+ * snapshots the registry around each import and records the owned id delta,
+ * so disable/delete unregisters exactly what the folder added (a multi-id
+ * folder leaves no ghosts) and never touches the runtime loader's ids.
  *
- * One-id-per-folder stays as guidance (simpler to reason about) but the
- * loader no longer depends on it (IN-3, G-F2/F4 remainder — IMPLEMENTED).
+ * The applied-instance map (module identity → instance) survives HMR re-runs
+ * via `import.meta.hot.data`; an unchanged module object is skipped, a new
+ * one is torn down + re-activated.
  */
 
 import { getRegisteredIds, unregisterIds } from "../src/extensions/registry";
+import { activateExtension, type ExtensionInstance } from "../src/extensions/context";
 
 const loaders = import.meta.glob("./*/index.{ts,tsx}");
 
-type HotData = { prevSeen?: string[]; prevOwned?: Record<string, string[]> };
+interface Applied {
+  /** The module object as imported last time — identity detects a swap. */
+  mod: object;
+  /** Registry ids this folder owns (activation context + import delta). */
+  owned: Set<string>;
+  instance: ExtensionInstance;
+}
+type HotData = { prevSeen?: string[]; applied?: Record<string, Applied> };
 
-async function discover() {
+async function discover(): Promise<void> {
   const hot = import.meta.hot?.data as HotData | undefined;
-  const owned = new Map<string, Set<string>>(
-    Object.entries(hot?.prevOwned ?? {}).map(([k, v]) => [k, new Set(v)]),
-  );
+  const applied = new Map<string, Applied>(Object.entries(hot?.applied ?? {}));
   const seen = new Set<string>();
   // Sequential (not Promise.all): each snapshot pair must attribute its
   // delta to exactly one folder's import.
   for (const load of Object.values(loaders)) {
-    const before = new Set(getRegisteredIds());
-    let mod: { id?: unknown } | undefined;
+    let mod: (object & { id?: unknown }) | undefined;
     try {
-      mod = (await (load as () => Promise<unknown>)()) as { id?: unknown } | undefined;
+      mod = (await (load as () => Promise<unknown>)()) as object & { id?: unknown };
     } catch {
       continue;
     }
     if (!mod || typeof mod.id !== "string") continue;
-    seen.add(mod.id);
+    const id = mod.id;
+    seen.add(id);
+
+    const prev = applied.get(id);
+    if (prev && prev.mod === mod) continue; // unchanged since the last run
+
+    // Changed (or first load): tear the previous instance down BEFORE the new
+    // one activates, so old ids can't collide with the new set.
+    if (prev) {
+      applied.delete(id);
+      prev.instance.dispose();
+      unregisterIds([...prev.owned]);
+    }
+    const before = new Set(getRegisteredIds());
+    const instance = await activateExtension(id, mod);
     const after = getRegisteredIds();
-    let set = owned.get(mod.id);
-    if (!set) {
-      set = new Set<string>();
-      owned.set(mod.id, set);
-    }
+    const owned = new Set<string>();
     for (const rid of after) {
-      if (!before.has(rid)) set.add(rid);
+      if (!before.has(rid)) owned.add(rid);
     }
+    applied.set(id, { mod, owned, instance });
   }
-  const prev = new Set<string>(hot?.prevSeen ?? []);
-  const gone = [...prev].filter((id) => !seen.has(id));
+
+  const prevSeen = new Set<string>(hot?.prevSeen ?? []);
+  const gone = [...prevSeen].filter((id) => !seen.has(id));
   if (gone.length > 0) {
     const toRemove = new Set<string>();
     for (const id of gone) {
-      const set = owned.get(id);
-      if (set && set.size > 0) {
-        for (const rid of set) toRemove.add(rid);
+      const rec = applied.get(id);
+      if (rec) {
+        rec.instance.dispose();
+        if (rec.owned.size > 0) {
+          for (const rid of rec.owned) toRemove.add(rid);
+        } else {
+          toRemove.add(id);
+        }
+        applied.delete(id);
       } else {
         toRemove.add(id);
       }
-      owned.delete(id);
     }
-    unregisterIds([...toRemove]);
+    if (toRemove.size > 0) unregisterIds([...toRemove]);
   }
+
   if (import.meta.hot) {
     (import.meta.hot.data as HotData).prevSeen = [...seen];
-    (import.meta.hot.data as HotData).prevOwned = Object.fromEntries(
-      [...owned].map(([k, v]) => [k, [...v]]),
-    );
+    (import.meta.hot.data as HotData).applied = Object.fromEntries(applied);
   }
 }
 
-void discover();
+/** Serialize discovery; a re-run requested mid-flight queues one more pass. */
+let running = false;
+let dirty = false;
+async function pump(): Promise<void> {
+  if (running) {
+    dirty = true;
+    return;
+  }
+  running = true;
+  do {
+    dirty = false;
+    await discover().catch(() => undefined);
+  } while (dirty);
+  running = false;
+}
 
-if (import.meta.hot) import.meta.hot.accept();
+void pump();
+
+if (import.meta.hot) {
+  import.meta.hot.accept();
+  // A child extension edit may bubble here rather than re-evaluate this
+  // module; re-run discovery so activate-based shipped extensions hot-swap
+  // (unchanged modules are skipped by identity, so this is cheap + idempotent).
+  import.meta.hot.on("vite:afterUpdate", () => void pump());
+}

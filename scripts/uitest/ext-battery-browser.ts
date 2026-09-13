@@ -32,6 +32,7 @@ import {
   unregisterIds,
 } from "../../src/extensions/registry";
 import { fireHooks } from "../../src/extensions/hooks";
+import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BAT_DIR = "/tmp/opencode/bat-browser";
@@ -574,6 +575,90 @@ function testUnregisterRestore(): void {
   }
 }
 
+async function testActivationContext(): Promise<void> {
+  const t0 = Date.now();
+  const label = "activation context: register + dispose + teardown";
+  const ids = ["bat-ctx-wrap", "bat-ctx-svc", "bat-ctx-throw"];
+  const target = "bat.target.ctx";
+  unregisterIds(ids);
+  try {
+    registerTarget(target, () => "CORE");
+    const order: string[] = [];
+    const inst = await activateExtension("bat-ctx", {
+      id: "bat-ctx",
+      activate(ctx: ExtensionContext) {
+        ctx.register({
+          kind: "wrap",
+          id: ids[0]!,
+          target,
+          render: (_p, next) => `W[${String(next())}]`,
+        });
+        ctx.register({ kind: "service", id: ids[1]!, service: "bat.svc.ctx", value: 7, precedence: 1 });
+        ctx.onDispose(() => order.push("first"));
+        ctx.onDispose(() => {
+          order.push("boom");
+          throw new Error("boom (battery dispose probe)");
+        });
+        ctx.onDispose(() => order.push("last"));
+        return () => order.push("returned");
+      },
+    });
+    if (!inst.activated) {
+      fail(label, `activated=false for a module with activate`, t0);
+      return;
+    }
+    if ((renderTarget(target, {}) as unknown) !== "W[CORE]" || getService("bat.svc.ctx") !== 7) {
+      fail(label, `ctx.register entries not live`, t0);
+      return;
+    }
+    inst.dispose();
+    if ((renderTarget(target, {}) as unknown) !== "CORE" || getService("bat.svc.ctx") !== undefined) {
+      fail(label, `owned ids not unregistered on dispose`, t0);
+      return;
+    }
+    // LIFO: returned teardown was registered last → runs first; the throwing
+    // disposer is isolated and does not strand the ones before it.
+    const expected = ["returned", "last", "boom", "first"].join(",");
+    if (order.join(",") !== expected) {
+      fail(label, `teardown order ${order.join(",")} (want ${expected})`, t0);
+      return;
+    }
+    inst.dispose(); // idempotent
+    if (order.join(",") !== expected) {
+      fail(label, `dispose not idempotent: ${order.join(",")}`, t0);
+      return;
+    }
+    // Ambient module → inert instance (the loader keeps its id-delta path).
+    const ambient = await activateExtension("bat-ambient", { id: "bat-ambient" });
+    if (ambient.activated || ambient.ownedIds.length > 0) {
+      fail(label, `ambient module not inert`, t0);
+      return;
+    }
+    // A throwing activate is isolated, and ids registered before the throw
+    // are still owned + pruned on dispose.
+    const crash = await activateExtension("bat-ctx-throw", {
+      activate(ctx: ExtensionContext) {
+        ctx.register({ kind: "wrap", id: ids[2]!, target, render: () => "THROWN" });
+        throw new Error("activate boom (battery probe)");
+      },
+    });
+    if (!crash.activated || (renderTarget(target, {}) as unknown) !== "THROWN") {
+      fail(label, `throwing activate not isolated (activated=${crash.activated})`, t0);
+      return;
+    }
+    crash.dispose();
+    if ((renderTarget(target, {}) as unknown) !== "CORE") {
+      fail(label, `throwing-activate owned id not pruned on dispose`, t0);
+      return;
+    }
+    pass(label, `ctx ids pruned; teardown LIFO + crash-isolated (${order.join("→")})`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    unregisterIds(ids);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -934,6 +1019,7 @@ async function main(): Promise<void> {
   testService();
   testSameIdSwap();
   testUnregisterRestore();
+  await testActivationContext();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();
