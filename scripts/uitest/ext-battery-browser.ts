@@ -34,6 +34,9 @@ import {
 import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
+import { publishEvent, subscribeEvents, flushEvents } from "../../src/lib/eventBus";
+import { handleEvent } from "../../src/store";
+import type { V2Event } from "../../src/api/events";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BAT_DIR = "/tmp/opencode/bat-browser";
@@ -701,6 +704,113 @@ async function testContextScheduler(): Promise<void> {
   }
 }
 
+async function testEventBus(): Promise<void> {
+  const t0 = Date.now();
+  const label = "event bus: exact + wildcard + unsubscribe + ctx.on disposal";
+  const got: string[] = [];
+  const unsubExact = subscribeEvents("tool.completed", (e) =>
+    got.push(`exact:${e.name}:${String((e.payload as { name?: string }).name)}`),
+  );
+  const unsubWild = subscribeEvents("*", (e) => got.push(`wild:${e.name}`));
+  try {
+    publishEvent("tool.completed", { sessionID: "s1", payload: { name: "read" } });
+    publishEvent("run.started", { sessionID: "s1", payload: {} });
+    await sleep(40);
+    const expected = ["exact:tool.completed:read", "wild:tool.completed", "wild:run.started"].join(",");
+    if (got.join(",") !== expected) {
+      fail(label, `dispatch ${got.join(",")} (want ${expected})`, t0);
+      return;
+    }
+    // Unsubscribe stops delivery.
+    unsubExact();
+    unsubWild();
+    const before = got.length;
+    publishEvent("tool.completed", { payload: { name: "again" } });
+    await sleep(40);
+    if (got.length !== before) {
+      fail(label, `unsubscribe leaked (${got.length - before} extra)`, t0);
+      return;
+    }
+    // Crash isolation: a throwing listener must not stop its peers.
+    let good = 0;
+    const unsubBoom = subscribeEvents("bat.boom", () => {
+      throw new Error("boom (battery bus probe)");
+    });
+    const unsubGood = subscribeEvents("bat.boom", () => {
+      good++;
+    });
+    publishEvent("bat.boom", { payload: {} });
+    await sleep(40);
+    unsubBoom();
+    unsubGood();
+    if (good !== 1) {
+      fail(label, `throwing listener not isolated (good=${good})`, t0);
+      return;
+    }
+    // ctx.on is removed when the extension instance is disposed.
+    let ctxGot = 0;
+    const inst = await activateExtension("bat-bus", {
+      activate(ctx: ExtensionContext) {
+        ctx.on("run.ended", () => {
+          ctxGot++;
+        });
+      },
+    });
+    publishEvent("run.ended", { payload: {} });
+    await sleep(40);
+    if (ctxGot !== 1) {
+      fail(label, `ctx.on did not receive (${ctxGot})`, t0);
+      return;
+    }
+    inst.dispose();
+    publishEvent("run.ended", { payload: {} });
+    await sleep(40);
+    if (ctxGot !== 1) {
+      fail(label, `ctx.on leaked after dispose (${ctxGot})`, t0);
+      return;
+    }
+    pass(label, `exact+wildcard ordered; unsubscribe + ctx disposal hold; crash-isolated`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    unsubExact();
+    unsubWild();
+  }
+}
+
+async function testStoreEventIntegration(): Promise<void> {
+  const t0 = Date.now();
+  const label = "store event integration: raw + derived (tool/run)";
+  const got: string[] = [];
+  const offs = [
+    subscribeEvents("session.tool.success", (e) => got.push(`raw:${e.name}`)),
+    subscribeEvents("tool.called", (e) => got.push(`called:${String((e.payload as { name?: string }).name)}`)),
+    subscribeEvents("tool.completed", (e) => got.push(`completed:${String((e.payload as { ok?: boolean }).ok)}`)),
+    subscribeEvents("run.started", () => got.push("run.started")),
+  ];
+  try {
+    const sid = "bat-store-evt";
+    const send = (id: string, created: number, type: string, data: Record<string, unknown>) =>
+      handleEvent({ id, created, type, data } as unknown as V2Event);
+    // Network-free cases only: tool events fire before the forLive gate, and
+    // `session.status busy` sets the running flag without a settle fetch.
+    send("bat-e1", 1, "session.tool.called", { sessionID: sid, assistantMessageID: "m1", id: "t1", name: "read", input: {} });
+    send("bat-e2", 2, "session.tool.success", { sessionID: sid, assistantMessageID: "m1", id: "t1", name: "read" });
+    send("bat-e3", 3, "session.status", { sessionID: sid, status: { type: "busy" } });
+    flushEvents();
+    const expected = ["called:read", "raw:session.tool.success", "completed:true", "run.started"].join(",");
+    if (got.join(",") !== expected) {
+      fail(label, `${got.join(",")} (want ${expected})`, t0);
+      return;
+    }
+    pass(label, `raw + derived ordered (${got.join(" → ")})`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    for (const off of offs) off();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -1063,6 +1173,8 @@ async function main(): Promise<void> {
   testUnregisterRestore();
   await testActivationContext();
   await testContextScheduler();
+  await testEventBus();
+  await testStoreEventIntegration();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();

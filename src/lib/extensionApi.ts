@@ -17,6 +17,8 @@
  *              bundles render with the same instance)
  *   api      — the typed engine client (one function per endpoint)
  *   store    — full app access: `useStore`, `getState`, and every action
+ *   events   — subscribe to the event bus by raw engine type or derived
+ *              lifecycle name (`subscribe`; `"*"` = all), frame-batched
  *   prefs    — user prefs (`getPrefs`/`setPref`/`subscribePrefs`)
  *   notify   — bottom-right toasts (3s)
  *   services — named logic (`getService`/`getServiceProviders`; doubles as
@@ -38,6 +40,7 @@ import { api } from "../api/client";
 import * as store from "../store";
 import { getPrefs, setPref, subscribePrefs } from "../prefs";
 import { notify } from "./notify";
+import { subscribeEvents } from "./eventBus";
 import {
   mountDomExtension,
   disposeDomExtension,
@@ -56,6 +59,7 @@ export interface ExtensionApi {
   react: typeof React;
   api: typeof api;
   store: typeof store;
+  events: { subscribe: typeof subscribeEvents };
   prefs: {
     getPrefs: typeof getPrefs;
     setPref: typeof setPref;
@@ -92,6 +96,7 @@ export function createExtensionApi(): ExtensionApi {
     react: React,
     api,
     store,
+    events: { subscribe: subscribeEvents },
     prefs: { getPrefs, setPref, subscribePrefs },
     notify,
     services: { getService, getServiceProviders },

@@ -33,6 +33,7 @@
 
 import { register, unregisterIds, getService, getServiceProviders, type ExtInput } from "./registry";
 import { registerPoller, type Tier } from "../lib/scheduler";
+import { subscribeEvents, type BusListener } from "../lib/eventBus";
 
 /** Teardown returned by an activation entry: a function, or nothing. */
 export type ActivateResult = void | (() => void) | Promise<void | (() => void)>;
@@ -77,6 +78,13 @@ export interface ExtensionContext {
    * "the scheduler owns recurring timers".)
    */
   after(ms: number, fn: () => void): () => void;
+  /**
+   * Subscribe to the extension event bus by name (a raw engine event type or
+   * a derived lifecycle name; `"*"` for all). Frame-batched, crash-isolated.
+   * Returns an idempotent unsubscribe; the subscription is also removed
+   * automatically on dispose.
+   */
+  on(name: string, handler: BusListener): () => void;
   /** Run `fn` on dispose (hot-swap, disable, delete). LIFO; crash-isolated. */
   onDispose(fn: () => void): void;
   /** Extension-scoped log line (prefixed with the id). */
@@ -158,6 +166,11 @@ function makeContext(id: string): {
       };
       disposers.push(cancel);
       return cancel;
+    },
+    on(name, handler) {
+      const unsub = subscribeEvents(name, handler);
+      disposers.push(unsub);
+      return unsub;
     },
     onDispose(fn) {
       disposers.push(fn);

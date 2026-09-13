@@ -14,6 +14,7 @@ import {
 import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { fireHooks } from "./extensions/hooks";
 import { log } from "./lib/log";
+import { publishEvent } from "./lib/eventBus";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import { getPrefs } from "./prefs";
 import type {
@@ -447,8 +448,36 @@ const listeners = new Set<() => void>();
 let stateBatchDepth = 0;
 let stateBatchPending = false;
 
+/**
+ * Run lifecycle reason for the derived `run.ended` event. The terminal engine
+ * case (execution.succeeded/failed/interrupted, status/session idle) records
+ * the reason just before the state update that clears `running`; the
+ * transition watcher below consumes it (falling back to "idle").
+ */
+const runEndReasons = new Map<string, string>();
+
+/** Publish derived run.started / run.ended on `running` slice transitions. */
+function emitRunTransitions(prev: State, next: State) {
+  const ids = new Set([...Object.keys(prev.running), ...Object.keys(next.running)]);
+  for (const sessionID of ids) {
+    const was = !!prev.running[sessionID];
+    const is = !!next.running[sessionID];
+    if (was === is) continue;
+    if (is) {
+      runEndReasons.delete(sessionID);
+      publishEvent("run.started", { sessionID, payload: { sessionID } });
+    } else {
+      const reason = runEndReasons.get(sessionID) ?? "idle";
+      runEndReasons.delete(sessionID);
+      publishEvent("run.ended", { sessionID, payload: { sessionID, reason } });
+    }
+  }
+}
+
 function setState(patch: Partial<State>) {
+  const prev = state;
   state = { ...state, ...patch };
+  emitRunTransitions(prev, state);
   // Store middleware (spec §5.1 + §11 step 2): every action flows through
   // here, so `store.dispatch` hooks observe every mutation. Fire-and-forget —
   // setState stays synchronous; handlers are crash-isolated in fireHooks.
@@ -1355,7 +1384,19 @@ function mergeFetchedMessages(sessionID: string, history: MessageInfo[]): Messag
 
 function applyFetchedMessages(sessionID: string, history: MessageInfo[]) {
   hydrateLiveFromHistory(sessionID, history);
+  const prevIDs = new Set((state.messages[sessionID] ?? []).map((m) => m.id));
   const merged = mergeFetchedMessages(sessionID, history);
+  // Derived lifecycle (roadmap 3): every message that first becomes visible in
+  // this session's transcript. Fires for a batch on session adopt (correct —
+  // those messages did get appended) and once per new turn thereafter.
+  for (const m of merged) {
+    if (!prevIDs.has(m.id)) {
+      publishEvent("message.appended", {
+        sessionID,
+        payload: { sessionID, messageID: m.id, type: m.type },
+      });
+    }
+  }
   if (!isPaneSession(sessionID)) {
     // Background (unmounted) session: merge the transcript AND retire its
     // live entries — settled ones (persisted completed) and ghosts (never
@@ -1978,6 +2019,11 @@ export function handleEvent(event: V2Event) {
     log("gate", `${type} for non-pane session ${eventSessionID} — tracked via shouldTrackLive`);
   }
 
+  // Event bus (roadmap 3): every deduped engine event is observable under its
+  // own type. Raw consumers subscribe by exact type (or "*"); derived
+  // lifecycle events are published where core already knows them.
+  publishEvent(type, { sessionID: eventSessionID, payload: data, created: event.created });
+
   switch (type) {
     case "session.created":
     case "session.renamed":
@@ -2163,6 +2209,7 @@ export function handleEvent(event: V2Event) {
     case "session.execution.failed":
     case "session.execution.interrupted": {
       log("run", `finished ${data.sessionID} (${type})`);
+      runEndReasons.set(data.sessionID, type);
       if (type === "session.execution.succeeded") {
         clearRunNotices(data.sessionID);
       } else {
@@ -2319,6 +2366,17 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.called":
+      publishEvent("tool.called", {
+        sessionID: data.sessionID,
+        created: event.created,
+        payload: {
+          sessionID: data.sessionID,
+          assistantMessageID: data.assistantMessageID,
+          id: data.id,
+          name: data.name,
+          input: data.input,
+        },
+      });
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         const tool = ensureLiveTool(data.sessionID, data.assistantMessageID, data.id);
         patchLiveTool(data.assistantMessageID, data.id, {
@@ -2337,6 +2395,17 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.success":
+      publishEvent("tool.completed", {
+        sessionID: data.sessionID,
+        created: event.created,
+        payload: {
+          sessionID: data.sessionID,
+          assistantMessageID: data.assistantMessageID,
+          id: data.id,
+          name: data.name,
+          ok: true,
+        },
+      });
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         promoteRunning(data.sessionID);
         patchLiveTool(data.assistantMessageID, data.id, {
@@ -2350,6 +2419,17 @@ export function handleEvent(event: V2Event) {
       }
       break;
     case "session.tool.failed":
+      publishEvent("tool.completed", {
+        sessionID: data.sessionID,
+        created: event.created,
+        payload: {
+          sessionID: data.sessionID,
+          assistantMessageID: data.assistantMessageID,
+          id: data.id,
+          name: data.name,
+          ok: false,
+        },
+      });
       if (forLive(data.sessionID) && data.assistantMessageID && data.id) {
         patchLiveTool(data.assistantMessageID, data.id, {
           ...(typeof data.name === "string" ? { name: data.name } : {}),
@@ -2368,11 +2448,13 @@ export function handleEvent(event: V2Event) {
       if (status === "busy") {
         setState({ running: { ...state.running, [data.sessionID]: true }, queued: { ...state.queued, [data.sessionID]: false } });
       } else if (status === "idle") {
+        runEndReasons.set(data.sessionID, "idle");
         settleRun(data.sessionID);
       }
       break;
     }
     case "session.idle":
+      runEndReasons.set(data.sessionID, "idle");
       settleRun(data.sessionID);
       break;
 

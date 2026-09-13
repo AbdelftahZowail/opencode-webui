@@ -125,8 +125,8 @@ must never touch streaming output can rely on the distinction structurally.
 - **Runtime code uses the bridge only.** External (user/project-dir) bundles
   are built standalone: `import type` from `src/` is erased at build and
   safe, but any *runtime* `src/` import breaks the copy outside the repo.
-  Use `window.__opencodeUI` (`register`, `react`, `api`, `store`, `prefs`,
-  `notify`, `services`, `dom`, `kv`) — shipped code consumes the identical
+  Use `window.__opencodeUI` (`register`, `react`, `api`, `store`, `events`,
+  `prefs`, `notify`, `services`, `dom`, `kv`) — shipped code consumes the identical
   surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
   tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
@@ -155,6 +155,9 @@ export function activate(ctx) {
   owner). Returns an idempotent stop; stopped automatically on dispose.
 - `ctx.after(ms, fn)` — one-shot delay; returns an idempotent cancel; cleared
   automatically on dispose.
+- `ctx.on(name, handler)` — subscribe to the event bus (raw engine type or
+  derived lifecycle name; `"*"` = all). Returns an unsubscribe; removed
+  automatically on dispose. See **Events (observe)** below.
 - `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
   `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
   non-React cleanup belongs — no `window.__*Installed` guards.
@@ -166,6 +169,34 @@ registry id-delta), but it is the shape being deprecated: nothing outside the
 module can dispose what the module did, so `disabled`/delete/hot-swap can't
 tear down listeners or timers it started. New extensions write `activate`.
 The DOM stratum already has this contract (`mount` returns a cleanup fn).
+
+### Events (observe)
+
+`ctx.on(name, handler)` (or the bridge's `events.subscribe`) observes what
+happened without diffing store snapshots. Two families share one channel:
+
+- **Raw engine events** — every event the store reduces, under its engine
+  `type` (`session.tool.success`, `session.text.delta`, `permission.asked`,
+  `session.idle`, …). Payload is the event's `data`.
+- **Derived lifecycle events** — core computes these so you don't infer them:
+  `run.started` `{sessionID}` · `run.ended` `{sessionID,reason}` ·
+  `tool.called` `{sessionID,assistantMessageID,id,name,input?}` ·
+  `tool.completed` `{sessionID,assistantMessageID,id,name?,ok}` ·
+  `message.appended` `{sessionID,messageID,type}`.
+
+```tsx
+ctx.on("tool.completed", (e) => {
+  const { name, ok } = e.payload;
+  usage[name] = (usage[name] ?? 0) + (ok ? 1 : 0);
+});
+ctx.on("run.ended", () => notify({ title: "Run finished" }));
+```
+
+Delivery is frame-batched (16ms) so a token burst is one dispatch per frame.
+`"*"` receives everything (diagnostics/analytics — it is per-event, so filter).
+Listeners are crash-isolated; the subscription is disposed with the
+extension. The bus is notification-only: it never mutates state and
+extensions cannot publish.
 
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
@@ -435,6 +466,8 @@ Everything the app can — shipped extensions are the same build:
 
 - `useStore` / store actions from `src/store.ts`
 - `api` from `src/api/client.ts` (every endpoint fires `api.pre/post/error`)
+- the event bus (`ctx.on` / `events.subscribe`) — raw engine events + derived
+  lifecycle events, frame-batched
 - `getService` / services from `src/extensions/registry.tsx`
 - UI primitives from `src/components/ui/` (shadcn) — always build on these
   so extensions look native
@@ -442,8 +475,8 @@ Everything the app can — shipped extensions are the same build:
 - Toaster via the extension API surface (`notify`)
 
 External (user/project-dir) extensions use the one extension API surface
-(`register`, `react`, `api`, `store`, `prefs`, `notify`, `services`, `dom`
-kit, `kv`) — used identically by our shipped ones.
+(`register`, `react`, `api`, `store`, `events`, `prefs`, `notify`, `services`,
+`dom` kit, `kv`) — used identically by our shipped ones.
 
 ## Hot reload guarantees
 

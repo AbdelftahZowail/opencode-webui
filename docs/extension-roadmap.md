@@ -214,7 +214,11 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
 - [x] **2. Scheduler access** — as context methods (`poll`/`after`); tier-aware
   recurring pollers via the shared scheduler, one-shot delays auto-cleared.
   Battery: `context scheduler: poll + after, disposed on teardown`.
-- [ ] **3. Event subscription** — derived lifecycle + raw engine events, batched.
+- [x] **3. Event subscription** — `src/lib/eventBus.ts`: raw engine events by
+  `type` + derived `run.started/ended`, `tool.called/completed`,
+  `message.appended`; `"*"` wildcard; frame-batched, crash-isolated.
+  `ctx.on` / bridge `events.subscribe`, disposed with the extension.
+  Battery: `event bus: …` + `store event integration: raw + derived (tool/run)`.
 - [ ] **4. Curated store facade + imperative subscribe.**
 - [ ] **5. Per-extension settings** — manifest-declared schema.
 - [ ] **8. Manifest `requires` + capability diagnostics.**
