@@ -44,7 +44,7 @@ and are intentionally excluded from `scripts/diff-openapi.ts`.
 
 | Endpoint | Served by | Purpose |
 | --- | --- | --- |
-| `GET /api/webui/extensions` → `{ data: [{ id, url, source }], version }` | `server/index.ts` via `server/userExtensions.ts` discovery | Extension manifest: one loader, three sources (user → project → shipped); folder presence + manifest `disabled` is the only gating |
+| `GET /api/webui/extensions` → `{ data: [{ id, source, origin?, name?, description?, url?, domUrl?, disabled?, settings?, requires?, capabilities? }], version }` | `server/index.ts` via `server/userExtensions.ts` discovery | Extension manifest: one loader, three sources (user → project → shipped); folder presence + manifest `disabled` is the only gating; carries declared settings/`requires` through for the Settings card |
 | `GET /api/webui/extensions/events` (SSE) | `server/index.ts` manifest listeners | Manifest push channel: one `{ type: "webui.extensions", version }` event per change + hello on subscribe; the page re-fetches the manifest and same-id-swaps bundles (replaces the old 8s poll) |
 | `GET /api/webui/extensions/{id}/bundle.js?v=mtime` | `server/index.ts` via `Bun.build` | Per-extension browser bundle (`index.tsx` entry), ESM cache-busted on the query so hot edits repaint live with no refresh |
 | `/api/webui/ext/<id>/…` | `server/ext/registry.ts` `dispatchExtRequest` | Proxy-stratum `server.ts` routes, auto-mounted and namespaced per extension (unknown id/route never falls through to the engine) |
@@ -53,13 +53,18 @@ and are intentionally excluded from `scripts/diff-openapi.ts`.
 | `POST /api/webui/settings/restart` | `server/index.ts` + `server/setup.ts` | Detached restart (stop self + start new) so config changes apply |
 
 Loader behavior: user dir → project dir → shipped dir precedence (same id =
-same swap point, higher wins); `manifest.json` `{ id?, disabled? }`;
+same swap point, higher wins); `manifest.json` `{ id?, name?, description?,
+disabled?, settings?, requires?, capabilities? }`;
 browser entry candidates `index.tsx`/`index.ts`/`main.tsx`/`main.ts`
 (legacy `main.tsx`-only folders still load); `server.ts` modules stat-polled
 (2s) and cache-busted re-imported with pollers stopped before swap; `/api/*`
 passthrough wrapped by `onRequest`/`onResponse` middleware; the recorder's
 always-on engine subscription tapped via `onEvent` (headless, survives closed
-tabs); per-extension persistent KV (`server/ext/kv.ts`).
+tabs); per-extension persistent KV (`server/ext/kv.ts`). Browser side:
+declared settings resolve/persist per id (`src/lib/extSettings.ts` via `extKv`)
+and are schema-rendered in Settings › Extensions; unmet `requires` and
+malformed schema shapes surface as visible diagnostics
+(`src/lib/extensionDiagnostics.ts`).
 
 ## Client-only — valid routes, no dedicated UI (by decision)
 

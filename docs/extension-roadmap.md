@@ -1,9 +1,9 @@
 # Extension system roadmap — the next seams
 
-> **Status:** proposal, not a spec. This doc says *why* and *what*; the agent
-> implementing an item owns *how*, within the rules below. If a design here
-> conflicts with the extension-system spec, the spec wins and this doc gets
-> updated.
+> **Status:** items 1–9 **landed** in `EXT_API_VERSION` 2 / release 3.0.0 (see
+> Implementation progress below); item 10 remains as-demand. This doc says
+> *why* and *what*; if a design here conflicts with the extension-system spec,
+> the spec wins and this doc gets updated.
 
 ## Why this exists
 

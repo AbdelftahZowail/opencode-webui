@@ -62,7 +62,11 @@ extension code is not sandboxed (same model as host plugins).
 > browser loader + manifest SSE, proxy-stratum mounts, `dom.ts` loader wiring
 > + `data-oc-*` stamping, core self-registration, and the `ui-extensions/` →
 > `webui-extensions/` rename are landed (`docs/extension-system-spec.md` §11).
-> The contract below is what that work converged on — write to it.
+> The **roadmap seams are landed too** (`docs/extension-roadmap.md` items 1–9,
+> `EXT_API_VERSION` 2): prop-transforming wraps, the activation context +
+> disposal, scheduler access, the event bus, the curated store facade,
+> declared settings, thin slots, manifest `requires` diagnostics, and peer
+> composition. The contract below is what that work converged on — write to it.
 
 ## Choosing a stratum (framing rule)
 

@@ -52,8 +52,16 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
 | `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip`, `PendingRequestsPanel`, `ui` (primitives) |
 | `src/extensions/registry.tsx` | The extension registry (v2 contract: kinds, target chains, collections, services, hooks — do not change lightly) |
+| `src/extensions/context.ts` | Activation lifecycle: `activate(ctx)` entry + disposal; the `ctx` surface (poll/after/on/subscribe/store/settings/collections/bus) |
+| `src/extensions/manifest.ts` | Manifest contract: `settings` schema + `requires` parse/resolve/check |
+| `src/extensions/slots.tsx` | Thin slots: `SLOT_IDS` + the `<Slot>` placement renderer (`data-oc-slot`) |
 | `src/extensions/hooks.ts` | Shared `fireHooks` runner for `kind:"hook"` extensions (open event strings) |
 | `src/lib/domKit.ts` | DOM-stratum kit (`foreign`/`watch`/`styles`, mount/dispose, `data-oc-*` anchors) |
+| `src/lib/eventBus.ts` | The extension event bus (raw engine events + derived lifecycle), frame-batched |
+| `src/lib/storeFacade.ts` | The curated store surface extensions get as `store` (raw module = `advanced.store`) |
+| `src/lib/extSettings.ts` | Per-extension declared settings: schema registry, resolve, persist, subscribe |
+| `src/lib/extBus.ts` | Extension-to-extension peer bus (`publish`/`subscribe`, many-to-many) |
+| `src/lib/extensionApi.ts` | The ONE extension API surface (bridge): `window.__opencodeUI` / `getExtensionApi()` + `EXT_API_VERSION` |
 | `src/lib/runtimeExtensions.ts` | Browser loader client: manifest fetch + SSE push, bundle import, same-id swap |
 | `server/ext/` | Proxy-stratum loader + mount points (`routes`, `middleware`, `onEvent`, `pollers`, KV) |
 | `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
@@ -259,7 +267,7 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check).
 - `bun run scripts/uitest/ext-battery-browser.ts` (+ `-dom`, `-proxy`,
-  `-acceptance`) — the extension-system E2E battery, 65 checks total; the
+  `-acceptance`) — the extension-system E2E battery, 76 checks total; the
   release gate for anything touching extensions (see Release checklist).
 
 ## Release checklist (push + publish — do every step, in order)

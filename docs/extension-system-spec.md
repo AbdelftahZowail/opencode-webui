@@ -220,8 +220,13 @@ Removed outright, no aliases, no deprecation period:
 - Per-browser localStorage extension gating.
 - The 8s extension poll (→ SSE manifest push).
 - The narrow `window.__opencodeUI` bridge → **one extension API surface**
-  (`register`, `react`, `api`, `store`, `prefs`, `notify`, `services`, `dom` kit,
-  `kv`) used identically by external extensions and our shipped ones.
+  (`register`, `react`, `api`, `store` [the curated facade; the raw store
+  module is `advanced.store`], `events`, `settings`, `collections`, `bus`,
+  `prefs`, `notify`, `services`, `dom` kit, `kv`) used identically by external
+  extensions and our shipped ones. (The later roadmap program —
+  `docs/extension-roadmap.md` — widened this surface to `EXT_API_VERSION` 2;
+  the activation context adds `poll`/`after`/`on`/`subscribe`/`settings`/
+  `collections`/`bus`/`onDispose`.)
 - Repo folder `ui-extensions/` renamed to `webui-extensions/` (naming parity with the
   user/project dirs).
 

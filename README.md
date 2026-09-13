@@ -22,8 +22,8 @@ First boot prints the URL and a generated password — **shown once**:
               generated for this install — shown once
               set WEBUI_PASSWORD to choose your own
   sessions    the same ones as your opencode TUI — same engine, same history
-  extensions  ~/.config/opencode/webui-extensions/<name>/main.tsx   per-user
-              <project>/.opencode/webui-extensions/<name>/main.tsx  per-project
+  extensions  ~/.config/opencode/webui-extensions/<name>/index.tsx   per-user
+              <project>/.opencode/webui-extensions/<name>/index.tsx  per-project
   skill       agent skill synced to ~/.config/opencode/skills/webui/ — your agent knows this UI exists
 ```
 
@@ -159,8 +159,8 @@ One extension = one folder, dropped in — no rebuild, no restart:
 
 ```
 my-extension/
-  manifest.json    id, version, description, disabled?
-  index.tsx        browser stratum (wrap / replace / contribute / hook / service)
+  manifest.json    id, version, description; optional disabled, settings, requires
+  index.tsx        browser stratum: register() and/or activate(ctx)
   dom.ts           DOM stratum (portals, canvas, post-render tweaks)
   server.ts        proxy stratum (routes, middleware, event tap, pollers)
   engine/          opencode plugin payload (model tools, prompt hints)
@@ -170,9 +170,10 @@ Presence = installed, `disabled: true` = paused, delete = uninstalled; a
 higher-precedence folder with the same id shadows the shipped one, so user
 customizations survive core updates with no forks. Hot reload everywhere:
 browser edits repaint live via the manifest SSE push, proxy edits reload
-with no restart. The full authoring guide — the five kinds, hook catalog,
-DOM kit, `server.ts` mounts, precedence, and the timestamp worked example —
-is [webui-extensions/README.md](webui-extensions/README.md).
+with no restart. The full authoring guide — the five kinds, the activation
+context, the event bus, declared settings + `requires`, slots, peer
+composition, the DOM kit, `server.ts` mounts, precedence, and the timestamp
+worked example — is [webui-extensions/README.md](webui-extensions/README.md).
 
 The built-in `/report` command files a prefilled GitHub issue with a diagnostics
 bundle (build version, enabled extensions, error ring); `--agent` hands it to the
