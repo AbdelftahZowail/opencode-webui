@@ -677,6 +677,10 @@ const apiRaw = {
     const res = await request<{ location: unknown; data: ModelInfo[] }>("/api/model");
     return res.data;
   },
+  modelDefault: async () => {
+    const res = await request<{ location: unknown; data: ModelInfo | null }>("/api/model/default");
+    return res.data;
+  },
   agents: async () => {
     const res = await request<{ location: unknown; data: AgentInfo[] }>("/api/agent");
     return res.data;

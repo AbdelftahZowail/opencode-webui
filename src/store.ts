@@ -1623,14 +1623,27 @@ export async function loadSessionDetail(sessionID: string) {
 let defaultModelPromise: Promise<ModelRef | undefined> | null = null;
 
 /**
- * The model the UI considers the default: the primary agent's pinned model
- * (usually `build`). New sessions are created with model:null and the service
- * silently resolves its OWN default at run time (which may differ — e.g. a
- * rate-limited provider). We pin the session to this model so what the picker
- * shows is exactly what executes.
+ * The model the UI considers the default: the engine's own resolution for a
+ * session with no explicit selection (`GET /api/model/default` — the
+ * configured `model` when it is enabled and its provider is available, else
+ * the newest available supported model). This is the SAME answer the TUI and
+ * every model-less session get at run time, so the picker and the engine
+ * agree. New sessions are created WITH this model (the service otherwise
+ * resolves its own default at run time, which can drift — e.g. a rate-limited
+ * provider), and legacy unpinned sessions get pinned on first send
+ * (`ensureSessionModel`).
+ *
+ * Only if that endpoint is unavailable or returns null do we fall back to the
+ * primary agent's pinned model, then the first enabled catalog model.
  */
 export function resolveDefaultModel(): Promise<ModelRef | undefined> {
   defaultModelPromise ??= (async () => {
+    try {
+      const def = await api.modelDefault();
+      if (def) return { id: def.modelID, providerID: def.providerID };
+    } catch {
+      /* fall through */
+    }
     try {
       const agents = await api.agents();
       const primary = agents.find((a) => a.mode === "primary" && !a.hidden);

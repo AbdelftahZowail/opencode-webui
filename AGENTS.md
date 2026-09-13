@@ -83,11 +83,14 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   engine inbox entry rendered by `QueueStrip` — ⚡ steer (next LLM-call
   boundary, Enter) vs ⏳ queue (parked until turn end, Ctrl/Cmd+Enter).
   Rows can be flipped, deleted, or sent now.
-- **Model pinning**: new sessions are created WITH the resolved default
-  (`resolveDefaultModel()` passed into `POST /session`); legacy unpinned
-  sessions get pinned on first send (`ensureSessionModel`). The pickers
-  read the authoritative `GET /api/session/{id}` from the `sessionDetails`
-  store slice.
+- **Model pinning**: `resolveDefaultModel()` asks the engine for its own
+  default (`GET /api/model/default` — configured `model` when available, else
+  newest supported) so the webui matches the TUI; it falls back to the primary
+  agent's model, then the first enabled catalog model, only if that call fails
+  or returns null. New sessions are created WITH that model (`POST /session`);
+  legacy unpinned sessions get pinned on first send (`ensureSessionModel`). The
+  pickers read the authoritative `GET /api/session/{id}` from the
+  `sessionDetails` store slice.
 - **Esc** interrupts the active run site-wide in TWO steps
   (`requestInterrupt`): first press arms (yellow hint, self-reverts after
   2.5s), second press aborts. Esc yields to the focused composer and to
