@@ -11,9 +11,20 @@ import { Spinner } from "../ui";
 import { registerPoller } from "../../lib/scheduler";
 import { useIsPhone } from "../../hooks/useIsPhone";
 import { getContributions, subscribeRegistry, type SettingsContribution } from "../../extensions/registry";
+import { parseManifestContract, type SettingField } from "../../extensions/manifest";
+import {
+  registerExtensionSchema,
+  resolvedExtensionSettings,
+  setExtensionSetting,
+  subscribeExtensionSettings,
+} from "../../lib/extSettings";
+import {
+  getExtensionDiagnostics,
+  subscribeExtensionDiagnostics,
+} from "../../lib/extensionDiagnostics";
 import { AccessSection } from "./AccessSection";
 import { AppSection } from "./AppSection";
-import { Empty, SectionHeader } from "./shared";
+import { Empty, SectionHeader, inputCls } from "./shared";
 
 let openRequest: ((section?: string) => void) | null = null;
 
@@ -176,6 +187,12 @@ interface RuntimeExtensionInfo {
   /** manifest.json display fields. */
   name?: string;
   description?: string;
+  /** manifest.json `settings` — the declared schema (roadmap 5). */
+  settings?: unknown;
+  /** manifest.json `requires` — the checkable contract (roadmap 8). */
+  requires?: unknown;
+  /** manifest.json `capabilities` — declared metadata (roadmap 8). */
+  capabilities?: unknown;
   /** manifest.json `disabled: true` — paused, never bundled or imported. */
   disabled?: boolean;
 }
@@ -189,6 +206,138 @@ function useRegistryVersion(): number {
   const [version, setVersion] = useState(0);
   useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
   return version;
+}
+
+/** One control for a manifest-declared setting, bound to the per-id store. */
+function SettingFieldControl({
+  id,
+  field,
+  value,
+}: {
+  id: string;
+  field: SettingField;
+  value: unknown;
+}) {
+  if (field.type === "boolean") {
+    return (
+      <Switch
+        checked={value === true}
+        onCheckedChange={(checked) => setExtensionSetting(id, field.key, checked)}
+      />
+    );
+  }
+  if (field.type === "enum") {
+    return (
+      <select
+        className={inputCls}
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => setExtensionSetting(id, field.key, e.target.value)}
+      >
+        {field.options?.map((opt) => (
+          <option key={opt} value={opt}>
+            {opt}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (field.type === "number") {
+    return (
+      <div className="w-28">
+        <input
+          type="number"
+          className={inputCls}
+          value={typeof value === "number" ? value : ""}
+          min={field.min}
+          max={field.max}
+          step={field.step}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) setExtensionSetting(id, field.key, n);
+          }}
+        />
+      </div>
+    );
+  }
+  return (
+    <input
+      className={inputCls}
+      value={typeof value === "string" ? value : ""}
+      placeholder={field.placeholder}
+      onChange={(e) => setExtensionSetting(id, field.key, e.target.value)}
+    />
+  );
+}
+
+/**
+ * Manifest-declared settings for one extension (roadmap 5): core renders the
+ * declared schema — the extension ships no settings component or storage.
+ * Re-renders on value changes; writes go through the per-id settings store.
+ */
+function DeclaredSettingsFields({ id, rawSchema }: { id: string; rawSchema: unknown }) {
+  const schema = useMemo(
+    () => parseManifestContract(rawSchema, undefined).settings ?? [],
+    [rawSchema],
+  );
+  const [, force] = useState(0);
+  useEffect(() => {
+    // Mirror the schema into the registry the extension reads, so ctx.settings
+    // resolves the same defaults even before the browser loader syncs it.
+    if (schema.length > 0) registerExtensionSchema(id, schema);
+  }, [id, schema]);
+  useEffect(() => subscribeExtensionSettings(id, () => force((v) => v + 1)), [id]);
+  if (schema.length === 0) return null;
+  const values = resolvedExtensionSettings(id);
+  return (
+    <div className="space-y-2">
+      {schema.map((field) => (
+        <div key={field.key} className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[12px] text-[var(--text-strong)]">{field.title}</div>
+            {field.description && (
+              <p className="mt-0.5 text-[11px] text-[var(--text-weaker)]">{field.description}</p>
+            )}
+          </div>
+          <div className="shrink-0">
+            <SettingFieldControl id={id} field={field} value={values[field.key]} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Declared `requires` + live diagnostics for one extension (roadmap 8): a
+ * reference that can't be satisfied is a visible, actionable line instead of a
+ * silently blank spot.
+ */
+function ExtensionContract({ info }: { info: RuntimeExtensionInfo }) {
+  const [, force] = useState(0);
+  useEffect(() => subscribeExtensionDiagnostics(() => force((v) => v + 1)), []);
+  const diagnostics = getExtensionDiagnostics(info.id);
+  const requires = useMemo(
+    () => parseManifestContract(undefined, info.requires).requires,
+    [info.requires],
+  );
+  const bits: string[] = [];
+  if (requires?.api !== undefined) bits.push(`api v${requires.api}`);
+  if (requires?.targets?.length) bits.push(`targets: ${requires.targets.join(", ")}`);
+  if (requires?.slots?.length) bits.push(`slots: ${requires.slots.join(", ")}`);
+  if (requires?.services?.length) bits.push(`services: ${requires.services.join(", ")}`);
+  if (bits.length === 0 && diagnostics.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {bits.length > 0 && (
+        <p className="font-mono text-[10px] text-[var(--text-weaker)]">requires {bits.join(" · ")}</p>
+      )}
+      {diagnostics.map((d, i) => (
+        <p key={i} className="text-[11px] text-[var(--surface-warning-strong)]">
+          ⚠ {d.message}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -333,10 +482,14 @@ function ExtensionsSection() {
                   </div>
                 </div>
 
-                {sections.length > 0 && (
+                {(sections.length > 0 ||
+                  (Array.isArray(item.settings) && item.settings.length > 0) ||
+                  item.requires !== undefined) && (
                   // Each extension's own settings live INSIDE its card — the
                   // switch and its options read as one unit.
                   <div className="mt-2.5 space-y-2 border-t border-[var(--border-weak-base)] pt-2.5">
+                    <DeclaredSettingsFields id={item.id} rawSchema={item.settings} />
+                    <ExtensionContract info={item} />
                     {sections.map((section) => (
                       // Key includes the registry version: a hot-swapped
                       // registration remounts with a FRESH error boundary

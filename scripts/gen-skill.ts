@@ -116,6 +116,8 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | --- | --- |
 | ${RAW("webui-extensions/README.md")} | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
 | ${RAW("src/extensions/registry.tsx")} | The extension registry — exact register() shapes per kind |
+| ${RAW("src/extensions/slots.tsx")} | Slot ids (placement contract) + the Slot renderer |
+| ${RAW("src/extensions/manifest.ts")} | Manifest contract — settings schema + requires parsing/checks |
 | ${RAW("src/extensions/hooks.ts")} | Shared fireHooks runner — how open hook events fire |
 | ${RAW("src/lib/domKit.ts")} | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
 | ${RAW("server/ext/types.ts")} | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
@@ -168,8 +170,9 @@ dir, never reuse a port.
 ## The model in one minute
 
 One extension = **one folder**: \`manifest.json\` (id, version, description,
-\`disabled\`?) + \`index.tsx\` (browser stratum) + \`dom.ts\` (DOM stratum) +
-\`server.ts\` (proxy stratum) + \`engine/\` (opencode plugin payload).
+\`disabled\`?, \`settings\`?, \`requires\`?) + \`index.tsx\` (browser stratum) +
+\`dom.ts\` (DOM stratum) + \`server.ts\` (proxy stratum) + \`engine/\` (opencode
+plugin payload).
 Presence = installed; \`disabled: true\` = paused; delete the folder =
 uninstalled. Precedence, highest wins: \`~/.config/opencode/webui-extensions/\`
 (user) → \`<project>/.opencode/webui-extensions/\` (project) → shipped
@@ -210,7 +213,10 @@ ${kindTable}
 Contribute collections (registry-owned lists — data, not new kinds):
 \`palette\`, \`slash\` (UI-only; engine commands win name clashes),
 \`pages\` (routed at \`/ext/{id}\`), \`settings\`,
-\`contextMenu.message\` / \`contextMenu.session\` / \`contextMenu.file\`.
+\`contextMenu.message\` / \`contextMenu.session\` / \`contextMenu.file\`, and
+\`slot:<id>\` (named placement points — \`conversation.header.actions\`,
+\`conversation.empty\`, \`composer.above\`, \`composer.actions\`,
+\`sidebar.header.actions\`).
 
 ### Hook catalog
 

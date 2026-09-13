@@ -40,6 +40,8 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | --- | --- |
 | https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
 | https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
 | https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
 | https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
 | https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v2.5.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
@@ -92,8 +94,9 @@ dir, never reuse a port.
 ## The model in one minute
 
 One extension = **one folder**: `manifest.json` (id, version, description,
-`disabled`?) + `index.tsx` (browser stratum) + `dom.ts` (DOM stratum) +
-`server.ts` (proxy stratum) + `engine/` (opencode plugin payload).
+`disabled`?, `settings`?, `requires`?) + `index.tsx` (browser stratum) +
+`dom.ts` (DOM stratum) + `server.ts` (proxy stratum) + `engine/` (opencode
+plugin payload).
 Presence = installed; `disabled: true` = paused; delete the folder =
 uninstalled. Precedence, highest wins: `~/.config/opencode/webui-extensions/`
 (user) → `<project>/.opencode/webui-extensions/` (project) → shipped
@@ -131,7 +134,7 @@ register({
 
 | Kind | Job | Staleness |
 | --- | --- | --- |
-| `wrap` | Flow-through tweak of any registered target: `render(props, next)` — transform props/output, delegate to live core by default | **Stale-proof by construction.** Core updates always render *through* it. The default path for edits. |
+| `wrap` | Flow-through tweak of any registered target: `render(props, next)` — transform output, and/or call `next(overrides)` to merge changed/extra props into the rest of the chain, delegating to live core by default | **Stale-proof by construction.** Core updates always render *through* it. The default path for edits. |
 | `replace` | Take ownership of one registered target: `render(props, core)` wins outright at its priority; return `null` to fall through to the next candidate / core | **Frozen snapshot.** You opt out of core updates for that target — the marked escape hatch. Still receives `core` so you *can* compose. |
 | `contribute` | Add an item to a named collection (`collection` + `item`, `order` sorts, lower first) | Data, not code — core owns the list, you own your row. |
 | `hook` | Interception at instrumented boundaries: `{ event, handler(ctx, next) }` — `event` is an open string | New seams are new event names, never a registry change. |
@@ -140,7 +143,10 @@ register({
 Contribute collections (registry-owned lists — data, not new kinds):
 `palette`, `slash` (UI-only; engine commands win name clashes),
 `pages` (routed at `/ext/{id}`), `settings`,
-`contextMenu.message` / `contextMenu.session` / `contextMenu.file`.
+`contextMenu.message` / `contextMenu.session` / `contextMenu.file`, and
+`slot:<id>` (named placement points — `conversation.header.actions`,
+`conversation.empty`, `composer.above`, `composer.actions`,
+`sidebar.header.actions`).
 
 ### Hook catalog
 
@@ -180,6 +186,7 @@ own the fragility").
 | `data-oc-queue-strip` | QueueStrip (steer/queue rows) |
 | `data-oc-subagent-strip` | SubagentStrip |
 | `data-oc-runs-panel` | RunsPanel |
+| `data-oc-slot` | Slot wrapper (`slot:<id>` — one per known slot id) |
 
 ## Sandbox (iterate without touching the user's webui)
 

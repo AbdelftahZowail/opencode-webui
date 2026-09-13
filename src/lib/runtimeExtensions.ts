@@ -1,7 +1,10 @@
-import { getRegisteredIds, unregisterIds } from "../extensions/registry";
+import { getRegisteredIds, unregisterIds, hasTarget, getService } from "../extensions/registry";
 import { fireHooks } from "../extensions/hooks";
 import { activateExtension } from "../extensions/context";
-import { installExtensionBridge } from "./extensionApi";
+import { parseManifestContract, checkRequires } from "../extensions/manifest";
+import { registerExtensionSchema } from "./extSettings";
+import { setExtensionDiagnostics, clearExtensionDiagnostics, allExtensionDiagnostics, isKnownSlot } from "./extensionDiagnostics";
+import { installExtensionBridge, EXT_API_VERSION } from "./extensionApi";
 import {
   disposeDomExtension,
   isDomExtensionModule,
@@ -78,6 +81,12 @@ interface RuntimeExtensionEntry {
   /** Which source won discovery (user > project > shipped). Shipped browser
    *  bundles never import here — the in-repo Vite glob owns them. */
   origin?: "user" | "project" | "shipped";
+  /** manifest.json `settings` schema (roadmap 5) — opaque here, parsed below. */
+  settings?: unknown;
+  /** manifest.json `requires` (roadmap 8) — opaque here, checked below. */
+  requires?: unknown;
+  /** manifest.json `capabilities` (roadmap 8) — opaque metadata. */
+  capabilities?: unknown;
 }
 
 /** Loaded browser bundles, id → exact url (with its ?v= version) currently active. */
@@ -142,9 +151,28 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
   // in-repo glob owns (shipped) must still unregister here, or `disabled`
   // would never turn a shipped extension off (the glob doesn't read flags).
   const disabledNow = new Set<string>();
+  // Ids present in this sync — diagnostics for anything else are stale.
+  const seenIds = new Set<string>();
 
   for (const entry of entries) {
     if (typeof entry?.id !== "string") continue;
+    seenIds.add(entry.id);
+    // Roadmap 5 + 8: parse the declared contract, register the settings schema
+    // (so ctx.settings/bridge.settings are schema-aware), and record unmet
+    // references as visible diagnostics — never a silent blank spot.
+    const contract = parseManifestContract(entry.settings, entry.requires);
+    registerExtensionSchema(entry.id, contract.settings);
+    const unmet = checkRequires(contract.requires, {
+      apiVersion: EXT_API_VERSION,
+      hasTarget,
+      hasSlot: isKnownSlot,
+      hasService: (serviceID) => getService(serviceID) !== undefined,
+    });
+    const problems = [...contract.problems, ...unmet];
+    setExtensionDiagnostics(entry.id, problems);
+    if (problems.length > 0) {
+      console.warn(`[extensions] "${entry.id}": ${problems.join("; ")}`);
+    }
     if (entry.disabled) {
       disabledNow.add(entry.id);
       continue;
@@ -250,6 +278,12 @@ async function syncOnce(opts?: { force?: boolean }): Promise<void> {
       loadedDom.delete(id);
       disposeDomExtension(id, prev.module);
     }
+  }
+
+  // Diagnostics for ids that vanished from the manifest (deleted, or the
+  // whole proxy restarted) must not linger in Settings.
+  for (const id of [...allExtensionDiagnostics().keys()]) {
+    if (!seenIds.has(id)) clearExtensionDiagnostics(id);
   }
 }
 

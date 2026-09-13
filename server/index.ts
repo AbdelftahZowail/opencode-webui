@@ -617,6 +617,9 @@ type ManifestItem =
       origin?: UIEntry["origin"];
       name?: string;
       description?: string;
+      settings?: unknown;
+      requires?: unknown;
+      capabilities?: unknown;
       url?: string;
       domUrl?: string;
     }
@@ -626,6 +629,9 @@ type ManifestItem =
       origin?: UIEntry["origin"];
       name?: string;
       description?: string;
+      settings?: unknown;
+      requires?: unknown;
+      capabilities?: unknown;
       disabled: true;
     };
 

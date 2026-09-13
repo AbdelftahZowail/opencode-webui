@@ -35,6 +35,7 @@ import { register, unregisterIds, getService, getServiceProviders, type ExtInput
 import { registerPoller, type Tier } from "../lib/scheduler";
 import { subscribeEvents, type BusListener } from "../lib/eventBus";
 import { storeFacade, type StoreFacade } from "../lib/storeFacade";
+import { extensionSettings, type ExtensionSettingsHandle } from "../lib/extSettings";
 import type { State } from "../store";
 
 /** Teardown returned by an activation entry: a function, or nothing. */
@@ -98,6 +99,12 @@ export interface ExtensionContext {
    * companion to `on` (event bus). Returns an idempotent unsubscribe.
    */
   subscribe<T>(selector: (s: State) => T, listener: (value: T) => void): () => void;
+  /**
+   * Declared settings (roadmap 5): resolved values from the manifest schema,
+   * with `set`/`subscribe` persisting per id. Subscriptions are disposed with
+   * the extension.
+   */
+  settings: ExtensionSettingsHandle;
   /** Run `fn` on dispose (hot-swap, disable, delete). LIFO; crash-isolated. */
   onDispose(fn: () => void): void;
   /** Extension-scoped log line (prefixed with the id). */
@@ -191,6 +198,17 @@ function makeContext(id: string): {
       disposers.push(unsub);
       return unsub;
     },
+    settings: (() => {
+      const handle = extensionSettings(id);
+      return {
+        ...handle,
+        subscribe(fn: () => void) {
+          const unsub = handle.subscribe(fn);
+          disposers.push(unsub);
+          return unsub;
+        },
+      };
+    })(),
     onDispose(fn) {
       disposers.push(fn);
     },

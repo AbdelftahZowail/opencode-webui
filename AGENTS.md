@@ -161,8 +161,8 @@ one rule. A folder may provide code in up to four *strata*
 
 ```
 my-extension/
-  manifest.json    id, name, version, description, disabled (optional bool)
-  index.tsx        browser stratum: register() against the registry
+  manifest.json    id, name, version, description; optional disabled, settings, requires, capabilities
+  index.tsx        browser stratum: register() and/or activate(ctx)
   dom.ts           DOM stratum: post-render DOM changes (the free layer)
   server.ts        proxy stratum: routes / middleware / event tap / pollers
   engine/          optional opencode plugin payload (tools, system-prompt hints)

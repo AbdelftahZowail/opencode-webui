@@ -30,6 +30,8 @@
  *              their kit directly in `mount(kit)` — this is for imperative
  *              use from browser-stratum code)
  *   kv       — per-extension persistent browser store (`kv.forExt(id)`)
+ *   settings — per-extension declared settings (`settings.forExt(id)`:
+ *              resolved get/set/reset/subscribe from the manifest schema)
  *
  * Server-stratum routes (`/api/webui/ext/<id>/…`) need no helper: same-origin
  * `fetch` from the page carries the session cookie, so plain `fetch` IS the
@@ -44,6 +46,7 @@ import { storeFacade, type StoreFacade } from "./storeFacade";
 import { getPrefs, setPref, subscribePrefs } from "../prefs";
 import { notify } from "./notify";
 import { subscribeEvents } from "./eventBus";
+import { extensionSettings } from "./extSettings";
 import {
   mountDomExtension,
   disposeDomExtension,
@@ -85,6 +88,9 @@ export interface ExtensionApi {
   kv: {
     forExt: typeof extKv;
   };
+  settings: {
+    forExt: typeof extensionSettings;
+  };
 }
 
 declare global {
@@ -114,6 +120,7 @@ export function createExtensionApi(): ExtensionApi {
       version: DOM_STRATUM_VERSION,
     },
     kv: { forExt: extKv },
+    settings: { forExt: extensionSettings },
   };
 }
 

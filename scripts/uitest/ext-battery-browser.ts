@@ -33,13 +33,27 @@ import {
   renderTarget,
   unregisterIds,
 } from "../../src/extensions/registry";
-import { Slot } from "../../src/extensions/slots";
+import { Slot, SLOT_IDS } from "../../src/extensions/slots";
 import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
 import { publishEvent, subscribeEvents, flushEvents } from "../../src/lib/eventBus";
 import { handleEvent, setPendingWorkspace } from "../../src/store";
 import type { V2Event } from "../../src/api/events";
+import { parseManifestContract, resolveSettings, checkRequires } from "../../src/extensions/manifest";
+import {
+  registerExtensionSchema,
+  resolvedExtensionSettings,
+  setExtensionSetting,
+  extensionSettings,
+} from "../../src/lib/extSettings";
+import {
+  registerKnownSlots,
+  isKnownSlot,
+  setExtensionDiagnostics,
+  getExtensionDiagnostics,
+  clearExtensionDiagnostics,
+} from "../../src/lib/extensionDiagnostics";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BAT_DIR = "/tmp/opencode/bat-browser";
@@ -863,6 +877,144 @@ async function testStoreFacade(): Promise<void> {
   }
 }
 
+function testManifestContract(): void {
+  const t0 = Date.now();
+  const label = "manifest contract: schema parse/resolve + requires check";
+  try {
+    const parsed = parseManifestContract(
+      [
+        { key: "on", type: "boolean", title: "On", default: true },
+        { key: "n", type: "number", title: "N", default: 5, min: 1, max: 10 },
+        { key: "mode", type: "enum", title: "Mode", options: ["a", "b"], default: "a" },
+        { key: "bad", type: "wat" },
+      ],
+      {
+        api: 2,
+        targets: ["message.timestamp"],
+        slots: ["composer.above"],
+        services: ["format.timestamp"],
+      },
+    );
+    if (!parsed.settings || parsed.settings.length !== 3 || parsed.problems.length !== 1) {
+      fail(
+        label,
+        `parse: settings=${parsed.settings?.length} problems=${JSON.stringify(parsed.problems)}`,
+        t0,
+      );
+      return;
+    }
+    // Defaults + clamps + valid overrides; invalid value and unknown key drop.
+    const resolved = resolveSettings(parsed.settings, { n: 99, mode: "b", ghost: 1, on: "yes" });
+    if (resolved.on !== true || resolved.n !== 10 || resolved.mode !== "b" || "ghost" in resolved) {
+      fail(label, `resolve: ${JSON.stringify(resolved)}`, t0);
+      return;
+    }
+    const unmet = checkRequires(parsed.requires, {
+      apiVersion: 1,
+      hasTarget: (t) => t !== "message.timestamp",
+      hasSlot: (s) => s !== "composer.above",
+      hasService: () => false,
+    });
+    if (unmet.length !== 4) {
+      fail(label, `checkRequires expected 4 unmet, got ${JSON.stringify(unmet)}`, t0);
+      return;
+    }
+    const satisfied = checkRequires(parsed.requires, {
+      apiVersion: 2,
+      hasTarget: () => true,
+      hasSlot: () => true,
+      hasService: () => true,
+    });
+    if (satisfied.length !== 0) {
+      fail(label, `satisfied requires reported ${JSON.stringify(satisfied)}`, t0);
+      return;
+    }
+    pass(label, `3 fields + 1 problem; defaults/clamps/overrides; mismatch→4, match→0`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  }
+}
+
+async function testExtensionSettingsStore(): Promise<void> {
+  const t0 = Date.now();
+  const label = "extension settings: defaults + coerce + ctx.settings disposal";
+  const id = "bat-settings";
+  try {
+    registerExtensionSchema(id, [
+      { key: "threshold", type: "number", title: "Threshold", default: 5, min: 1, max: 10 },
+      { key: "label", type: "string", title: "Label", default: "hi" },
+    ]);
+    setExtensionSetting(id, "threshold", 99); // clamps to max
+    setExtensionSetting(id, "threshold", "bad"); // invalid → ignored
+    const resolved = resolvedExtensionSettings(id);
+    if (resolved.threshold !== 10 || resolved.label !== "hi") {
+      fail(label, `resolve after set: ${JSON.stringify(resolved)}`, t0);
+      return;
+    }
+    let seen: unknown;
+    const inst = await activateExtension(id, {
+      activate(ctx: ExtensionContext) {
+        ctx.settings.subscribe(() => {
+          seen = ctx.settings.get().threshold;
+        });
+      },
+    });
+    setExtensionSetting(id, "threshold", 3);
+    if (seen !== 3) {
+      fail(label, `ctx.settings.subscribe did not fire (${String(seen)})`, t0);
+      inst.dispose();
+      return;
+    }
+    inst.dispose();
+    setExtensionSetting(id, "threshold", 7);
+    if (seen !== 3) {
+      fail(label, `settings listener leaked after dispose (${String(seen)})`, t0);
+      return;
+    }
+    extensionSettings(id).reset();
+    if (resolvedExtensionSettings(id).threshold !== 5) {
+      fail(label, `reset did not restore the default`, t0);
+      return;
+    }
+    pass(label, `clamp(99→10), invalid ignored, subscribe fires + disposes clean`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    extensionSettings(id).reset();
+    registerExtensionSchema(id, undefined);
+  }
+}
+
+function testExtensionDiagnostics(): void {
+  const t0 = Date.now();
+  const label = "extension diagnostics + known slots";
+  try {
+    registerKnownSlots(SLOT_IDS);
+    if (!isKnownSlot("composer.above") || isKnownSlot("not.a.slot")) {
+      fail(
+        label,
+        `slot registry: composer.above=${isKnownSlot("composer.above")} bogus=${isKnownSlot("not.a.slot")}`,
+        t0,
+      );
+      return;
+    }
+    setExtensionDiagnostics("bat-diag", ['unmet target "message.timestamp"']);
+    const diag = getExtensionDiagnostics("bat-diag");
+    if (diag.length !== 1 || !diag[0]!.message.includes("unmet target")) {
+      fail(label, `diagnostics not recorded: ${JSON.stringify(diag)}`, t0);
+      return;
+    }
+    clearExtensionDiagnostics("bat-diag");
+    if (getExtensionDiagnostics("bat-diag").length !== 0) {
+      fail(label, `diagnostics not cleared`, t0);
+      return;
+    }
+    pass(label, `${SLOT_IDS.length} slot ids known; set/clear diagnostics ok`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  }
+}
+
 function testSlots(): void {
   const t0 = Date.now();
   const label = "slots: contributions render in order + unregister cleanly";
@@ -1280,6 +1432,9 @@ async function main(): Promise<void> {
   await testStoreEventIntegration();
   await testStoreFacade();
   testSlots();
+  testManifestContract();
+  await testExtensionSettingsStore();
+  testExtensionDiagnostics();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();

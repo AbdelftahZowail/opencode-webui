@@ -60,7 +60,7 @@ A folder may provide code in up to four *strata*:
 
 ```
 my-extension/
-  manifest.json    id, name, version, description, disabled (optional bool)
+  manifest.json    id, name, version, description; optional disabled, settings, requires, capabilities
   index.tsx        browser stratum: register() against the registry
   dom.ts           DOM stratum: post-render DOM changes (the free layer)
   server.ts        proxy stratum: routes / middleware / event tap / pollers (in server/)

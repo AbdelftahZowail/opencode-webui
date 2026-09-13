@@ -23,8 +23,29 @@
 
 import { getRegisteredIds, unregisterIds } from "../src/extensions/registry";
 import { activateExtension, type ExtensionInstance } from "../src/extensions/context";
+import { parseManifestContract } from "../src/extensions/manifest";
+import { registerExtensionSchema } from "../src/lib/extSettings";
 
 const loaders = import.meta.glob("./*/index.{ts,tsx}");
+
+/**
+ * Each shipped folder's `manifest.json`, read eagerly so an activate entry's
+ * `ctx.settings` is schema-aware BEFORE it runs (the runtime loader also
+ * registers schemas, but it syncs from the proxy after boot). `requires` for
+ * shipped ids is validated by the runtime loader, which sees the manifest.
+ */
+const manifests = import.meta.glob("./*/manifest.json", { eager: true }) as Record<
+  string,
+  { default?: unknown }
+>;
+const contractByID = new Map<string, ReturnType<typeof parseManifestContract>>();
+for (const mod of Object.values(manifests)) {
+  const raw = mod?.default;
+  if (!raw || typeof raw !== "object") continue;
+  const rec = raw as { id?: unknown; settings?: unknown; requires?: unknown };
+  if (typeof rec.id !== "string" || rec.id.length === 0) continue;
+  contractByID.set(rec.id, parseManifestContract(rec.settings, rec.requires));
+}
 
 interface Applied {
   /** The module object as imported last time — identity detects a swap. */
@@ -54,6 +75,10 @@ async function discover(): Promise<void> {
 
     const prev = applied.get(id);
     if (prev && prev.mod === mod) continue; // unchanged since the last run
+
+    // Settings schema (roadmap 5): register before activate so ctx.settings
+    // resolves defaults even at first activation.
+    registerExtensionSchema(id, contractByID.get(id)?.settings);
 
     // Changed (or first load): tear the previous instance down BEFORE the new
     // one activates, so old ids can't collide with the new set.

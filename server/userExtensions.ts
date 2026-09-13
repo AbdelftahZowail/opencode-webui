@@ -11,7 +11,8 @@
  * the folder to uninstall. No config.ts list, no per-browser localStorage.
  *
  * Folder anatomy (new format; legacy `main.tsx`-only folders still load):
- *   manifest.json   { id?, name?, version?, description?, disabled? }
+ *   manifest.json   { id?, name?, version?, description?, disabled?,
+ *                     settings?, requires?, capabilities? }
  *   index.tsx       browser stratum entry (preferred)
  *   main.tsx        legacy browser entry (fallback)
  *   dom.ts          DOM stratum entry (spec §7 — post-render DOM changes)
@@ -40,6 +41,17 @@ export type UIEntry = {
   /** manifest.json display fields, surfaced in Settings › Extensions. */
   name?: string;
   description?: string;
+  /**
+   * manifest.json `settings` — the declared settings schema (roadmap 5).
+   * Opaque here: the browser parses/normalizes it (`src/extensions/manifest.ts`);
+   * the proxy only carries it to the manifest so Settings can render it even
+   * while the extension is paused.
+   */
+  settings?: unknown;
+  /** manifest.json `requires` — the checkable contract (roadmap 8). Opaque. */
+  requires?: unknown;
+  /** manifest.json `capabilities` — declared capabilities (roadmap 8). Opaque. */
+  capabilities?: unknown;
   /** manifest.json `disabled: true` — paused, never bundled or imported. */
   disabled?: boolean;
   /** Which of the three sources won for this id. */
@@ -89,6 +101,17 @@ export function warnOnce(key: string, message: string): void {
   console.warn(`[webui] ${message}`);
 }
 
+/** Pass a malformed manifest field through as absent, warning once (roadmap 8). */
+function malformed(value: unknown, id: string, field: string): undefined {
+  if (value !== undefined) {
+    warnOnce(
+      `ext-manifest:${id}:${field}`,
+      `extension "${id}" manifest.json \`${field}\` has the wrong shape — ignored`,
+    );
+  }
+  return undefined;
+}
+
 let cache: { at: number; entries: UIEntry[] } | null = null;
 
 /** Drop the discovery cache so the next read re-scans disk (watcher path). */
@@ -96,12 +119,28 @@ export function invalidateExtensionCache(): void {
   cache = null;
 }
 
-function readManifest(dir: string): { id?: unknown; disabled?: unknown; name?: unknown; description?: unknown } | null {
+function readManifest(dir: string): {
+  id?: unknown;
+  disabled?: unknown;
+  name?: unknown;
+  description?: unknown;
+  settings?: unknown;
+  requires?: unknown;
+  capabilities?: unknown;
+} | null {
   try {
     const raw = readFileSync(join(dir, "manifest.json"), "utf8");
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
-      return parsed as { id?: unknown; disabled?: unknown; name?: unknown; description?: unknown };
+      return parsed as {
+        id?: unknown;
+        disabled?: unknown;
+        name?: unknown;
+        description?: unknown;
+        settings?: unknown;
+        requires?: unknown;
+        capabilities?: unknown;
+      };
     }
     return null;
   } catch {
@@ -158,7 +197,15 @@ function scanRoot(root: string, origin: UIEntry["origin"], entries: UIEntry[], s
       continue;
     }
     const dir = join(root, name);
-    let manifest: { id?: unknown; disabled?: unknown; name?: unknown; description?: unknown } | null = null;
+    let manifest: {
+      id?: unknown;
+      disabled?: unknown;
+      name?: unknown;
+      description?: unknown;
+      settings?: unknown;
+      requires?: unknown;
+      capabilities?: unknown;
+    } | null = null;
     try {
       manifest = readManifest(dir);
     } catch {
@@ -174,6 +221,17 @@ function scanRoot(root: string, origin: UIEntry["origin"], entries: UIEntry[], s
     const description =
       typeof manifest?.description === "string" && manifest.description.length > 0 ? manifest.description : undefined;
     const disabled = manifest?.disabled === true;
+    // Roadmap 5/8: carry the declared settings schema / requires / capabilities
+    // through to the manifest. Malformed shapes are dropped with one warning
+    // (never a silent no-op) — validation proper happens browser-side.
+    const settings = Array.isArray(manifest?.settings) ? manifest.settings : malformed(manifest?.settings, id, "settings");
+    const requires =
+      manifest?.requires && typeof manifest.requires === "object" && !Array.isArray(manifest.requires)
+        ? manifest.requires
+        : malformed(manifest?.requires, id, "requires");
+    const capabilities = Array.isArray(manifest?.capabilities)
+      ? manifest.capabilities
+      : malformed(manifest?.capabilities, id, "capabilities");
     const entry = disabled ? null : folderEntry(dir);
     const dom = disabled ? null : folderDomEntry(dir);
     // A paused extension needs no entry file; an enabled one without any
@@ -204,6 +262,9 @@ function scanRoot(root: string, origin: UIEntry["origin"], entries: UIEntry[], s
       source: `webui-extensions:${dir}`,
       name: displayName,
       description,
+      settings,
+      requires,
+      capabilities,
       disabled: disabled || undefined,
       origin,
     });

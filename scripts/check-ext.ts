@@ -32,6 +32,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { parseManifestContract } from "../src/extensions/manifest";
 
 type Level = "PASS" | "FAIL" | "WARN" | "SKIP";
 interface Row {
@@ -105,6 +106,18 @@ function main(): number {
     }
     if (manifest.disabled !== undefined && manifest.disabled !== true && manifest.disabled !== false) {
       rows.push({ check: "manifest disabled", level: "WARN", detail: `\`disabled\` should be boolean true/false (got ${JSON.stringify(manifest.disabled)})` });
+    }
+    // Roadmap 5/8: declared settings schema + requires — shape-checked here,
+    // checked against the live registry at load time (visible diagnostics).
+    const contract = parseManifestContract(manifest.settings, manifest.requires);
+    if (contract.problems.length > 0) {
+      rows.push({ check: "manifest settings/requires", level: "WARN", detail: contract.problems.join("; ") });
+    } else if (contract.settings || contract.requires) {
+      const bits = [
+        contract.settings ? `${contract.settings.length} setting(s)` : null,
+        contract.requires ? "requires" : null,
+      ].filter((b): b is string => b !== null);
+      rows.push({ check: "manifest settings/requires", level: "PASS", detail: `declared (${bits.join(", ")})` });
     }
   }
 

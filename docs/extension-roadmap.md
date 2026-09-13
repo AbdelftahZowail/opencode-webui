@@ -224,7 +224,17 @@ seams it hosts). One contract bump + docs/skill/battery sweep at the end.
   `subscribe`/`select`; bridge `store` is the facade, raw module is
   `advanced.store` (unsupported). `ctx.store` / `ctx.subscribe` (auto-disposed).
   Battery: `store facade: immediate + change-gated subscribe + ctx disposal`.
-- [ ] **5. Per-extension settings** — manifest-declared schema.
-- [ ] **8. Manifest `requires` + capability diagnostics.**
-- [ ] **6. Slots** — thin: `contribute` + a slot target.
+- [x] **5. Per-extension settings** — manifest-declared schema; core renders it
+  in Settings › Extensions and persists per id (`src/lib/extSettings.ts`).
+  Extensions read via `ctx.settings` / bridge `settings.forExt(id)`. Battery:
+  `manifest contract: …` + `extension settings: …`.
+- [x] **8. Manifest `requires` + capability diagnostics** —
+  `src/extensions/manifest.ts` parses/validates; the loader checks
+  targets/slots/services/api each sync and records
+  `src/lib/extensionDiagnostics.ts` warnings shown on the card (+ console).
+  `data-oc-*` / slot ids feed the slot check. Battery:
+  `extension diagnostics + known slots`.
+- [x] **6. Slots** — thin: `contribute` on `slot:<id>` rendered by
+  `src/extensions/slots.tsx` (`SLOT_IDS`, `data-oc-slot`); no new kind.
+  Battery: `slots: contributions render in order + unregister cleanly`.
 - [ ] **9/10. Peer composition, inspector, secrets, theme** — as demand appears.

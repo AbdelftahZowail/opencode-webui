@@ -6,8 +6,8 @@ that matches the job (framing rule below), never two for the same job.
 
 ```
 my-extension/
-  manifest.json    id, name, version, description, disabled (optional bool)
-  index.tsx        browser stratum: register() against the registry
+  manifest.json    id, name, version, description; optional disabled, settings, requires, capabilities
+  index.tsx        browser stratum: register() and/or activate(ctx)
   dom.ts           DOM stratum: post-render DOM changes (the free layer)
   server.ts        proxy stratum: routes / middleware / event tap / pollers
   engine/          optional opencode plugin payload (tools, system-prompt hints)
@@ -16,7 +16,16 @@ my-extension/
 ```jsonc
 // manifest.json
 { "id": "my-extension", "name": "My extension", "version": "1.0.0",
-  "description": "What it does" /* "disabled": true — paused */ }
+  "description": "What it does" /* "disabled": true — paused */,
+  // Declared settings (roadmap 5): core renders these in Settings › Extensions.
+  "settings": [
+    { "key": "enabled", "type": "boolean", "title": "Enabled", "default": true },
+    { "key": "threshold", "type": "number", "title": "Threshold", "default": 5, "min": 1, "max": 20 },
+    { "key": "mode", "type": "enum", "title": "Mode", "options": ["fast", "thorough"], "default": "fast" }
+  ],
+  // Checkable references (roadmap 8): an unmet one is a visible warning.
+  "requires": { "api": 1, "targets": ["message.timestamp"], "slots": ["composer.above"] },
+  "capabilities": ["notify"] }
 ```
 
 **Gating — one state, owned by the folder itself:** presence = installed;
@@ -126,8 +135,8 @@ must never touch streaming output can rely on the distinction structurally.
   are built standalone: `import type` from `src/` is erased at build and
   safe, but any *runtime* `src/` import breaks the copy outside the repo.
   Use `window.__opencodeUI` (`register`, `react`, `api`, `store` [the curated
-  facade], `events`, `prefs`, `notify`, `services`, `dom`, `kv`; raw modules as
-  `advanced.*`) — shipped code consumes the identical
+  facade], `events`, `settings`, `prefs`, `notify`, `services`, `dom`, `kv`;
+  raw modules as `advanced.*`) — shipped code consumes the identical
   surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
   tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
@@ -164,6 +173,9 @@ export function activate(ctx) {
   dispose. See **Store (read + act)** below.
 - `ctx.store` — the curated store facade (selectors + actions); the same
   object as the bridge's `store`.
+- `ctx.settings` — resolved declared settings (`get`/`set`/`reset`/`subscribe`);
+  subscriptions disposed with the extension. See **Declared settings +
+  requirements**. No manifest schema → empty handle (use `kv` for ad-hoc data).
 - `ctx.onDispose(fn)` / returning a teardown fn — runs on hot-swap,
   `disabled: true`, and delete (LIFO, crash-isolated). This is the one place
   non-React cleanup belongs — no `window.__*Installed` guards.
@@ -230,6 +242,38 @@ Core keeps adding internal state/actions — those do **not** become API. A new
 extension need means a deliberate addition to the facade (version bump), not
 reaching into `advanced.store`.
 
+### Declared settings + requirements (manifest)
+
+Two optional `manifest.json` blocks turn a fragile extension into a checkable
+one.
+
+**`settings`** — declare options once; core renders them in the extension's
+Settings card and persists per id (defaults applied, invalid/legacy values
+dropped). The extension just reads resolved values via `ctx.settings` (or the
+bridge's `settings.forExt(id)`):
+
+```tsx
+export function activate(ctx) {
+  const apply = () => (opts = ctx.settings.get());
+  apply();
+  ctx.settings.subscribe(apply); // auto-disposed
+}
+```
+
+Schema subset per field: `{ key, type, title, description?, default? }` where
+`type` is `boolean | number (min/max/step) | string (placeholder) | enum
+(options: string[])`. That covers the common toggle/threshold/format option
+with no bespoke settings component or storage.
+
+**`requires`** — declare the references you depend on
+(`api` version, `targets`, `slots`, `services`). Core checks them every
+manifest sync; an unmet one becomes a visible warning in your Settings card
+(`⚠ unmet target "…"`) plus a console warning, instead of a silently blank
+spot. `capabilities` is free-form declared metadata.
+
+Static shape problems (bad `settings`/`requires`) are reported the same way —
+never swallowed.
+
 ```tsx
 // index.tsx — wrap the timestamp, own nothing else
 import { register } from "../../src/extensions/registry";
@@ -288,7 +332,8 @@ UI-only, local `run(args, { sessionID })`; engine commands come from
 (item `{ title, description?, render }`, routed at `/ext/{id}`),
 `settings` (item `{ title, description?, render }`, section in
 Settings › Extensions), `contextMenu.message`, `contextMenu.session`,
-`contextMenu.file` (item `{ label, run, order? }`).
+`contextMenu.file` (item `{ label, run, order? }`), and the `slot:<id>`
+placement collections (see Slots below).
 
 ```tsx
 register({
@@ -298,6 +343,30 @@ register({
   item: { title: "Uptime", render: () => <Uptime /> },
 });
 ```
+
+### Slots (placement)
+
+A **slot** is a named insertion point in core chrome — placement, not
+identity. Targets render a unit's component chain (something with an id you
+tweak); slots render whatever anyone contributed to a place. Same `contribute`
+kind, collection `slot:<slotID>`:
+
+```tsx
+register({
+  kind: "contribute",
+  id: "my-compose-badge",
+  collection: "slot:composer.above",
+  item: { render: ({ sessionID }) => <span>draft for {sessionID}</span> },
+});
+```
+
+Known slot ids (the versioned registry, `src/extensions/slots.tsx`):
+`conversation.header.actions`, `conversation.empty`, `composer.above`,
+`composer.actions`, `sidebar.header.actions`. Contributing to an unknown
+`slot:<id>` renders nowhere — declare it in `requires.slots` to get a warning
+instead. Items sort by `order` (lower first); each is crash-isolated; the
+stamp site carries `data-oc-slot="<id>"` for the DOM stratum. Renaming/moving
+a slot id is a contract bump + migration note.
 
 ### Hook catalog
 
@@ -367,6 +436,7 @@ extensions break silently on every redesign.
 | `data-oc-queue-strip` | QueueStrip (steer/queue rows) |
 | `data-oc-subagent-strip` | SubagentStrip |
 | `data-oc-runs-panel` | RunsPanel |
+| `data-oc-slot` | Slot wrapper (`slot:<id>` — one per known slot id) |
 
 ```ts
 // dom.ts — badge next to the send button, cleaned up on hot-swap
@@ -498,6 +568,8 @@ Everything the app can — shipped extensions are the same build:
 
 - the curated store facade (`store` / `ctx.store`), or `useStore` directly in
   shipped components
+- declared settings (`ctx.settings` / `settings.forExt(id)`) — core renders and
+  persists the manifest schema
 - `api` from `src/api/client.ts` (every endpoint fires `api.pre/post/error`)
 - the event bus (`ctx.on` / `events.subscribe`) — raw engine events + derived
   lifecycle events, frame-batched
@@ -508,9 +580,9 @@ Everything the app can — shipped extensions are the same build:
 - Toaster via the extension API surface (`notify`)
 
 External (user/project-dir) extensions use the one extension API surface
-(`register`, `react`, `api`, `store` facade, `events`, `prefs`, `notify`,
-`services`, `dom` kit, `kv`, `advanced.*` raw modules) — used identically by
-our shipped ones.
+(`register`, `react`, `api`, `store` facade, `events`, `settings`, `prefs`,
+`notify`, `services`, `dom` kit, `kv`, `advanced.*` raw modules) — used
+identically by our shipped ones.
 
 ## Hot reload guarantees
 

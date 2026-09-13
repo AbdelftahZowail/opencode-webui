@@ -4,6 +4,7 @@ import {
   getContributions,
   subscribeRegistry,
 } from "./registry";
+import { registerKnownSlots } from "../lib/extensionDiagnostics";
 
 /**
  * Thin slots — roadmap item 6.
@@ -38,6 +39,10 @@ export const SLOT_IDS = [
 ] as const;
 
 export type SlotID = (typeof SLOT_IDS)[number];
+
+// Feed the loader's `requires.slots` validation (roadmap 8) without coupling
+// the loader to the component layer — SLOT_IDS stays the one source of truth.
+registerKnownSlots(SLOT_IDS);
 
 /** Repaint hook: registry bumps re-render every mounted Slot (same pattern
  * as App/Sidebar/MessageItem — the registry exposes no version snapshot). */
