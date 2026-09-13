@@ -116,13 +116,18 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | --- | --- |
 | ${RAW("webui-extensions/README.md")} | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
 | ${RAW("src/extensions/registry.tsx")} | The extension registry — exact register() shapes per kind |
+| ${RAW("src/extensions/context.ts")} | Activation context — the \`activate(ctx)\` entry, disposal, and the full \`ctx\` surface |
 | ${RAW("src/extensions/slots.tsx")} | Slot ids (placement contract) + the Slot renderer |
 | ${RAW("src/extensions/manifest.ts")} | Manifest contract — settings schema + requires parsing/checks |
 | ${RAW("src/extensions/hooks.ts")} | Shared fireHooks runner — how open hook events fire |
 | ${RAW("src/lib/domKit.ts")} | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| ${RAW("src/lib/storeFacade.ts")} | Curated store surface extensions get as \`store\` (raw module = \`advanced.store\`) |
+| ${RAW("src/lib/eventBus.ts")} | Event bus — raw engine events + derived lifecycle, frame-batched |
+| ${RAW("src/lib/extSettings.ts")} | Per-extension declared settings — schema, resolve, persist, subscribe |
+| ${RAW("src/lib/extBus.ts")} | Extension-to-extension peer bus (publish/subscribe) |
 | ${RAW("server/ext/types.ts")} | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
 | ${RAW("docs/extension-system-spec.md")} | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| ${RAW("src/store.ts")} | The store — actions useStore exposes to extensions |
+| ${RAW("src/store.ts")} | The raw store module (reachable as \`advanced.store\`; prefer the facade) |
 
 ## Environment
 
@@ -205,6 +210,25 @@ register({
   render: (props, next) => <span className="tabular-nums">{next()}</span>,
 });
 \`\`\`
+
+### Activation context (browser stratum)
+
+Prefer \`export function activate(ctx)\` over module-scope \`register()\` — the
+context owns lifecycle + disposal. On it: \`ctx.register(entry)\` (the five
+kinds); \`ctx.poll({ name, minInterval, run })\` and \`ctx.after(ms, fn)\` (the
+shared tier-aware scheduler, auto-stopped); \`ctx.on(name, fn)\` (event bus —
+a raw engine type or a derived name: \`run.started\`, \`run.ended\`,
+\`tool.called\`, \`tool.completed\`, \`message.appended\`; \`"*"\` = all);
+\`ctx.subscribe(selector, fn)\` (derived store read); \`ctx.store\` (curated
+store facade — selectors + actions); \`ctx.settings\` (declared settings);
+\`ctx.collections\` / \`ctx.bus\` (peer composition); \`ctx.onDispose(fn)\` or
+returning a teardown. Everything a context creates is disposed on hot-swap,
+\`disabled\`, and delete. Module-scope \`register()\` still works but is being
+deprecated.
+
+Manifest \`settings\` declares options core renders in Settings › Extensions;
+\`requires\` (\`api\`/\`targets\`/\`slots\`/\`services\`) is checked on every
+sync and an unmet reference is a visible warning, not a silent blank spot.
 
 ## Five kinds, one job each (the contract)
 
