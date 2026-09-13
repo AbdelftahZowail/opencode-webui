@@ -225,6 +225,51 @@ function testWrapLeaf(): void {
   }
 }
 
+function testWrapPropTransform(): void {
+  const t0 = Date.now();
+  const label = "wrap transforms props (next overrides merge down-chain)";
+  const ids = ["bat-wp-outer", "bat-wp-inner"];
+  const target = "bat.target.props";
+  unregisterIds(ids);
+  try {
+    registerTarget(target, (p) => `CORE:${String(p.mode ?? "none")}:${String(p.extra ?? "-")}`);
+    register({
+      kind: "wrap",
+      id: ids[0]!,
+      target,
+      order: 10,
+      render: (props, next) =>
+        `OUTER[${String(next({ mode: "outer", extra: String(props.seed) === "s1" ? "e1" : "e0" }))}]`,
+    });
+    // The inner wrap must RECEIVE the outer's merged props, not the originals.
+    register({
+      kind: "wrap",
+      id: ids[1]!,
+      target,
+      order: 20,
+      render: (props, next) =>
+        `INNER(${String(props.mode)}:${String(props.extra)})[${String(next())}]`,
+    });
+    const out = renderTarget(target, { seed: "s1" }) as unknown;
+    if (out !== "OUTER[INNER(outer:e1)[CORE:outer:e1]]") {
+      fail(label, `expected OUTER[INNER(outer:e1)[CORE:outer:e1]], got ${JSON.stringify(out)}`, t0);
+      return;
+    }
+    // A wrap that calls next() with no overrides keeps props unchanged.
+    unregisterIds([ids[0]!]);
+    const plain = renderTarget(target, { mode: "orig" }) as unknown;
+    if (plain !== "INNER(orig:undefined)[CORE:orig:-]") {
+      fail(label, `no-override delegate changed props: ${JSON.stringify(plain)}`, t0);
+      return;
+    }
+    pass(label, `outer override reached inner wrap + core; no-arg next() untouched`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    unregisterIds(ids);
+  }
+}
+
 function testReplaceFallthrough(): void {
   const t0 = Date.now();
   const label = "replace ownership + null fall-through";
@@ -882,6 +927,7 @@ async function main(): Promise<void> {
   mkdirSync("/tmp/opencode", { recursive: true });
   // In-process registry battery (no I/O, real modules).
   testWrapLeaf();
+  testWrapPropTransform();
   testReplaceFallthrough();
   testContributeAll();
   await testHooks();

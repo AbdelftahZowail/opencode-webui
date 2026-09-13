@@ -195,3 +195,22 @@ Each lands with its docs and, where it touches the contract, a version bump.
 - `src/lib/domKit.ts` — the DOM stratum kit and `data-oc-*` anchors.
 - `webui-extensions/README.md` — the authoring guide (update with every seam).
 - `docs/extension-system-spec.md` — the contract; this doc is subordinate to it.
+
+---
+
+## Implementation progress
+
+Landed in order (adjusted sequencing: the lifecycle/context lands before the
+seams it hosts). One contract bump + docs/skill/battery sweep at the end.
+
+- [x] **1. Prop-transforming wraps** — `next(overrides?)` shallow-merges into the
+  remaining wraps + leaf; no-arg behavior unchanged. Battery: `wrap transforms
+  props (next overrides merge down-chain)`.
+- [ ] **7. Lifecycle entry + context** — moved up; the host for 2/3/4/5.
+- [ ] **2. Scheduler access** — as context methods (`poll`/`after`).
+- [ ] **3. Event subscription** — derived lifecycle + raw engine events, batched.
+- [ ] **4. Curated store facade + imperative subscribe.**
+- [ ] **5. Per-extension settings** — manifest-declared schema.
+- [ ] **8. Manifest `requires` + capability diagnostics.**
+- [ ] **6. Slots** — thin: `contribute` + a slot target.
+- [ ] **9/10. Peer composition, inspector, secrets, theme** — as demand appears.

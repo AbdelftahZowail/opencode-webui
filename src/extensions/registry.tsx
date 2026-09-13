@@ -8,7 +8,9 @@ import type { MessageInfo, ToolPart } from "../api/types";
  * Five kinds, one job each:
  *  - "wrap"       — flow-through tweak of any registered unit. Receives
  *                     props + a `next()` thunk, delegates to live core by
- *                     default. THE DEFAULT PATH FOR EDITS: core updates
+ *                     default. `next(overrides?)` may merge changed/extra
+ *                     props (not just wrap output) into the rest of the
+ *                     chain. THE DEFAULT PATH FOR EDITS: core updates
  *                     always render *through* it, so wraps are stale-proof
  *                     by construction.
  *  - "replace"    — take ownership of one registered target. Wins outright
@@ -50,6 +52,15 @@ import type { MessageInfo, ToolPart } from "../api/types";
 // v2 kinds — the contract
 // ---------------------------------------------------------------------------
 
+/**
+ * Delegate of a wrap. Call with no arguments to render the rest of the
+ * chain unchanged (identical to the pre-override behavior); pass a shallow
+ * overrides object to merge extra/changed props into every remaining wrap
+ * AND the leaf (the winning replace / core default). Overrides change only
+ * what the wrap delegates to — never its own `props`.
+ */
+export type WrapNext<P = Record<string, unknown>> = (overrides?: Partial<P>) => ReactNode;
+
 /** Flow-through tweak of a registered target. Outermost-first ordering. */
 export interface WrapExtension<P = Record<string, unknown>> {
   kind: "wrap";
@@ -58,7 +69,7 @@ export interface WrapExtension<P = Record<string, unknown>> {
   target: string;
   /** Lower runs outermost. Defaults to 100. */
   order?: number;
-  render: (props: P, next: () => ReactNode) => ReactNode;
+  render: (props: P, next: WrapNext<P>) => ReactNode;
 }
 
 /** Take ownership of a registered target. Ascending-priority chain. */
@@ -324,12 +335,21 @@ function renderWithWraps(
   wraps: WrapExtension<Record<string, unknown>>[],
   index: number,
   props: Record<string, unknown>,
-  leaf: () => ReactNode,
+  leaf: (props: Record<string, unknown>) => ReactNode,
 ): ReactNode {
-  if (index >= wraps.length) return leaf();
+  if (index >= wraps.length) return leaf(props);
   const w = wraps[index]!;
   try {
-    return w.render(props, () => renderWithWraps(wraps, index + 1, props, leaf));
+    return w.render(props, (overrides) =>
+      renderWithWraps(
+        wraps,
+        index + 1,
+        // Shallow merge: an override feeds the remaining wraps and the leaf.
+        // No overrides = the same props object (behavior unchanged).
+        overrides ? { ...props, ...overrides } : props,
+        leaf,
+      ),
+    );
   } catch (err) {
     console.error(`[extensions] wrap "${w.id}" crashed, falling through:`, err);
     return renderWithWraps(wraps, index + 1, props, leaf);
@@ -350,7 +370,7 @@ export function renderTarget(target: string, props: Record<string, unknown> = {}
       `[extensions] target "${target}" has no core default — its module's autoRegister never ran (is it imported at boot?). Rendering null.`,
     );
   }
-  return renderWithWraps(chain.wraps, 0, props, () => renderChainLeaf(chain, props));
+  return renderWithWraps(chain.wraps, 0, props, (p) => renderChainLeaf(chain, p));
 }
 
 /**

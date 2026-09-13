@@ -75,7 +75,7 @@ semantics are the whole point: `wrap` = default, `replace` = ownership.
 
 | Kind | Job | Staleness |
 | --- | --- | --- |
-| `wrap` | Flow-through tweak of any registered target: `render(props, next)` — transform props/output, delegate to live core by default | **Stale-proof by construction.** Core updates always render *through* it. The default path for edits. |
+| `wrap` | Flow-through tweak of any registered target: `render(props, next)` — transform output, and/or call `next(overrides)` to merge changed/extra props into the rest of the chain, delegating to live core by default | **Stale-proof by construction.** Core updates always render *through* it. The default path for edits. |
 | `replace` | Take ownership of one registered target: `render(props, core)` wins outright at its priority; return `null` to fall through to the next candidate / core | **Frozen snapshot.** You opt out of core updates for that target — the marked escape hatch. Still receives `core` so you *can* compose. |
 | `contribute` | Add an item to a named collection (`collection` + `item`, `order` sorts, lower first) | Data, not code — core owns the list, you own your row. |
 | `hook` | Interception at instrumented boundaries: `{ event, handler(ctx, next) }` — `event` is an open string | New seams are new event names, never a registry change. |
@@ -152,6 +152,20 @@ register({
   service: "format.timestamp",
   value: (iso: string) => new Date(iso).toLocaleTimeString(),
   precedence: 10,
+});
+```
+
+```tsx
+// index.tsx — a wrap that FEEDS the target changed props, not just output.
+// `next(overrides)` shallow-merges overrides into every remaining wrap and
+// the leaf (core default / winning replace). With no argument, behavior is
+// exactly as before. Overrides never change the wrap's own `props`.
+register({
+  kind: "wrap",
+  id: "my-append-action",
+  target: "composer.sendActions",
+  render: (props, next) =>
+    next({ extraActions: [...(props.extraActions as unknown[]), <MyButton />] }),
 });
 ```
 
