@@ -37,8 +37,42 @@ Options:
 | `WEBUI_TRUST_PROXY` | unset | Set to `1` when a trusted reverse proxy sits in front, so `X-Forwarded-Host`/`Proto` are honored. Without it those headers are ignored. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Adds a higher-precedence source shadowing both (the sandbox uses this to keep WIP isolated; shipped extensions still load underneath). |
+| `WEBUI_NO_SETUP` | unset | `1` skips first-run setup for this run (CI, one-offs). |
+| `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode lifecycle plugin. |
+| `WEBUI_SETUP` | unset | `1` forces setup even in a repo checkout (testing). |
 
 Sessions are shared with the `opencode` TUI — open a session in the TUI, continue it in the browser.
+
+### Setup (run once) — the `opencode-webui` command + OpenCode plugin
+
+First boot self-installs two things, so you don't pay for `bunx` on every
+start and the webui comes up with OpenCode:
+
+1. **A global `opencode-webui` command** (`~/.local/bin/opencode-webui`, or
+   `WEBUI_BIN_DIR`) that execs the installed entry directly — fast, no bunx
+   resolution. The first-boot banner tells you if that directory isn't on
+   `PATH`.
+2. **A built-in OpenCode lifecycle plugin** written to
+   `~/.config/opencode/plugins/opencode-webui/`, which the engine
+   auto-discovers. It starts the webui in the background as soon as OpenCode
+   activates its plugins (i.e. when you use OpenCode) — detached,
+   fire-and-forget, and it never starts a second copy (a running webui answers
+   on its port and wins).
+
+```sh
+opencode-webui            # start (starts the opencode service first if needed)
+opencode-webui update     # update to the latest version and restart
+opencode-webui status     # command, plugin, launch command, running pid
+opencode-webui restart    # restart the background webui
+opencode-webui stop       # stop it
+opencode-webui uninstall  # remove the command + plugin (remembered; no auto-reinstall)
+```
+
+A repo checkout (`bun run dev` / `bun run start`) never self-installs, so
+development cannot fight your installed command. `WEBUI_NO_SETUP=1` skips
+setup for one run, `WEBUI_NO_PLUGIN=1` installs the command but not the plugin.
+The plugin only ever starts a webui that is already installed; it installs
+only its own folder and removes it cleanly on `uninstall`.
 
 ## Install (no Bun)
 
@@ -129,6 +163,7 @@ bun run build && bun start   # production: dist/ + API on 4097
 
 - Extension authoring guide: [webui-extensions/README.md](webui-extensions/README.md)
 - Extension contract check: `bun run scripts/uitest/extensions-check.ts`
+- Setup check: `bun run check:setup` (global command + lifecycle plugin + CLI, isolated HOME/XDG)
 - Architecture, editing rules, roadmap: [AGENTS.md](AGENTS.md)
 
 ## License

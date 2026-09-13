@@ -43,6 +43,12 @@ import {
 } from "./auth";
 import { syncSkill } from "./skillSync";
 import {
+  clearPidFile,
+  ensureSetup,
+  runSetupCli,
+  writePidFile,
+} from "./setup";
+import {
   discoverUserUIEntries,
   extensionSourceRoots,
   globalUserExtensionsDir,
@@ -165,11 +171,36 @@ function persistCrashReason(kind: "uncaughtException" | "unhandledRejection", re
   console.error(`[webui] ${kind} (recorded in ${CRASH_LOG}):`, detail.split("\n")[0]);
 }
 
+/**
+ * The lifecycle plugin can start a webui between our port probe and Bun.serve,
+ * which would surface as EADDRINUSE. That is "another webui won the race", not
+ * a crash — say so and exit 0.
+ */
+function isAddrInUse(reason: unknown): boolean {
+  const code = (reason as { code?: unknown })?.code;
+  const message = reason instanceof Error ? reason.message : String(reason);
+  return code === "EADDRINUSE" || /EADDRINUSE|address already in use/i.test(message);
+}
+
+function portInUseExit(): void {
+  console.log(
+    `[webui] port ${PROXY_PORT} is already serving a webui (http://localhost:${PROXY_PORT}) — nothing to do`,
+  );
+}
+
 process.on("uncaughtException", (err) => {
+  if (isAddrInUse(err)) {
+    portInUseExit();
+    process.exit(0);
+  }
   persistCrashReason("uncaughtException", err);
   process.exit(1);
 });
 process.on("unhandledRejection", (reason) => {
+  if (isAddrInUse(reason)) {
+    portInUseExit();
+    process.exit(0);
+  }
   persistCrashReason("unhandledRejection", reason);
 });
 
@@ -667,6 +698,30 @@ function startExtensionWatcher() {
 // Boot: CLI flag → auth policy → skill sync → serve → banner.
 // ---------------------------------------------------------------------------
 
+/**
+ * `setup | update | uninstall | status | stop | restart`: manage the global
+ * command + OpenCode lifecycle plugin and exit without starting the server.
+ * Setup itself is automatic on first non-dev boot — this is the management
+ * surface. `internal:setup` is the hidden handoff `update` calls on the NEW
+ * version so it installs its own artifacts.
+ */
+const SETUP_ACTIONS = new Set([
+  "setup",
+  "update",
+  "uninstall",
+  "status",
+  "stop",
+  "restart",
+  "internal:setup",
+  "help",
+  "--help",
+  "-h",
+]);
+const SETUP_ARGV = process.argv.findIndex((arg) => SETUP_ACTIONS.has(arg));
+if (SETUP_ARGV !== -1) {
+  process.exit(runSetupCli(process.argv[SETUP_ARGV], import.meta.url));
+}
+
 /** `--install-skill`: copy the skill and exit without starting the server. */
 if (process.argv.includes("--install-skill")) {
   const result = await syncSkill();
@@ -694,6 +749,51 @@ function readVersion(): string {
   }
 }
 const PKG_VERSION = readVersion();
+
+// The lifecycle plugin starts a webui when OpenCode loads, so a manual start
+// can find the port already held. Probe FIRST and exit before doing any engine
+// work — the running instance is the one the user wants. Fingerprint the login
+// page (unauthenticated, loopback always allowed) so an unrelated service on
+// the port is NOT mistaken for us.
+async function existingWebuiOnPort(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/login`, {
+      signal: AbortSignal.timeout(1500),
+      redirect: "manual",
+    });
+    if (!res.ok) return false;
+    return (await res.text()).includes("opencode webui");
+  } catch {
+    return false;
+  }
+}
+
+if (await existingWebuiOnPort(PROXY_PORT)) {
+  console.log(`[webui] already running at http://localhost:${PROXY_PORT} — nothing to do`);
+  process.exit(0);
+}
+
+// Start the OpenCode background service EAGERLY, before serving. The proxy
+// already reaches it lazily on the first /api call; doing it at boot means the
+// UI is usable the instant the browser opens, and matches `opencode service
+// start` (Service.ensure discovers or spawns `opencode serve --service`).
+//
+// Bounded: an already-running engine resolves instantly, but a cold spawn can
+// take seconds and must not hold the banner/port hostage. On timeout we keep
+// going and let the recorder/API connect when it is ready. Never fatal: the
+// promise is normalized so a rejection can never reach this top-level await.
+let ENGINE_LINE = "[webui] engine: starting the opencode background service…";
+const engineAttempt = serviceEndpoint().then(
+  (ep) => ep,
+  (err) => {
+    ENGINE_LINE = `[webui] engine: NOT running — ${err instanceof Error ? err.message : String(err)} (start it with \`opencode service start\`)`;
+    console.error(ENGINE_LINE);
+    return null;
+  },
+);
+const engineDeadline = new Promise<null>((resolve) => setTimeout(() => resolve(null), 6_000));
+const engineEndpoint = await Promise.race([engineAttempt, engineDeadline]);
+if (engineEndpoint) ENGINE_LINE = `[webui] engine: opencode service at ${engineEndpoint.url}`;
 
 const server: Server<Record<string, unknown>> = Bun.serve({
   port: PROXY_PORT,
@@ -1064,6 +1164,14 @@ function describeHosts(): string {
   return parts.join(", ");
 }
 
+// First-run setup: the global command + OpenCode lifecycle plugin. A matching
+// install is a no-op; the first install (and a refresh after an upgrade) shows
+// a one-time notice with the undo. The pidfile lets `stop`/`restart`/`update`
+// find this server.
+writePidFile(server.port ?? PROXY_PORT);
+process.on("exit", clearPidFile);
+const SETUP = ensureSetup({ entryUrl: import.meta.url, port: server.port ?? PROXY_PORT, version: PKG_VERSION });
+
 // First-boot banner — the entire onboarding. The generated password is
 // printed exactly once and never logged anywhere else.
 const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST) ? "localhost" : HOST;
@@ -1073,12 +1181,14 @@ console.log(
     SANDBOX()
       ? `[webui] sandbox — loopback only, NO password; extensions (scratch): ${globalUserExtensionsDir()}`
       : `[webui] password: ${AUTH.generated ?? "from WEBUI_PASSWORD"}`,
+    ENGINE_LINE,
     `[webui] hosts: ${describeHosts()}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
     `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/ (index.tsx + manifest.json)`,
     SKILL.ok
       ? `[webui] agent skill installed at ${SKILL.target} (auto-synced each boot)`
       : `[webui] agent skill NOT synced: ${SKILL.reason}`,
+    ...(SETUP.message ? SETUP.message.split("\n") : []),
   ].join("\n"),
 );
 void startEventRecorder();

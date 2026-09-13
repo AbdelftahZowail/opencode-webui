@@ -50,6 +50,8 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/lib/runtimeExtensions.ts` | Browser loader client: manifest fetch + SSE push, bundle import, same-id swap |
 | `server/ext/` | Proxy-stratum loader + mount points (`routes`, `middleware`, `onEvent`, `pollers`, KV) |
 | `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
+| `server/setup.ts` | First-run setup: global `opencode-webui` command, lifecycle-plugin install, launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
+| `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
 | `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
@@ -235,6 +237,9 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - `bun run sandbox` — isolated second instance: loopback-only, passwordless,
   scratch extension dir; dev mode adds Vite on 5175. Replaced `bun run preview`.
 - `bun run typecheck` — `tsc --noEmit`
+- `bun run check:setup` — global-wrapper + lifecycle-plugin + CLI contract, and a
+  real plugin `setup()` spawn, in an isolated HOME/XDG tree (never touches the
+  real command, plugin dir, or state)
 - `bun run build && bun start` — production build, served on 4097
 - `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check).
@@ -354,6 +359,42 @@ Extension renderers win via `getToolRenderer`.
 - Modifier-free combos never fire while typing (`useHotkeys` skips
   editable targets). The tab title mirrors the open session with a `●`
   prefix while it runs.
+
+## First-run setup (command + lifecycle plugin)
+
+`server/setup.ts` makes the webui self-install once, so users don't pay for
+`bunx` on every start and the webui comes up with OpenCode. `server/index.ts`
+calls `ensureSetup()` after the port binds:
+
+- **Global command**: a `~/.local/bin/opencode-webui` wrapper (overridable via
+  `WEBUI_BIN_DIR`, falling back to `~/.bun/bin`) that execs the installed entry
+  with bun directly — no bunx resolution, no network. Re-rendered when the
+  resolved argv changes, so an upgrade self-heals.
+- **Lifecycle plugin**: the built-in plugin (`server/lifecyclePlugin.ts`,
+  embedded source, CommonJS `{ id, setup }`) is written to
+  `<config>/opencode/plugins/opencode-webui/`, which the engine auto-discovers
+  globally. Activation is LAZY on the engine's side (verified with
+  `check:setup:engine`): the first `/api/plugin` read — i.e. first use — loads
+  the location's plugins, and `setup()` then starts the proxy detached
+  (fire-and-forget) if the port isn't already answering. This is the documented
+  exception to "the webui never installs engine plugins" (see
+  `docs/engine-payload-convention.md` §2).
+- **Handoff**: each boot writes `launch.json` in the state dir (argv + port +
+  version) — the stable thing the plugin and `restart` read; plus `webui.pid`
+  so `stop`/`restart`/`update` can find the server (verified pid before signal).
+- **One gate, user-owned**: `uninstall` removes the wrapper + plugin + handoff
+  and writes a declined marker so the next boot won't resurrect it;
+  `opencode-webui setup` re-enables. `WEBUI_NO_SETUP=1` skips a run,
+  `WEBUI_NO_PLUGIN=1` installs the command but not the plugin, `WEBUI_SETUP=1`
+  forces a dev checkout. Sandbox never installs.
+- **Foreign files are never clobbered**: the wrapper and plugin dir are only
+  overwritten when they carry our marker.
+- **Update**: `opencode-webui update` runs `bun x opencode-webui@latest
+  internal:setup` (which installs the NEW version's artifacts), then stops and
+  respawns the server. Compiled binaries print the releases URL instead.
+- The engine is ensured **eagerly** at boot with a 6s bound (a cold spawn can't
+  hold the banner); a manual run on an occupied port probes `/login` for the
+  webui fingerprint and exits 0 instead of dying on EADDRINUSE.
 
 ## Debug logging
 

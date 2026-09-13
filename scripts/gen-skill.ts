@@ -86,6 +86,13 @@ the \`opencode\` TUI, with a Bun proxy in front so the browser never holds
 service credentials. One port for UI + \`/api/*\`: http://localhost:4097
 (\`WEBUI_PROXY_PORT\`).
 
+On first boot the webui self-installs a global \`opencode-webui\` command and an
+OpenCode lifecycle plugin (in \`~/.config/opencode/plugins/opencode-webui/\`) that
+starts it as soon as you use OpenCode — so an instance is usually already
+running at that port. Check before starting another (a second run reports "already
+running" and exits 0). Manage it with \`opencode-webui update|status|stop|restart|uninstall\`;
+\`WEBUI_NO_SETUP=1\` skips setup for a one-off run.
+
 - **Repo**: https://github.com/${REPO}
 - **This skill's version**: ${VERSION} (matches the \`v${VERSION}\` git tag —
   the file links below are pinned to it, so they always describe the code
@@ -115,6 +122,8 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | \`WEBUI_PASSWORD\` | generated on first boot, printed once | Shared login passphrase. |
 | \`WEBUI_HOST\` | \`127.0.0.1\` | Bind address — a wildcard is refused without a password. |
 | \`WEBUI_PROXY_PORT\` | \`4097\` | Port for the UI and \`/api/*\`. |
+| \`WEBUI_NO_SETUP\` | unset | \`1\` — skip first-run setup (global command + lifecycle plugin) for this run. |
+| \`WEBUI_NO_PLUGIN\` | unset | \`1\` — install the global command but not the OpenCode lifecycle plugin. |
 | \`WEBUI_EXTENSION_DIR\` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
 | \`WEBUI_ENGINE_URL\` | \`service.json\` discovery | Aim the proxy at a chosen engine — skips \`Service.ensure()\`, so a stale pid can never spawn a rogue serve. Explicit env wins. |
 | \`WEBUI_ENGINE_PASSWORD\` | \`service.json\` password | Engine password for the override above (no file fallback when the URL is overridden — a chosen engine has its own credential). |

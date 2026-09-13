@@ -19,9 +19,19 @@ my-extension/
 1. **Valid plugin, same as any other.** `engine/` must load under the
    engine's own plugin rules (boot-time load). If it doesn't load with the
    engine alone, it won't load here either — debug it as a plugin first.
-2. **Registration is the user's.** The user points the engine at it (e.g.
-   adds the path to their opencode plugin config). The webui never
-   installs, enables, or configures engine plugins on the user's behalf.
+2. **Registration is the user's — with ONE deliberate exception.** For an
+   extension's `engine/`, the user points the engine at it (e.g. adds the
+   path to their opencode plugin config); the webui never installs, enables,
+   or configures *extension* engine plugins on the user's behalf. The
+   exception is the webui's **own built-in lifecycle plugin**
+   (`server/lifecyclePlugin.ts`): on first run the webui writes it to
+   `<config>/opencode/plugins/opencode-webui/`, where the engine
+   auto-discovers it, so the proxy starts when OpenCode activates its plugins
+   (lazily, on use). It installs only itself, is announced in the boot banner,
+   and is removed by `opencode-webui uninstall` (or skipped with
+   `WEBUI_NO_PLUGIN=1`). This exception exists because the webui's lifecycle is
+   legitimately the webui's concern; it does not generalize to extension
+   payloads.
 3. **No webui loading, no webui hot reload.** The webui serves/carries the
    folder's other strata only. Editing `engine/` follows engine semantics:
    restart on edit, unless the plugin implements its own hot pattern (the
