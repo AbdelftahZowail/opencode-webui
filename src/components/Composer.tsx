@@ -1278,7 +1278,7 @@ export function Composer({
                 <AgentPicker sessionID={sessionID} openUp align="left" />
                 <ModelPicker sessionID={sessionID} openUp align="left" />
                 <VariantPicker sessionID={sessionID} openUp align="left" />
-                <Target id="composer.contextReadout" parts={contextParts} />
+                <Target id="composer.contextReadout" parts={contextParts} sessionID={sessionID} />
               </div>
             </div>
           </PopoverAnchor>

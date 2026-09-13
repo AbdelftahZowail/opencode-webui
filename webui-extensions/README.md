@@ -90,7 +90,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | `conversation.header` | full `HeaderProps` |
 | `conversation.empty` | — |
 | `composer` | full `ComposerProps` |
-| `composer.contextReadout` | `parts: string[]` |
+| `composer.contextReadout` | `parts: string[]`, `sessionID` |
 | `composer.sendActions` | `sessionID`, `appendDraft(text)` — space-joins onto the draft + refocuses; prefer over writing drafts directly |
 | `message.timestamp` | `time: number` (consults the `format.timestamp` service) |
 | `message.tokens` | `tokens` |
