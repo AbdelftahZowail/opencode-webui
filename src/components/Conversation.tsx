@@ -18,6 +18,7 @@ import {
 } from "../store";
 import type { MessageInfo } from "../api/types";
 import { Target, autoRegister } from "../extensions/registry";
+import { Slot } from "../extensions/slots";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -524,6 +525,7 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
             <EmptyHint />
           </MessageScrollerItem>
           <Target id="conversation.empty" sessionID={sessionID} />
+          <Slot id="conversation.empty" sessionID={sessionID} />
         </>
       )}
       {(() => {
@@ -703,6 +705,7 @@ function Header({
         <WorkspacePicker sessionID={sessionID} />
         <ThemePicker />
         <SessionMenu sessionID={sessionID} />
+        <Slot id="conversation.header.actions" sessionID={sessionID} />
       </div>
     </div>
   );

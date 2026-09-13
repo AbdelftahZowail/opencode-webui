@@ -48,6 +48,7 @@ import { loadDraft, saveDraft } from "../lib/drafts";
 import { hasCoarsePointer } from "../lib/platform";
 import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
+import { Slot } from "../extensions/slots";
 import { openConnect } from "./ConnectDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
 import { FilePicker } from "./FilePicker";
@@ -950,6 +951,7 @@ export function Composer({
             </div>
           )}
         </div>
+        <Slot id="composer.above" sessionID={sessionID} />
         <Popover open={isSlash}>
           <PopoverAnchor asChild>
             <div
@@ -1253,6 +1255,7 @@ export function Composer({
                     sessionID={sessionID}
                     appendDraft={appendDraft}
                   />
+                  <Slot id="composer.actions" sessionID={sessionID} />
                   {busy ? (
                     <Spinner className="mb-1.5 mr-2" />
                   ) : !text.trim() && attachments.length === 0 ? (

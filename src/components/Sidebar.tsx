@@ -31,6 +31,7 @@ import { findHome, sameDirectory, workspaceName } from "../lib/workspaces";
 import { isSessionSticky, markSessionActive, markSessionOpened } from "../lib/sessionActivity";
 import { OPEN_SEARCH_EVENT } from "../lib/uiEvents";
 import { Target, autoRegister, getContributions, subscribeRegistry, type ContextMenuContribution, type PageContribution } from "../extensions/registry";
+import { Slot } from "../extensions/slots";
 import { timeAgo } from "./ui";
 import {
   ContextMenu,
@@ -345,6 +346,7 @@ export function Sidebar() {
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Expand sidebar">
               <PanelLeftOpen />
             </Button>
+            <Slot id="sidebar.header.actions" sessionID={current} />
           </>
         ) : (
           <div className="flex min-w-0 items-center gap-1">
@@ -355,6 +357,7 @@ export function Sidebar() {
               <PanelLeftClose />
             </Button>
             <NewSessionLink workspace={newSessionWorkspace} />
+            <Slot id="sidebar.header.actions" sessionID={current} />
           </div>
         )}
       </div>

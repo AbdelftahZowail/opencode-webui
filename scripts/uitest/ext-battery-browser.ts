@@ -18,6 +18,8 @@
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   getContributions,
   getHooks,
@@ -31,6 +33,7 @@ import {
   renderTarget,
   unregisterIds,
 } from "../../src/extensions/registry";
+import { Slot } from "../../src/extensions/slots";
 import { fireHooks } from "../../src/extensions/hooks";
 import { activateExtension, type ExtensionContext } from "../../src/extensions/context";
 import { startScheduler, stopScheduler } from "../../src/lib/scheduler";
@@ -860,6 +863,57 @@ async function testStoreFacade(): Promise<void> {
   }
 }
 
+function testSlots(): void {
+  const t0 = Date.now();
+  const label = "slots: contributions render in order + unregister cleanly";
+  const slotID = "bat.slot.probe";
+  const collection = `slot:${slotID}`;
+  const ids = ["bat-slot-lo", "bat-slot-mid", "bat-slot-hi"];
+  unregisterIds(ids);
+  try {
+    // Register out of order; getContributions sorts by `order` (lower first).
+    let seenSession: string | null | undefined;
+    register({ kind: "contribute", id: ids[0]!, collection, order: 30, item: { render: () => "SLOT_HI" } });
+    register({
+      kind: "contribute",
+      id: ids[1]!,
+      collection,
+      order: 10,
+      item: {
+        render: (ctx: { sessionID?: string | null }) => {
+          seenSession = ctx.sessionID;
+          return "SLOT_LO";
+        },
+      },
+    });
+    register({ kind: "contribute", id: ids[2]!, collection, order: 20, item: { render: () => "SLOT_MID" } });
+
+    const html = renderToStaticMarkup(createElement(Slot, { id: slotID, sessionID: "s1" }));
+    const pos = ["SLOT_LO", "SLOT_MID", "SLOT_HI"].map((t) => html.indexOf(t));
+    const ordered = pos.every((i) => i !== -1) && pos[0]! < pos[1]! && pos[1]! < pos[2]!;
+    if (!html.includes(`data-oc-slot="${slotID}"`) || !ordered) {
+      fail(label, `markup ${JSON.stringify(html)} (want data-oc-slot + LO<MID<HI)`, t0);
+      return;
+    }
+    if (seenSession !== "s1") {
+      fail(label, `sessionID not passed through to render (got ${JSON.stringify(seenSession)})`, t0);
+      return;
+    }
+    // Unregister → the slot collapses to null (no empty wrapper left behind).
+    unregisterIds(ids);
+    const after = renderToStaticMarkup(createElement(Slot, { id: slotID }));
+    if (after !== "") {
+      fail(label, `unregister left markup ${JSON.stringify(after)} (want empty)`, t0);
+      return;
+    }
+    pass(label, `slot:${slotID} → LO<MID<HI, data-oc-slot stamped, ctx.sessionID passed; empty after unregister`, t0);
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    unregisterIds(ids);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -1225,6 +1279,7 @@ async function main(): Promise<void> {
   await testEventBus();
   await testStoreEventIntegration();
   await testStoreFacade();
+  testSlots();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();
