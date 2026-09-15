@@ -7,9 +7,16 @@ import { useRef, useSyncExternalStore } from "react";
 import {
   api,
   type CompactDelivery,
+  type FileDiffInfo,
   type ForkBoundary,
+  type PluginCheckResult,
+  type PluginInfo,
   type PromptDelivery,
   type PromptFile,
+  type VcsBase,
+  type WorktreeCreateInput,
+  type WorktreeDirectory,
+  type WorktreeRemoveInput,
 } from "./api/client";
 import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { fireHooks } from "./extensions/hooks";
@@ -24,6 +31,7 @@ import type {
   MessageInfo,
   ModelRef,
   PermissionRequest,
+  PermissionRuleset,
   QuestionAnswer,
   QuestionInfo,
   QuestionRequest,
@@ -264,6 +272,50 @@ export interface SplitPane {
   sessionID: string | null;
 }
 
+// ---- P2 diff viewer model ------------------------------------------------
+//
+// The viewer has three sources, matching v2's diff plugin:
+//   "working" — HEAD vs the working copy
+//   "branch"  — the inferred base merge-base vs the working copy
+//   "turn"    — the newest idle-to-idle turn (steered prompts fold into it)
+// Everything the viewer renders is derived from this slice; the component is
+// presentational and emits store actions.
+
+export type DiffSource = "working" | "branch" | "turn";
+
+export const DIFF_SOURCES: readonly DiffSource[] = ["turn", "working", "branch"];
+
+/** Unchanged lines kept around each hunk when asking the engine for a diff. */
+export const VCS_DIFF_CONTEXT_LINES = 12;
+
+export interface SessionDiffState {
+  source: DiffSource;
+  files: FileDiffInfo[];
+  loading: boolean;
+  error: string | null;
+  /** Local-only "reviewed" markers (file paths). Never persisted. */
+  reviewed: string[];
+  /** The file whose patch the detail pane shows; null until one is picked. */
+  selectedFile: string | null;
+  /** Resolved base for the "branch" source, when the engine reported one. */
+  base: VcsBase | null;
+  /** Bumped on every successful load — lets consumers reset scroll/selection. */
+  tick: number;
+}
+
+export function emptyDiffState(): SessionDiffState {
+  return {
+    source: "turn",
+    files: [],
+    loading: false,
+    error: null,
+    reviewed: [],
+    selectedFile: null,
+    base: null,
+    tick: 0,
+  };
+}
+
 export interface State {
   connected: boolean;
   serviceOK: boolean;
@@ -380,6 +432,27 @@ export interface State {
    * window aborts, and the flag self-clears on timeout.
    */
   interruptArmed: boolean;
+  // ---- TUI-parity surfaces (docs/parity-execution-plan.md §4) --------------
+  // Shared state for the parity units. The units are presentational; every
+  // side effect lives in the actions at the bottom of this file (AGENTS rule 2).
+  /** P2 — turn-scoped diff viewer state per session (see SessionDiffState). */
+  diffs: Record<string, SessionDiffState>;
+  /** P2 — the session whose diff viewer is OPEN; null = closed. */
+  diffViewerSessionID: string | null;
+  /** P6 — the prompt-stash panel replaces the composer while open. */
+  stashPanelOpen: boolean;
+  /** P6 — text the stash hands to the composer once (revertPrompt idiom). */
+  stashPrompt: string | null;
+  /** P3 — managed worktrees for `worktreesDirectory`. */
+  worktrees: WorktreeDirectory[];
+  worktreesDirectory: string | null;
+  worktreesBusy: boolean;
+  worktreesError: string | null;
+  /** P4 — plugin catalog; null = not loaded yet. */
+  plugins: PluginInfo[] | null;
+  /** P4 — the id of the in-flight plugin action ("load" / "check" / "update"). */
+  pluginsBusy: string | null;
+  pluginsError: string | null;
 }
 
 /**
@@ -442,6 +515,17 @@ const initialState: State = {
   highlightTick: 0,
   pendingEdit: null,
   revertMarkers: {},
+  diffs: {},
+  diffViewerSessionID: null,
+  stashPanelOpen: false,
+  stashPrompt: null,
+  worktrees: [],
+  worktreesDirectory: null,
+  worktreesBusy: false,
+  worktreesError: null,
+  plugins: null,
+  pluginsBusy: null,
+  pluginsError: null,
 };
 
 let state: State = initialState;
@@ -2993,6 +3077,297 @@ export function openRunsPanel() {
 export function closeRunsPanel() {
   if (!state.runsPanelOpen) return;
   setState({ runsPanelOpen: false });
+}
+
+// ---- parity surfaces ------------------------------------------------------
+// P2 diff viewer, P6 prompt stash, P3 worktrees, P4 plugins. Each surface is
+// presentational; these actions own every side effect (AGENTS rule 2) so the
+// units stay wrappable and testable.
+
+function parityError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The diff slice for a session (never undefined — an empty default is fine). */
+export function diffStateFor(sessionID: string | null | undefined): SessionDiffState {
+  if (!sessionID) return emptyDiffState();
+  return state.diffs[sessionID] ?? emptyDiffState();
+}
+
+function patchDiff(sessionID: string, patch: Partial<SessionDiffState>) {
+  const prev = state.diffs[sessionID] ?? emptyDiffState();
+  setState({ diffs: { ...state.diffs, [sessionID]: { ...prev, ...patch } } });
+}
+
+/** The directory a session runs in — the location the vcs/worktree routes take. */
+export function sessionDirectory(sessionID: string | null | undefined): string | null {
+  if (!sessionID) return null;
+  return (
+    state.sessionDetails[sessionID]?.location?.directory ??
+    state.sessions.find((s) => s.id === sessionID)?.location?.directory ??
+    null
+  );
+}
+
+export function openDiffViewer(sessionID: string) {
+  const slice = state.diffs[sessionID];
+  setState({ diffViewerSessionID: sessionID });
+  void loadSessionDiff(sessionID, slice?.source ?? "turn");
+}
+
+export function closeDiffViewer() {
+  if (state.diffViewerSessionID === null) return;
+  setState({ diffViewerSessionID: null });
+}
+
+export function setDiffSource(sessionID: string, source: DiffSource) {
+  if ((state.diffs[sessionID]?.source ?? "turn") === source) return;
+  patchDiff(sessionID, { source });
+  void loadSessionDiff(sessionID, source);
+}
+
+export function setDiffSelectedFile(sessionID: string, file: string | null) {
+  if ((state.diffs[sessionID]?.selectedFile ?? null) === file) return;
+  patchDiff(sessionID, { selectedFile: file });
+}
+
+/** Local-only review marker — the list is never sent to the engine. */
+export function setDiffReviewed(sessionID: string, file: string, reviewed: boolean) {
+  const prev = state.diffs[sessionID] ?? emptyDiffState();
+  if (prev.reviewed.includes(file) === reviewed) return;
+  patchDiff(sessionID, {
+    reviewed: reviewed
+      ? [...prev.reviewed, file]
+      : prev.reviewed.filter((f) => f !== file),
+  });
+}
+
+/**
+ * Load one diff source for a session. "turn" is the engine's own turn scoping
+ * (idle marker to idle marker, so steered prompts belong to one turn);
+ * "working"/"branch" go through the location-scoped vcs diff.
+ */
+export async function loadSessionDiff(sessionID: string, source?: DiffSource) {
+  if (isDraftSession(sessionID)) return;
+  const prev = state.diffs[sessionID] ?? emptyDiffState();
+  const mode = source ?? prev.source;
+  const location = sessionDirectory(sessionID);
+  patchDiff(sessionID, { source: mode, loading: true, error: null });
+  try {
+    let files: FileDiffInfo[];
+    let base: VcsBase | null = null;
+    if (mode === "turn") {
+      const res = await api.sessionDiff(sessionID, {});
+      files = res.data;
+    } else {
+      if (mode === "branch") {
+        base =
+          (await api
+            .vcsBase(location ? { directory: location } : undefined)
+            .then((r) => r.data)
+            .catch(() => null)) ?? null;
+      }
+      const res = await api.vcsDiff(
+        mode,
+        location ? { directory: location } : undefined,
+        VCS_DIFF_CONTEXT_LINES,
+        base?.ref ?? null,
+      );
+      files = res.data;
+    }
+    const current = state.diffs[sessionID] ?? emptyDiffState();
+    // Keep the selection when it still exists; otherwise jump to the first file.
+    const selected =
+      current.selectedFile && files.some((f) => f.file === current.selectedFile)
+        ? current.selectedFile
+        : (files[0]?.file ?? null);
+    patchDiff(sessionID, {
+      files,
+      base,
+      loading: false,
+      error: null,
+      selectedFile: selected,
+      tick: current.tick + 1,
+    });
+  } catch (err) {
+    patchDiff(sessionID, { loading: false, error: parityError(err) });
+  }
+}
+
+/** P6 — the prompt stash replaces the composer while open. */
+export function openStashPanel() {
+  if (state.stashPanelOpen) return;
+  setState({ stashPanelOpen: true });
+}
+
+export function closeStashPanel() {
+  if (!state.stashPanelOpen) return;
+  setState({ stashPanelOpen: false });
+}
+
+/**
+ * Hand stashed text to the composer. The composer owns its buffer, so the
+ * store is the only cross-component channel — the same one-shot pattern as
+ * `revertPrompt` (`store.ts` field, consumed by the Composer effect).
+ */
+export function requestStashPrompt(text: string) {
+  setState({ stashPrompt: text, stashPanelOpen: false });
+}
+
+/** Consume the one-shot stash text; returns null when there is nothing. */
+export function consumeStashPrompt(): string | null {
+  const text = state.stashPrompt;
+  if (text === null) return null;
+  setState({ stashPrompt: null });
+  return text;
+}
+
+/** P3 — the directory worktree actions target (explicit, else the focused session). */
+function worktreeDirectory(): string | null {
+  return state.worktreesDirectory ?? sessionDirectory(state.currentSessionID);
+}
+
+export async function loadWorktrees(directory?: string | null) {
+  const dir = directory ?? worktreeDirectory();
+  setState({
+    worktreesBusy: true,
+    worktreesError: null,
+    worktreesDirectory: dir,
+  });
+  try {
+    const res = await api.worktreeList(dir ? { directory: dir } : undefined);
+    setState({ worktrees: res.data, worktreesBusy: false });
+  } catch (err) {
+    setState({ worktreesBusy: false, worktreesError: parityError(err) });
+  }
+}
+
+/**
+ * Create a worktree. This runs the project's setup script, which can take
+ * minutes — the caller shows progress and must not block on it.
+ */
+export async function createWorktree(input: WorktreeCreateInput) {
+  const dir = worktreeDirectory();
+  setState({ worktreesBusy: true, worktreesError: null });
+  try {
+    await api.worktreeCreate(input, dir ? { directory: dir } : undefined);
+    setState({ worktreesBusy: false });
+    await loadWorktrees(dir);
+    // The managed inventory changed — realign the sidebar's workspace groups.
+    void refreshSessions();
+  } catch (err) {
+    setState({ worktreesBusy: false, worktreesError: parityError(err) });
+  }
+}
+
+export async function removeWorktree(input: WorktreeRemoveInput) {
+  const dir = worktreeDirectory();
+  setState({ worktreesBusy: true, worktreesError: null });
+  try {
+    await api.worktreeRemove(input, dir ? { directory: dir } : undefined);
+    setState({ worktreesBusy: false });
+    await loadWorktrees(dir);
+    void refreshSessions();
+  } catch (err) {
+    setState({ worktreesBusy: false, worktreesError: parityError(err) });
+  }
+}
+
+/** Rediscover worktrees and reconcile the shared project inventory. */
+export async function refreshWorktrees() {
+  const dir = worktreeDirectory();
+  setState({ worktreesBusy: true, worktreesError: null });
+  try {
+    await api.worktreeRefresh(dir ? { directory: dir } : undefined);
+    setState({ worktreesBusy: false });
+    await loadWorktrees(dir);
+    void refreshSessions();
+  } catch (err) {
+    setState({ worktreesBusy: false, worktreesError: parityError(err) });
+  }
+}
+
+/**
+ * Move a session into a directory. Promoted out of the composer's MovePicker
+ * so every "which directory is this session in" surface shares one action.
+ */
+export async function moveSessionToDirectory(sessionID: string, directory: string) {
+  await api.moveSession(sessionID, directory);
+  await loadSessionDetail(sessionID);
+  await refreshSessions();
+}
+
+// ---- P4 plugins ----------------------------------------------------------
+
+export async function loadPlugins() {
+  const dir = sessionDirectory(state.currentSessionID);
+  setState({ pluginsBusy: "load", pluginsError: null });
+  try {
+    const res = await api.pluginList(dir ? { directory: dir } : undefined);
+    setState({ plugins: res.data, pluginsBusy: null });
+  } catch (err) {
+    setState({ pluginsBusy: null, pluginsError: parityError(err) });
+  }
+}
+
+/** Check one package (by target) or every package plugin for updates. */
+export async function checkPlugins(target?: string | null) {
+  const dir = sessionDirectory(state.currentSessionID);
+  setState({ pluginsBusy: "check", pluginsError: null });
+  try {
+    const res: PluginCheckResult = await api.pluginCheck(
+      target ?? null,
+      dir ? { directory: dir } : undefined,
+    );
+    setState({ plugins: res.data, pluginsBusy: null });
+  } catch (err) {
+    setState({ pluginsBusy: null, pluginsError: parityError(err) });
+  }
+}
+
+/**
+ * Update the given package targets, wait for activation to settle, then
+ * re-read the catalog (activation completion does NOT mean success — the
+ * list's `state` is the authority).
+ */
+export async function updatePlugins(targets: string[]) {
+  const dir = sessionDirectory(state.currentSessionID);
+  const location = dir ? { directory: dir } : undefined;
+  setState({ pluginsBusy: "update", pluginsError: null });
+  try {
+    await api.pluginUpdate(targets, location);
+    await api.pluginAwaitActivation(location).catch(() => undefined);
+    const res = await api.pluginList(location);
+    setState({ plugins: res.data, pluginsBusy: null });
+  } catch (err) {
+    setState({ pluginsBusy: null, pluginsError: parityError(err) });
+  }
+}
+
+// ---- P4 permission rules -------------------------------------------------
+
+/**
+ * Replace a session's permission ruleset (replace semantics, not a merge) and
+ * re-read the session so the editor shows the engine's authoritative order.
+ */
+export async function updateSessionPermissionRules(
+  sessionID: string,
+  permissions: PermissionRuleset,
+) {
+  await api.sessionPermissionRules(sessionID, permissions);
+  await loadSessionDetail(sessionID);
+}
+
+/** P4 — the project's saved ("always allow") permissions. */
+export async function listSavedPermissions(): Promise<
+  { id: string; action: string; resource: string }[]
+> {
+  const res = await api.permissionSavedList();
+  return res.data;
+}
+
+export async function deleteSavedPermission(id: string) {
+  await api.permissionSavedDelete(id);
 }
 
 /** Mobile sidebar drawer — open/close/toggle (no-op on desktop). */

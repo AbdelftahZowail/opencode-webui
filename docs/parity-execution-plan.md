@@ -167,10 +167,39 @@ Wave 0 freezes this. If the shipped code differs from what's written here,
 | Unit | Receives (props / store reads) | Emits (callbacks / store actions) |
 | --- | --- | --- |
 | **U1** DiffViewer | `files: FileDiffInfo[]`, `source`, `loading`, `error` | `onSelectSource(source)`, `onClose()` |
-| **U2** PluginsSection | `plugins: PluginInfo[]`, `busy`, `error` | `onCheck(target?)`, `onUpdate(targets)`, `onToggle(id, disabled)` |
+| **U2** PluginsSection | `plugins: PluginInfo[]`, `busy`, `error` | `onCheck(target?)`, `onUpdate(targets)` |
 | **U3** PermissionRulesEditor | `rules: PermissionRuleset` | `onSave(rules)`, `onCancel()` |
 | **U4** StashPanel / frecency | stash list; `query` | `onPop(entry)`, `onDelete(entry)`; frecency is a pure lib |
 | **U5** WorktreePanel | `worktrees: WorktreeDirectory[]`, `busy`, `error` | `onCreate(input)`, `onRemove(input)`, `onRefresh()` |
+
+> **Wave 0 correction (authoritative).** The drafted U2 row included
+> `onToggle(id, disabled)`. **The engine has no plugin enable/disable route** —
+> `docs/reference/openapi.json` lists only `GET /api/plugin`,
+> `POST /api/plugin/check`, `POST /api/plugin/update`,
+> `POST /api/plugin/await-activation`. There is nothing to toggle, so the
+> affordance is dropped rather than faked. `plugins.source.package.outdated`
+> drives "update available"; `pluginUpdate` is the only mutation.
+
+### Wave 0 store seam (the actions Wave 1 units must NOT reach for)
+
+Wave 0 landed the shared state + actions in `src/store.ts` (see the
+"parity surfaces" section). Wave 1 units are presentational — the coordinator
+wires these in Wave 2:
+
+| Slice | State | Actions |
+| --- | --- | --- |
+| P2 diff | `diffs: Record<sessionID, SessionDiffState>`, `diffViewerSessionID` | `openDiffViewer`, `closeDiffViewer`, `setDiffSource`, `setDiffSelectedFile`, `setDiffReviewed`, `loadSessionDiff`, `diffStateFor` |
+| P6 stash | `stashPanelOpen`, `stashPrompt` | `openStashPanel`, `closeStashPanel`, `requestStashPrompt`, `consumeStashPrompt` |
+| P3 worktrees | `worktrees`, `worktreesDirectory`, `worktreesBusy`, `worktreesError` | `loadWorktrees`, `createWorktree`, `removeWorktree`, `refreshWorktrees`, `moveSessionToDirectory` |
+| P4 plugins | `plugins`, `pluginsBusy`, `pluginsError` | `loadPlugins`, `checkPlugins`, `updatePlugins` |
+| P4 permission rules | `sessionDetails[id].permissions` (authoritative) | `updateSessionPermissionRules`, `listSavedPermissions`, `deleteSavedPermission` |
+
+Two contract-layer fixes landed with the seam (both justified by the OpenAPI
+snapshot, AGENTS rule 1): `mcpPut` used **PATCH** where the route is **PUT**,
+and every `/api/mcp/*` route now passes `location`; `permissionSavedList` /
+`permissionSavedDelete` (`GET`/`DELETE /api/permission/saved[/{id}]`) are now
+wrapped, and `SessionInfo.permissions` was added (the engine already returned
+it — our hand-copied type dropped it).
 
 **Rule:** units are **presentational**. They never call `api.*` directly — the
 coordinator owns side effects in the store. (Exception: U4's frecency lib is

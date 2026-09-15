@@ -43,6 +43,13 @@ export interface SessionInfo {
   /** Free-form origin tagging, e.g. `{ origin: "brother-agent" }`. Mirrors
    * openapi `Session.Info.metadata` (our hand-copied type lagged behind). */
   metadata?: Record<string, unknown>;
+  /**
+   * Session-scoped permission ruleset. Evaluated AFTER the agent's rules and
+   * the LAST matching rule wins. Mirrors openapi `Session.Info.permissions`
+   * (`Permission.Ruleset`) — read back from `GET /api/session/{id}` so the
+   * editor shows the engine's authoritative order, not a client mirror.
+   */
+  permissions?: PermissionRuleset;
 }
 
 export interface SessionsResponse {
@@ -225,6 +232,14 @@ export interface PermissionRule {
  * (`permissions`), where session rules are evaluated after the agent's.
  */
 export type PermissionRuleset = PermissionRule[];
+
+/** `PermissionSaved.Info` — a project's persisted ("always allow") rule. */
+export interface PermissionSavedInfo {
+  id: string;
+  projectID: string;
+  action: string;
+  resource: string;
+}
 
 // ---- forms --------------------------------------------------------------
 

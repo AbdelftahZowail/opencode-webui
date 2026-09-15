@@ -19,6 +19,7 @@ import type {
   PermissionReply,
   PermissionRequest,
   PermissionRuleset,
+  PermissionSavedInfo,
   QuestionAnswer,
   QuestionRequest,
   SessionInfo,
@@ -809,6 +810,17 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ reply, message: null }),
     }),
+  /**
+   * The project's saved ("always allow") rules — what an `always` reply with a
+   * `save` list persists. NOT location-scoped: the route takes `projectID`.
+   */
+  permissionSavedList: (projectID?: string) =>
+    request<{ data: PermissionSavedInfo[] }>(
+      `/api/permission/saved?${vcsQuery(undefined, { projectID })}`,
+    ),
+  /** Remove one saved permission. Returns 204. */
+  permissionSavedDelete: (id: string) =>
+    request<unknown>(`/api/permission/saved/${id}`, { method: "DELETE" }),
 
   // forms
   pendingForms: () => request<{ location: unknown; data: FormInfo[] }>("/api/form/request"),
@@ -1086,19 +1098,25 @@ const apiRaw = {
       `/api/integration/${integrationID}/connect/command/${attemptID}`,
     ),
 
-  // mcp
-  mcpList: () =>
-    request<{ location: unknown; data: McpServer[] }>("/api/mcp"),
-  mcpResource: () =>
-    request<{ location: unknown; data: McpResourceCatalog }>("/api/mcp/resource"),
-  mcpPut: (server: string, config: McpServerConfig) =>
-    patch<unknown>(`/api/mcp/${server}`, { config }),
-  mcpDelete: (server: string) =>
-    request<unknown>(`/api/mcp/${server}`, { method: "DELETE" }),
-  mcpConnect: (server: string) =>
-    post<unknown>(`/api/mcp/${server}/connect`, null),
-  mcpDisconnect: (server: string) =>
-    post<unknown>(`/api/mcp/${server}/disconnect`, null),
+  // mcp — every route is location-scoped and PUT (not PATCH) adds a server.
+  mcpList: (location?: VcsLocation) =>
+    request<{ location: unknown; data: McpServer[] }>(`/api/mcp?${vcsQuery(location)}`),
+  mcpResource: (location?: VcsLocation) =>
+    request<{ location: unknown; data: McpResourceCatalog }>(
+      `/api/mcp/resource?${vcsQuery(location)}`,
+    ),
+  mcpPut: (server: string, config: McpServerConfig, location?: VcsLocation) =>
+    request<unknown>(`/api/mcp/${server}?${vcsQuery(location)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ config }),
+    }),
+  mcpDelete: (server: string, location?: VcsLocation) =>
+    request<unknown>(`/api/mcp/${server}?${vcsQuery(location)}`, { method: "DELETE" }),
+  mcpConnect: (server: string, location?: VcsLocation) =>
+    post<unknown>(`/api/mcp/${server}/connect?${vcsQuery(location)}`, null),
+  mcpDisconnect: (server: string, location?: VcsLocation) =>
+    post<unknown>(`/api/mcp/${server}/disconnect?${vcsQuery(location)}`, null),
 
   // plugins
   pluginList: (location?: VcsLocation) =>
