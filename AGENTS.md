@@ -392,7 +392,11 @@ calls `ensureSetup()` after the port binds:
 - **Global command**: a `~/.local/bin/opencode-webui` wrapper (overridable via
   `WEBUI_BIN_DIR`, falling back to `~/.bun/bin`) that execs the installed entry
   with bun directly — no bunx resolution, no network. Re-rendered when the
-  resolved argv changes, so an upgrade self-heals.
+  resolved argv changes, so an upgrade self-heals. A bunx entry lives in a temp
+  dir the OS wipes, so it is mirrored first into `<state>/entry/<version>/`
+  (hardlinks — no disk, no network) and the wrapper + `launch.json` point at the
+  mirror; that is what keeps `bunx opencode-webui` and the lifecycle plugin
+  working across reboots.
 - **Lifecycle plugin**: the built-in plugin (`server/lifecyclePlugin.ts`,
   embedded source, CommonJS `{ id, setup }`) is written to
   `<config>/opencode/plugins/opencode-webui/`, which the engine auto-discovers

@@ -11,11 +11,11 @@
  * Exit 0 = all checks pass; 1 = at least one FAIL.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ensureSetup,
   readLaunchConfig,
@@ -23,6 +23,7 @@ import {
   resolveLaunchCommand,
   runSetupCli,
   setupStatus,
+  stabilizeEntryUrl,
   uninstallSetup,
 } from "../../server/setup";
 import {
@@ -74,6 +75,45 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
   check("bun: execPath + absolute script", plain.cmd[0] === process.execPath && plain.cmd[1] === "/opt/app/server/index.ts", plain.cmd.join(" "));
   const spacey = resolveLaunchCommand("file:///opt/my%20app/server/index.ts");
   check("url with spaces is decoded", spacey.cmd[1] === "/opt/my app/server/index.ts", spacey.cmd[1] ?? "(none)");
+}
+
+// ---------------------------------------------------------------------------
+// bunx installs are mirrored to a stable entry
+// ---------------------------------------------------------------------------
+{
+  const tmp = mkdtempSync(join(tmpdir(), "webui-bunx-mirror-"));
+  const state = join(tmp, "state");
+  const install = join(tmp, "bunx-1000-opencode-webui@9.9.9");
+  const entry = join(install, "node_modules", "opencode-webui", "server", "index.ts");
+  const dep = join(install, "node_modules", "@opencode-ai", "client", "index.js");
+  const bin = join(install, "node_modules", ".bin", "opencode-webui");
+  mkdirSync(dirname(entry), { recursive: true });
+  mkdirSync(dirname(dep), { recursive: true });
+  mkdirSync(dirname(bin), { recursive: true });
+  writeFileSync(entry, "// entry\n");
+  writeFileSync(dep, "// dep\n");
+  symlinkSync(join("..", "opencode-webui", "server", "index.ts"), bin);
+
+  const mirrored = join(state, "opencode-webui", "entry", "9.9.9", "node_modules");
+  await withEnv({ XDG_STATE_HOME: state, HOME: tmp }, () => {
+    const outside = join(tmp, "app", "server", "index.ts");
+    const untouched = stabilizeEntryUrl(pathToFileURL(outside).href, "9.9.9", tmp);
+    check("stable entry: a non-bunx path is left alone", untouched.url === pathToFileURL(outside).href && !untouched.detail);
+
+    const stable = stabilizeEntryUrl(pathToFileURL(entry).href, "9.9.9", tmp);
+    const expected = join(mirrored, "opencode-webui", "server", "index.ts");
+    check("stable entry: bunx install mirrored under the state dir", stable.url === pathToFileURL(expected).href, stable.url);
+    check("stable entry: mirrored file carries the entry", existsSync(expected) && readFileSync(expected, "utf8") === "// entry\n");
+    check("stable entry: dependencies are mirrored too", existsSync(join(mirrored, "@opencode-ai", "client", "index.js")));
+    check("stable entry: symlinks stay symlinks", readlinkSync(join(mirrored, ".bin", "opencode-webui")) === join("..", "opencode-webui", "server", "index.ts"));
+    check("stable entry: launch command uses the mirror", resolveLaunchCommand(stable.url).cmd[1] === expected);
+
+    // The whole point: the temp install can vanish and launches still work.
+    rmSync(install, { recursive: true, force: true });
+    const again = stabilizeEntryUrl(pathToFileURL(entry).href, "9.9.9", tmp);
+    check("stable entry: survives the temp install being wiped", again.url === pathToFileURL(expected).href && existsSync(expected));
+  });
+  rmSync(tmp, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +209,13 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
   const config = join(tmp, "config");
   const state = join(tmp, "state");
   const bin = join(tmp, "bin");
+  const bunx = mkdtempSync(join(tmpdir(), "bunx-uitest-"));
+  const bunxEntry = join(bunx, "node_modules", "opencode-webui", "server", "index.ts");
   mkdirSync(config, { recursive: true });
   mkdirSync(state, { recursive: true });
   mkdirSync(bin, { recursive: true });
+  mkdirSync(dirname(bunxEntry), { recursive: true });
+  writeFileSync(bunxEntry, "// entry\n");
   try {
     await withEnv(
       {
@@ -199,9 +243,17 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
         const again = ensureSetup({ entryUrl: "file:///opt/app/server/index.ts", port: 4097, version: "9.9.9", force: true, quiet: true });
         check("idempotent: second run is a no-op", again.status === "present", again.status);
 
+        // A bunx install must never be baked into the wrapper / launch handoff.
+        ensureSetup({ entryUrl: pathToFileURL(bunxEntry).href, port: 4097, version: "9.9.9", force: true, quiet: true });
+        const mirrorEntry = join(state, "opencode-webui", "entry", "9.9.9", "node_modules", "opencode-webui", "server", "index.ts");
+        check("bunx: setup launches the stable mirror, not the temp path", readLaunchConfig()?.cmd[1] === mirrorEntry && readFileSync(wrapper, "utf8").includes(mirrorEntry), readLaunchConfig()?.cmd.join(" ") ?? "(none)");
+        rmSync(bunx, { recursive: true, force: true });
+        check("bunx: mirror survives the temp dir being wiped", existsSync(mirrorEntry));
+
         const un = uninstallSetup();
         check("uninstall: removed wrapper + plugin", un.removed.includes(wrapper) && un.removed.includes(join(config, "opencode", "plugins", "opencode-webui")));
         check("uninstall: files gone", !existsSync(wrapper) && !existsSync(pluginIndex) && !existsSync(launch));
+        check("uninstall: mirror gone", !existsSync(join(state, "opencode-webui", "entry")));
         check("uninstall: decline recorded", setupStatus().declined);
 
         await runSetupCli("setup", "file:///opt/app/server/index.ts");
@@ -210,6 +262,7 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(bunx, { recursive: true, force: true });
   }
 }
 

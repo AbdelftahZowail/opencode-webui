@@ -7,6 +7,9 @@
  *
  *   1. a launcher shim on PATH (`~/.local/bin/opencode-webui`) that execs the
  *      installed entry with bun directly — no bunx resolution, no network;
+ *      a bunx install lives in a temp dir the OS can wipe, so it is first
+ *      mirrored to `<state>/entry/<version>/` (hardlinks — no disk, no
+ *      network) and the shim + plugin launch from the mirror;
  *   2. the built-in OpenCode lifecycle plugin in
  *      `<config>/opencode/plugins/opencode-webui/`, which the engine
  *      auto-discovers globally and activates on use: it starts the webui
@@ -27,10 +30,25 @@
  * follow OpenCode's lifecycle.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
   LIFECYCLE_PLUGIN_SOURCE,
@@ -131,6 +149,133 @@ export function resolveLaunchCommand(entryUrl: string): LaunchCommand {
   const isBun = /(^|[\\/])bun(\.exe)?$/i.test(exec);
   if (isBun) return { cmd: [exec, script], display: `bunx ${SERVICE_NAME}` };
   return { cmd: [exec, script], display: `${exec} ${script}` };
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral bunx installs → stable entry
+// ---------------------------------------------------------------------------
+
+export interface StabilizedEntry {
+  /** The entry to launch — the mirror URL when one was made, else the input. */
+  url: string;
+  /** Set only when the mirror was needed and could not be made. */
+  detail?: string;
+}
+
+/** The install root a script belongs to: the directory before `node_modules`. */
+function installRootOf(script: string): { root: string; rel: string } | null {
+  const marker = `${sep}node_modules${sep}`;
+  const at = script.lastIndexOf(marker);
+  if (at <= 0) return null;
+  return { root: script.slice(0, at), rel: script.slice(at + sep.length) };
+}
+
+/** True when `child` sits inside `parent` (the shell's ancestor test). */
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/** Mirror one install tree; hardlinks first (bun's own cache backend), copies as the fallback. */
+function mirrorInstall(from: string, to: string): void {
+  mkdirSync(to, { recursive: true });
+  for (const name of readdirSync(from)) {
+    const src = join(from, name);
+    const dest = join(to, name);
+    const stats = lstatSync(src);
+    if (stats.isSymbolicLink()) {
+      try {
+        symlinkSync(readlinkSync(src), dest);
+      } catch {
+        // No symlink rights (Windows). Materialize the target instead.
+        if (statSync(src).isDirectory()) mirrorInstall(src, dest);
+        else {
+          copyFileSync(src, dest);
+          chmodSync(dest, statSync(src).mode & 0o777);
+        }
+      }
+    } else if (stats.isDirectory()) {
+      mirrorInstall(src, dest);
+    } else if (stats.isFile()) {
+      try {
+        linkSync(src, dest);
+      } catch {
+        // Cross-device or a filesystem without hardlinks.
+        copyFileSync(src, dest);
+        chmodSync(dest, stats.mode & 0o777);
+      }
+    }
+  }
+}
+
+/** Remove staging leftovers from a killed boot (a live mirror takes seconds). */
+function sweepStaleStaging(entryDir: string): void {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  try {
+    for (const name of readdirSync(entryDir)) {
+      if (!name.startsWith(".staging-")) continue;
+      try {
+        const at = join(entryDir, name);
+        if (lstatSync(at).mtimeMs < cutoff) rmSync(at, { recursive: true, force: true });
+      } catch {
+        /* raced with another boot */
+      }
+    }
+  } catch {
+    /* entry dir does not exist yet */
+  }
+}
+
+/**
+ * `bunx` runs the package from a temp dir (`<tmp>/bunx-<uid>-<name>@<ver>/`)
+ * that the OS may wipe at any reboot. A wrapper or `launch.json` pointing
+ * there then dies with "Module not found" — the command breaks and the webui
+ * cannot autostart. Mirror the running install into a stable per-version
+ * `<state>/entry/<version>/` and launch from there. Hardlinks keep the mirror
+ * free and the whole step offline; stale versions stay behind inertly (they
+ * cost only the files that changed between versions).
+ */
+export function stabilizeEntryUrl(
+  entryUrl: string,
+  version: string,
+  tmpRoot: string = tmpdir(),
+): StabilizedEntry {
+  if (entryUrl.includes("bunfs")) return { url: entryUrl };
+  let script: string;
+  try {
+    script = fileURLToPath(entryUrl);
+  } catch {
+    return { url: entryUrl };
+  }
+  if (!isInside(tmpRoot, script)) return { url: entryUrl };
+  const tempName = relative(tmpRoot, script).split(sep)[0] ?? "";
+  if (!tempName.startsWith("bunx-")) return { url: entryUrl };
+  const layout = installRootOf(script);
+  if (!layout) return { url: entryUrl };
+
+  const entryDir = join(stateDir(), "entry");
+  const destRoot = join(entryDir, version);
+  const dest = join(destRoot, layout.rel);
+  if (existsSync(dest)) return { url: pathToFileURL(dest).href };
+
+  const staging = join(entryDir, `.staging-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  try {
+    mkdirSync(entryDir, { recursive: true, mode: 0o700 });
+    sweepStaleStaging(entryDir);
+    mirrorInstall(layout.root, staging);
+    try {
+      renameSync(staging, destRoot);
+    } catch (renameErr) {
+      // A concurrent boot may have mirrored this version first — use its copy.
+      if (!existsSync(dest)) throw renameErr;
+      rmSync(staging, { recursive: true, force: true });
+    }
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    return { url: entryUrl, detail: `could not mirror the bunx install into ${destRoot}: ${errorText(err)}` };
+  }
+  if (!existsSync(dest)) return { url: entryUrl, detail: `mirrored entry is missing at ${dest}` };
+  return { url: pathToFileURL(dest).href };
 }
 
 function readOwnVersion(): string {
@@ -519,9 +664,11 @@ export function ensureSetup(opts: SetupOptions): SetupResult {
     }
   }
 
-  const launch = resolveLaunchCommand(opts.entryUrl);
+  const entry = stabilizeEntryUrl(opts.entryUrl, opts.version);
+  const launch = resolveLaunchCommand(entry.url);
   const first = marker.installedAt === undefined;
   const result = installArtifacts(launch, opts.port, opts.version);
+  if (entry.detail) result.problems.push(entry.detail);
   writeMarker({ declined: false, installedAt: marker.installedAt ?? Date.now(), version: opts.version });
 
   const status: SetupStatus = result.changed ? (first ? "installed" : "updated") : "present";
@@ -576,6 +723,15 @@ export function uninstallSetup(): UninstallResult {
     rmSync(launchFilePath(), { force: true });
   } catch {
     /* absent */
+  }
+  const entry = join(stateDir(), "entry");
+  if (existsSync(entry)) {
+    try {
+      rmSync(entry, { recursive: true, force: true });
+      removed.push(entry);
+    } catch (err) {
+      problems.push(errorText(err));
+    }
   }
   writeMarker({ declined: true, installedAt: Date.now(), version: readOwnVersion() });
   return { removed, problems };
