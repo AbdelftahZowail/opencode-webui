@@ -68,7 +68,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `server/setup.ts` | First-run setup: global `opencode-webui` command, lifecycle-plugin install, launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
 | `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
 | `server/config.ts` | Serve/security config: `~/.config/opencode/webui/config.json`, env-override resolution, validation, exposure analysis; `config` CLI |
-| `src/components/settings/AccessSection.tsx` | Settings › Security — the UI for those settings (source badges, restart-to-apply). Settings has three tabs: Extensions, Security, and App (phone-only) |
+| `src/components/settings/AccessSection.tsx` | Settings › Security — the UI for those settings (source badges, restart-to-apply). Settings has four tabs: Extensions, Plugins, Security, and App (phone-only) |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
 | `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |

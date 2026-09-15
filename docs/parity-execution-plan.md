@@ -5,6 +5,13 @@ without colliding. **The roadmap (`docs/tui-parity-roadmap.md`) says *what* to
 build. This file says *how, in what order, by whom, against which frozen
 interfaces*.**
 
+> **Status: the P0–P7 program in this file is committed.** For the work that
+> remains before the webui is a full port of the v2 TUI — the gap inventory,
+> its waves, ownership, sub-agent brief template and open decisions — read
+> **`docs/parity-port-plan.md`**. This file stays as the record of how P0–P7
+> were built (its execution model, conventions and handoff protocol still
+> apply, and the port plan reuses them).
+
 ---
 
 ## 0. If you are a fresh agent, start here

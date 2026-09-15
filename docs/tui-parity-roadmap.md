@@ -71,12 +71,39 @@ for them at all, so they are not v2 features and not parity targets:
 | Legacy allow-list proxy bridge | v2 client is 100% `/api/*`; nothing to bridge |
 | Todos | `todo: 0` endpoints in the v2 client; the only `todo` in v2's TUI is a syntax-theme scope (`comment.todo`) |
 | LSP / formatter status | `lsp: 0`, `formatter: 0` endpoints in the v2 client; v2's only `lsp` hits are a *tool* name and a permission action |
-| Session share / unshare | `share: 0` endpoints in the v2 client |
+| Session share / unshare | `share: 0` endpoints in the v2 client (v2's TUI *registers* the commands but they report unavailable/disabled) |
 | Console org switch | `dialog-console-org` exists on `dev`, not `v2` |
+| ~~Session pin + quick slots 1–9~~ | **CORRECTED — see the note below.** These DO exist in v2 and are legitimate parity targets |
+| ~~Which-key, tips, terminal chrome~~ | **PARTLY CORRECTED.** Which-key is v2, not `dev`-era — but it is a terminal affordance and porting it is optional (see the note) |
 | Session pin + quick slots 1–9 | `session_pin_toggle` / `session.quick_switch.*` exist on `dev`'s keymap; absent from v2's command list |
 | Which-key, tips, terminal chrome | `dev`-era TUI affordances |
 
+> **Correction (verified against `origin/v2`, 2026-09-15).** Two rows above were
+> wrong, and an agent following them would *not* build real parity work:
+>
+> - **Pins + quick slots ARE v2.** `session.pin.toggle` is registered as an
+>   action (`packages/tui/src/component/dialog-session-list.tsx:250`) with a
+>   default keybind `ctrl+f` (`config/keybind.ts:136`), and
+>   `session.quick_switch.1..9` are live bindings
+>   (`packages/tui/src/app.tsx:129-139`), read by the session list to render
+>   quick-slot numbers (`dialog-session-list.tsx:128-129`). They are parity
+>   targets — see `docs/parity-port-plan.md` **R3**.
+> - **Which-key IS v2**, not `dev`-era: `which-key.toggle` /
+>   `which-key.layout.toggle` / `which-key.pending.toggle` are declared in
+>   `config/keybind.ts:286-288`. It remains **optional** to port (a
+>   leader/chord affordance with no natural web analogue), so the conclusion
+>   "don't port terminal chrome" stands — the *reason* was wrong.
+>
+> The other rows were re-checked and hold: `todo`, `lsp`, `formatter` and
+> `share` have no v2 client route, and `dialog-console-org` / session tags have
+> zero hits in `origin/v2`.
+
 Everything below is either v2-API-native or read directly from `v2` source.
+
+> **The remaining work lives in `docs/parity-port-plan.md`.** This roadmap is
+> the *program of record* for what has been built (P0–P7); that plan is the
+> successor inventory for reaching full port parity, with waves, ownership and
+> sub-agent briefs.
 
 ---
 
