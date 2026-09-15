@@ -25,7 +25,7 @@ optional (`auth: none`) for private networks/proxies, but reachable-without-a-
 password changes need explicit confirmation.
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 3.0.1 (matches the `v3.0.1` git tag —
+- **This skill's version**: 3.1.0 (matches the `v3.1.0` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -38,20 +38,20 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.0.1/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.0/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
 
 ## Environment
 
@@ -204,6 +204,7 @@ own the fragility").
 | `data-oc-transcript` | MessageScroller content |
 | `data-oc-message` + `data-oc-message-id` + `data-oc-message-type` | MessageItem root per type branch |
 | `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` | Composer card, textarea, send button |
+| `data-oc-composer-attach` + `data-oc-composer-attach-input` + `data-oc-composer-attachments` | Composer paperclip button + hidden file input, staged attachment strip |
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
 | `data-oc-sidebar` | Sidebar root |
