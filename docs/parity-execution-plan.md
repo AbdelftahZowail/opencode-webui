@@ -79,7 +79,19 @@ It landed `docs/reference/openapi.json` (116 → 123 paths), `src/api/client.ts`
 `MessageTypeFilter`) and the `docs/coverage.md` corrections. `typecheck` and
 `build` were green at that state and `diff-openapi --check` reported no drift.
 
-**Wave 1 can start from `HEAD`.** Sanity-check before you begin:
+**Waves 0/1/2 are committed.** `2e757c5` (Wave 0 seam), `29580d5` (U1/P2), and
+the Wave 1 units + their wiring that follow. U1–U5 all landed; U2's frozen row
+lost `onToggle` (no engine route), and three P0-era wrappers were corrected
+against the snapshot: `mcpPut` PATCH→PUT (+ `location` on every `/api/mcp/*`),
+`permissionSavedList/Delete` wrapped, `SessionInfo.permissions` typed, and
+`worktreeList`/`worktreeCreate` un-wrapped from a wrong `{ data }` assumption
+(`Worktree.List` is a bare array — the mistake crashed the panel).
+
+**P6 is partial:** stash and frecency landed; timeline jump-to-message and
+directory recents did not. **Shell selection (P4) is deferred** — it is a global
+preference with no settings host in the current tab set.
+
+Sanity-check before starting new work:
 
 ```bash
 git status --short          # should be clean (or only your own new files)

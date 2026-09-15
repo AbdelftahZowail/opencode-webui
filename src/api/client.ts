@@ -884,11 +884,13 @@ const apiRaw = {
     patch<unknown>(`/api/project/${projectID}`, body),
 
   // worktrees — location-scoped managed checkouts (the old project-scoped
-  // /api/worktree/{projectID} routes were removed upstream).
+  // /api/worktree/{projectID} routes were removed upstream). NOTE the response
+  // shapes: `Worktree.List` is a BARE array and `Worktree.Info` a BARE object
+  // (unlike most routes, these are not wrapped in `{ data }`).
   worktreeList: (location?: VcsLocation) =>
-    request<{ data: WorktreeDirectory[] }>(`/api/worktree?${vcsQuery(location)}`),
+    request<WorktreeDirectory[]>(`/api/worktree?${vcsQuery(location)}`),
   worktreeCreate: (body: WorktreeCreateInput, location?: VcsLocation) =>
-    request<{ data: WorktreeInfo }>(`/api/worktree?${vcsQuery(location)}`, {
+    request<WorktreeInfo>(`/api/worktree?${vcsQuery(location)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),

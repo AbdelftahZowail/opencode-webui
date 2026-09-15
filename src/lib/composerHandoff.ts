@@ -1,4 +1,4 @@
-import { closeRunsPanel, focusedPaneKey, getState, pendingRequests, revealSubagentComposer } from "../store";
+import { closeRunsPanel, closeStashPanel, focusedPaneKey, getState, pendingRequests, revealSubagentComposer } from "../store";
 
 /**
  * "Type anywhere" handoff: a printable keystroke pressed while keyboard
@@ -19,9 +19,10 @@ export function handCharToComposer(ch: string, paneKey = "main") {
   if (s.currentSessionID && pendingRequests(s).some((r) => r.req.sessionID === s.currentSessionID)) {
     return;
   }
-  // Any surface that REPLACES the composer in its slot (the runs panel)
-  // has to make way first; a no-op when it is closed.
+  // Any surface that REPLACES the composer in its slot (the runs panel, the
+  // prompt stash) has to make way first; a no-op when it is closed.
   closeRunsPanel();
+  closeStashPanel();
   const existing = document.getElementById(`composer-input-${paneKey}`) as HTMLTextAreaElement | null;
   if (existing) {
     existing.focus({ preventScroll: true });
@@ -88,8 +89,9 @@ export function setupPasteHandoff(): () => void {
     e.preventDefault();
     redirecting = true;
     try {
-      // Dismiss anything that replaces the composer (runs panel).
+      // Dismiss anything that replaces the composer (runs panel, stash).
       closeRunsPanel();
+      closeStashPanel();
       ta.focus({ preventScroll: true });
 
       if (hasFiles) {

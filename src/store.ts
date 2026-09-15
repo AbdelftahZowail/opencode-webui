@@ -23,6 +23,7 @@ import { fireHooks } from "./extensions/hooks";
 import { promptFilesToHistory } from "./lib/attachments";
 import { log } from "./lib/log";
 import { VCS_DIFF_CONTEXT_LINES, type DiffSource } from "./lib/sessionDiff";
+import { listStash, pushStash, removeStash, type StashEntry } from "./lib/stash";
 import { publishEvent } from "./lib/eventBus";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import { getPrefs } from "./prefs";
@@ -440,6 +441,8 @@ export interface State {
   stashPanelOpen: boolean;
   /** P6 — text the stash hands to the composer once (revertPrompt idiom). */
   stashPrompt: string | null;
+  /** P6 — the persisted stash, oldest→newest (see lib/stash.ts). */
+  stashEntries: StashEntry[];
   /** P3 — managed worktrees for `worktreesDirectory`. */
   worktrees: WorktreeDirectory[];
   worktreesDirectory: string | null;
@@ -516,6 +519,7 @@ const initialState: State = {
   diffViewerSessionID: null,
   stashPanelOpen: false,
   stashPrompt: null,
+  stashEntries: [],
   worktrees: [],
   worktreesDirectory: null,
   worktreesBusy: false,
@@ -3223,6 +3227,38 @@ export function consumeStashPrompt(): string | null {
   return text;
 }
 
+/** Re-read the persisted stash (cheap; the store is the only cache). */
+export function refreshStash() {
+  setState({ stashEntries: listStash() });
+}
+
+/** Stash the composer's current text (empty text is a no-op). */
+export function stashPromptText(text: string) {
+  if (!text.trim()) return;
+  setState({ stashEntries: pushStash(text) });
+}
+
+/** Identify a stash entry within the list (identity, else value+timestamp). */
+function stashIndexOf(entries: StashEntry[], entry: StashEntry): number {
+  const byIdentity = entries.indexOf(entry);
+  if (byIdentity !== -1) return byIdentity;
+  return entries.findIndex(
+    (e) => e.timestamp === entry.timestamp && e.text === entry.text,
+  );
+}
+
+/** Pop a specific entry (not necessarily the newest) back into the composer. */
+export function stashPopEntry(entry: StashEntry) {
+  const index = stashIndexOf(state.stashEntries, entry);
+  const next = index === -1 ? listStash() : removeStash(index);
+  setState({ stashEntries: next, stashPrompt: entry.text, stashPanelOpen: false });
+}
+
+export function stashDeleteEntry(entry: StashEntry) {
+  const index = stashIndexOf(state.stashEntries, entry);
+  setState({ stashEntries: index === -1 ? listStash() : removeStash(index) });
+}
+
 /** P3 — the directory worktree actions target (explicit, else the focused session). */
 function worktreeDirectory(): string | null {
   return state.worktreesDirectory ?? sessionDirectory(state.currentSessionID);
@@ -3237,7 +3273,9 @@ export async function loadWorktrees(directory?: string | null) {
   });
   try {
     const res = await api.worktreeList(dir ? { directory: dir } : undefined);
-    setState({ worktrees: res.data, worktreesBusy: false });
+    // `Worktree.List` is a bare array, but guard anyway: a shape change must
+    // degrade to "no worktrees", never crash the panel that renders it.
+    setState({ worktrees: Array.isArray(res) ? res : [], worktreesBusy: false });
   } catch (err) {
     setState({ worktreesBusy: false, worktreesError: parityError(err) });
   }

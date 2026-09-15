@@ -4,6 +4,7 @@ import {
   applyRevertView,
   childSessionsOf,
   clearHighlightMessage,
+  closeStashPanel,
   isDraftSession,
   liveToolPart,
   loadMessages,
@@ -12,6 +13,8 @@ import {
   revertMarkerFor,
   revealSubagentComposer,
   selectSession,
+  stashDeleteEntry,
+  stashPopEntry,
   useStore,
   type LiveAssistant,
   type LiveContentPart,
@@ -74,6 +77,8 @@ export function Conversation({
   const running = useStore((s) => s.running[sessionID] ?? false);
   const queued = useStore((s) => !!s.queued[sessionID]);
   const isPanelOpen = useStore((s) => s.runsPanelOpen);
+  const isStashOpen = useStore((s) => s.stashPanelOpen);
+  const stashEntries = useStore((s) => s.stashEntries);
   const composerOpen = useStore((s) => s.subagentComposerOpen);
   // A pending permission/question/form for THIS session takes the composer
   // slot over (focused pane only — background panes keep their composer).
@@ -271,6 +276,16 @@ export function Conversation({
         <PendingRequestsPanel sessionID={sessionID} />
       ) : isPanelOpen ? (
         <RunsPanel sessionID={sessionID} paneKey={paneKey} />
+      ) : isStashOpen ? (
+        // P6: the prompt stash also replaces the composer, and owns Esc while
+        // it is up. Only the focused pane renders it (same rule as RunsPanel).
+        <Target
+          id="stash.panel"
+          entries={stashEntries}
+          onPop={stashPopEntry}
+          onDelete={stashDeleteEntry}
+          onClose={closeStashPanel}
+        />
       ) : session?.parentID && !composerOpen ? (
         // Subagent pages open read-only — Enter reveals the composer
         // (site-wide binding in App), Backspace/↑ return to the parent.

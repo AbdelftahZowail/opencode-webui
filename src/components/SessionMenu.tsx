@@ -1,14 +1,24 @@
-import { useState } from "react";
-import { Archive, Download, EllipsisVertical, GitFork, Pencil } from "lucide-react";
-import { compactSession, exportSession, forkSession, renameSession, selectSession, useStore } from "../store";
+import { useEffect, useState } from "react";
+import { Archive, Download, EllipsisVertical, GitFork, Pencil, ShieldCheck } from "lucide-react";
+import {
+  compactSession,
+  exportSession,
+  forkSession,
+  loadSessionDetail,
+  renameSession,
+  selectSession,
+  updateSessionPermissionRules,
+  useStore,
+} from "../store";
 import type { SessionExportData } from "../api/client";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
+import { PermissionRulesEditor } from "./PermissionRulesEditor";
 
-type SessionDialog = "rename" | "fork" | "compact" | null;
+type SessionDialog = "rename" | "fork" | "compact" | "permissions" | null;
 
 export function SessionMenu({ sessionID }: { sessionID: string }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === sessionID));
@@ -37,6 +47,10 @@ export function SessionMenu({ sessionID }: { sessionID: string }) {
           <DropdownMenuItem onSelect={() => setDialog("compact")}>
             <Archive /> Compact
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => setDialog("permissions")}>
+            <ShieldCheck /> Permission rules…
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -45,7 +59,49 @@ export function SessionMenu({ sessionID }: { sessionID: string }) {
       )}
       {dialog === "fork" && <ForkDialog sessionID={sessionID} onClose={() => setDialog(null)} />}
       {dialog === "compact" && <CompactDialog sessionID={sessionID} onClose={() => setDialog(null)} />}
+      {dialog === "permissions" && (
+        <PermissionRulesDialog sessionID={sessionID} onClose={() => setDialog(null)} />
+      )}
     </>
+  );
+}
+
+/**
+ * Session-scoped permission rules. The engine evaluates them AFTER the
+ * agent's own rules and the LAST matching rule wins, so the editor is
+ * order-aware. Replace semantics: the PUT sends the whole ruleset. The
+ * authoritative copy is re-read from the session afterwards (there is no
+ * `session.updated` event for a rules change).
+ */
+function PermissionRulesDialog({ sessionID, onClose }: { sessionID: string; onClose: () => void }) {
+  const rules = useStore((s) => s.sessionDetails[sessionID]?.permissions);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void loadSessionDetail(sessionID);
+  }, [sessionID]);
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Permission rules</DialogTitle>
+          <DialogDescription>
+            Session-scoped. Evaluated after the agent's own rules — the last matching rule wins.
+          </DialogDescription>
+        </DialogHeader>
+        <PermissionRulesEditor
+          rules={rules ?? []}
+          onSave={(next) => {
+            setBusy(true);
+            void updateSessionPermissionRules(sessionID, next)
+              .then(() => onClose())
+              .finally(() => setBusy(false));
+          }}
+          onCancel={onClose}
+        />
+      </DialogContent>
+    </Dialog>
   );
 }
 

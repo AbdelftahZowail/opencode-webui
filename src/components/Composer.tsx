@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListTree, Paperclip, Pencil, Send, Square, Terminal, X } from "lucide-react";
+import { Archive, ListTree, Paperclip, Pencil, Send, Square, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, LocationInfo, ProjectInfo, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
@@ -16,8 +16,10 @@ import {
   activateSkill,
   backgroundSubagents,
   childSessionsOf,
+  closeStashPanel,
   compactSession,
   consumeRevertPrompt,
+  consumeStashPrompt,
   exportSession,
   forkSession,
   focusedPaneKey,
@@ -28,8 +30,10 @@ import {
   newSession,
   closeRunsPanel,
   openRunsPanel,
+  openStashPanel,
   redoSession,
   refreshSessions,
+  refreshStash,
   renameSession,
   requestInterrupt,
   selectSession,
@@ -38,6 +42,7 @@ import {
   sendPromptWithFiles,
   sendShell,
   signalUI,
+  stashPromptText,
   switchAgent,
   undoSession,
   useStore,
@@ -442,6 +447,28 @@ export function Composer({
       });
     }
   }, [revertPrompt]);
+
+  // P6 stash: popping an entry hands its text to the composer (same one-shot
+  // channel as /undo). The panel owns the list; the composer owns the buffer.
+  const stashPrompt = useStore((s) => s.stashPrompt);
+  useEffect(() => {
+    if (stashPrompt === null) return;
+    setText(stashPrompt);
+    consumeStashPrompt();
+    setCaret(stashPrompt.length);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      if (focusedPaneKey() === paneKey) el.focus();
+      placeCaretEnd(el);
+    });
+  }, [stashPrompt]);
+
+  // The stash panel replaces the composer in its slot (RunsPanel idiom), so
+  // typing/pasting anywhere must dismiss it the same way it dismisses the
+  // runs panel — see composerHandoff.ts.
+  const stashOpen = useStore((s) => s.stashPanelOpen);
+  const stashCount = useStore((s) => s.stashEntries.length);
 
   // The slash menu keys off the ACTIVE REGION — the buffer from index 0 up to
   // the caret. Typing "/" at position 0 of a longer buffer ("/" into "explain
@@ -1263,6 +1290,18 @@ export function Composer({
                           return;
                         }
                       }
+                      if (e.key.toLowerCase() === "s" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                        // P6: Ctrl+S stashes the current prompt (v2's
+                        // prompt.stash bind) and empties the buffer. Live
+                        // slash/mention menus must not swallow it.
+                        if (!isSlash) {
+                          e.preventDefault(); // shadow the browser's Save
+                          stashPromptText(text);
+                          setText("");
+                          notify({ title: "Prompt stashed" });
+                        }
+                        return;
+                      }
                       if (e.key.toLowerCase() === "b" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
                         // TUI parity: ctrl+b = session.background — background
                         // this session's synchronous (task-tool) subagents so
@@ -1416,6 +1455,20 @@ export function Composer({
                 >
                   <ListTree className="size-3" />
                   {runsLabel}
+                </button>
+                <button
+                  type="button"
+                  data-stash-panel-trigger
+                  onClick={() => (stashOpen ? closeStashPanel() : (refreshStash(), openStashPanel()))}
+                  title={stashOpen ? "Close prompt stash (Esc)" : "Prompt stash — saved prompts (Ctrl+S to stash this one)"}
+                  className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                    stashOpen
+                      ? "bg-[color:var(--surface-brand-weak)] text-[color:var(--surface-brand-strong)]"
+                      : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                  }`}
+                >
+                  <Archive className="size-3" />
+                  stash{stashCount > 0 ? ` ${stashCount}` : ""}
                 </button>
                 <button
                   type="button"

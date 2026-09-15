@@ -409,20 +409,7 @@ export function IntegrationsSection() {
                           </span>
                         )}
                         {c.type === "credential" && (
-                          <button
-                            type="button"
-                            className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:bg-[var(--surface-raised-base-hover)] hover:text-[var(--text-strong)]"
-                            onClick={() => {
-                              void api
-                                .credentialActivate(c.id)
-                                .then(refresh)
-                                .catch((e: unknown) =>
-                                  notify({ title: "Activate failed", description: errMsg(e), variant: "destructive" }),
-                                );
-                            }}
-                          >
-                            activate
-                          </button>
+                          <CredentialActions credentialID={c.id} label={c.label} onChanged={refresh} />
                         )}
                       </div>
                     ))}
@@ -483,6 +470,104 @@ export function IntegrationsSection() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * A stored credential's actions: activate, relabel, remove. Local busy state
+ * (the section's list is refreshed on success) keeps it independent of the
+ * surrounding integration row.
+ */
+function CredentialActions({
+  credentialID,
+  label,
+  onChanged,
+}: {
+  credentialID: string;
+  label: string;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState(label);
+
+  const run = (action: () => Promise<unknown>, failure: string) => {
+    setBusy(true);
+    void action()
+      .then(onChanged)
+      .catch((e: unknown) => notify({ title: failure, description: errMsg(e), variant: "destructive" }))
+      .finally(() => setBusy(false));
+  };
+
+  if (renaming) {
+    const save = () => {
+      const next = draft.trim();
+      if (!next || next === label) {
+        setRenaming(false);
+        setDraft(label);
+        return;
+      }
+      setRenaming(false);
+      run(() => api.credentialPatch(credentialID, next), "Rename failed");
+    };
+    return (
+      <span className="flex items-center gap-1">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") {
+              setRenaming(false);
+              setDraft(label);
+            }
+          }}
+          autoFocus
+          className={`${inputCls} h-6 w-36 px-1.5 py-0 text-[11px]`}
+        />
+        <button
+          type="button"
+          disabled={busy}
+          className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:text-[var(--text-strong)] disabled:opacity-50"
+          onClick={save}
+        >
+          save
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <button
+        type="button"
+        disabled={busy}
+        className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:bg-[var(--surface-raised-base-hover)] hover:text-[var(--text-strong)] disabled:opacity-50"
+        onClick={() => run(() => api.credentialActivate(credentialID), "Activate failed")}
+      >
+        {busy ? "…" : "activate"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:bg-[var(--surface-raised-base-hover)] hover:text-[var(--text-strong)] disabled:opacity-50"
+        onClick={() => {
+          setDraft(label);
+          setRenaming(true);
+        }}
+      >
+        rename
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        title="Remove this credential"
+        className="rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:text-[var(--surface-critical-strong)] disabled:opacity-50"
+        onClick={() => run(() => api.credentialDelete(credentialID), "Delete failed")}
+      >
+        remove
+      </button>
+    </span>
   );
 }
 

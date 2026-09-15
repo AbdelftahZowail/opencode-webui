@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { File, Folder } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry } from "../api/client";
+import { rankByFrecency } from "../lib/frecency";
+import { loadFrecency, recordFileUsage } from "../lib/frecencyStore";
 import {
   Command,
   CommandEmpty,
@@ -51,7 +53,12 @@ export function FilePicker({ open, query, location, onOpenChange, onPick, childr
       void api
         .fsFind(query, { location: resolvedLocation, limit: 20 })
         .then((res) => {
-          if (!cancelled) setResults(res.data);
+          if (cancelled) return;
+          // P6: recently/frequently used files float up. The engine decides
+          // WHAT matches; frecency only reorders, so recall is unchanged.
+          setResults(
+            rankByFrecency(res.data, (entry) => entry.path, loadFrecency(resolvedLocation)),
+          );
         })
         .catch(() => {
           if (!cancelled) setResults([]);
@@ -72,7 +79,16 @@ export function FilePicker({ open, query, location, onOpenChange, onPick, childr
             {results.length > 0 && (
               <CommandGroup heading="Files">
                 {results.map((entry) => (
-                  <CommandItem key={entry.path} value={entry.path} onSelect={() => onPick(entry)}>
+                  <CommandItem
+                    key={entry.path}
+                    value={entry.path}
+                    onSelect={() => {
+                      // Record the pick where it is observed — the same moment
+                      // v2's autocomplete records frecency.
+                      recordFileUsage(resolvedLocation, entry.path);
+                      onPick(entry);
+                    }}
+                  >
                     {entry.type === "directory" ? (
                       <Folder className="text-[color:var(--text-weak)]" />
                     ) : (

@@ -8,7 +8,7 @@
  * indicator is a pure subscriber, so switching sessions paints instantly from
  * cache and the network is touched on a single cadence app-wide.
  */
-import type { McpServer } from "../api/client";
+import type { McpServerConfig, McpServer } from "../api/client";
 import { api } from "../api/client";
 import { registerPoller } from "./scheduler";
 
@@ -86,4 +86,22 @@ export function ensureMcpStatusFresh(): void {
   if (snapshot.updatedAt === 0 || Date.now() - snapshot.updatedAt > STALE_MS) {
     void refreshMcpStatus();
   }
+}
+
+// ---- write operations -----------------------------------------------------
+//
+// Add/edit/remove live here rather than in the indicator so the ONE cache and
+// the ONE poller stay the single source of truth: every mutation refreshes
+// the snapshot, and every subscriber repaints.
+
+/** Add or replace an MCP server (PUT /api/mcp/{server}), then re-read. */
+export async function putMcpServer(server: string, config: McpServerConfig): Promise<void> {
+  await api.mcpPut(server, config);
+  await refreshMcpStatus();
+}
+
+/** Remove an MCP server (DELETE), then re-read. */
+export async function deleteMcpServer(server: string): Promise<void> {
+  await api.mcpDelete(server);
+  await refreshMcpStatus();
 }

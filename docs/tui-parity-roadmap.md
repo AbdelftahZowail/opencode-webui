@@ -84,14 +84,14 @@ Everything below is either v2-API-native or read directly from `v2` source.
 
 | Phase | Scope | State |
 | --- | --- | --- |
-| P0 | Contract sync (snapshot + client + types + docs) | **done** (uncommitted) |
+| P0 | Contract sync (snapshot + client + types + docs) | **done** (`31aefe3`) |
 | P1 | ~~Legacy allow-list bridge~~ | **dropped** — v2 is `/api/*`-only |
-| P2 | Turn-scoped diff viewer | next; v2-native, validated |
-| P3 | Worktrees + workspaces | validated | 
-| P4 | Actionable settings: plugins, permissions, shell, MCP, credentials | validated |
+| P2 | Turn-scoped diff viewer | **done** — `DiffViewer` (target `diff.viewer`), 3 sources, tree, hunk/file nav, split/unified, review markers |
+| P3 | Worktrees + workspaces | **done** — `WorktreePanel` in the WorkspacePicker (+ `moveSessionToDirectory`) |
+| P4 | Actionable settings: plugins, permissions, MCP, credentials | **done** for plugins / permission rules / MCP add-remove / credential relabel-delete. **Shell selection deferred** (no settings host; global preference) |
 | P5 | ~~Legacy-only capabilities~~ | **dropped** (not v2 features) |
-| P6 | Client-side conveniences (stash, timeline, frecency) | trimmed to v2-verified items |
-| P7 | Webui correctness debts | measured on our own code |
+| P6 | Client-side conveniences (stash, timeline, frecency) | **partial** — prompt stash (panel + Ctrl+S + pop) and `@`-mention frecency are done; **timeline jump-to-message and directory recents are not built** |
+| P7 | Webui correctness debts | in progress — see below |
 
 ---
 

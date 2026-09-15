@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Boxes, RefreshCw } from "lucide-react";
-import type { McpServer, McpStatus } from "../api/client";
+import { Boxes, Plus, RefreshCw, Trash2 } from "lucide-react";
+import type { McpServer, McpServerConfig, McpStatus } from "../api/client";
 import { api } from "../api/client";
 import { Badge } from "./ui";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import {
+  deleteMcpServer,
   ensureMcpStatus,
   ensureMcpStatusFresh,
   getMcpStatus,
+  putMcpServer,
   refreshMcpStatus,
   subscribeMcpStatus,
 } from "../lib/mcpStatus";
@@ -44,6 +47,7 @@ export function McpIndicator() {
   const { servers, error } = useSyncExternalStore(subscribeMcpStatus, getMcpStatus);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -143,6 +147,14 @@ export function McpIndicator() {
             <span className="font-mono text-[10px] text-[var(--text-weaker)]">
               {connected}/{total}
             </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title="Add a server"
+              onClick={() => setAdding((v) => !v)}
+            >
+              <Plus className="size-3.5" />
+            </Button>
             <Button variant="ghost" size="icon-sm" title="Refresh" onClick={() => void refreshMcpStatus()}>
               <RefreshCw className="size-3.5" />
             </Button>
@@ -151,10 +163,29 @@ export function McpIndicator() {
 
         {error && <p className="text-[11px] text-[var(--surface-critical-strong)]">{error}</p>}
 
-        {total === 0 ? (
-          <p className="py-2 text-center text-xs text-[var(--text-weaker)]">
-            No MCP servers configured. Add them in your opencode config; they appear here.
-          </p>
+        {adding && (
+          <McpServerForm
+            onCancel={() => setAdding(false)}
+            onSubmit={(name, config) => {
+              setBusy(`put:${name}`);
+              void putMcpServer(name, config)
+                .then(() => setAdding(false))
+                .catch(() => undefined)
+                .finally(() => setBusy(null));
+            }}
+            busy={busy !== null}
+          />
+        )}
+
+        {total === 0 && !adding ? (
+          <div className="flex flex-col items-center gap-2 py-2">
+            <p className="text-center text-xs text-[var(--text-weaker)]">
+              No MCP servers configured. Add one here, or in your opencode config.
+            </p>
+            <Button size="xs" variant="outline" onClick={() => setAdding(true)}>
+              <Plus className="size-3" /> Add server
+            </Button>
+          </div>
         ) : (
           <div className="flex max-h-80 flex-col gap-1 overflow-y-auto">
             {servers?.map((s) => (
@@ -176,33 +207,152 @@ function ServerRow({
   busy: string | null;
   runAction: (key: string, action: () => Promise<unknown>) => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
   return (
-    <div className="flex items-center justify-between gap-2 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2.5 py-1.5">
-      <div className="flex min-w-0 items-center gap-1.5">
-        <span className="truncate font-mono text-[12px] text-[var(--text-strong)]" title={server.name}>
-          {server.name}
-        </span>
-        <Badge tone={statusTone(server.status)}>{statusLabel(server.status)}</Badge>
+    <div
+      data-oc-mcp-server={server.name}
+      className="flex flex-col gap-1 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] px-2.5 py-1.5"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate font-mono text-[12px] text-[var(--text-strong)]" title={server.name}>
+            {server.name}
+          </span>
+          <Badge tone={statusTone(server.status)}>{statusLabel(server.status)}</Badge>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {server.status.status === "connected" ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy !== null}
+              onClick={() => runAction(`disconnect:${server.name}`, () => api.mcpDisconnect(server.name))}
+            >
+              {busy === `disconnect:${server.name}` ? "…" : "Disconnect"}
+            </Button>
+          ) : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => runAction(`connect:${server.name}`, () => api.mcpConnect(server.name))}
+            >
+              {busy === `connect:${server.name}` ? "…" : "Connect"}
+            </Button>
+          )}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title={confirming ? "Confirm remove" : "Remove server"}
+            disabled={busy !== null}
+            onClick={() => {
+              if (!confirming) {
+                setConfirming(true);
+                return;
+              }
+              setConfirming(false);
+              runAction(`delete:${server.name}`, () => deleteMcpServer(server.name));
+            }}
+            className={confirming ? "text-[var(--surface-critical-strong)]" : ""}
+          >
+            <Trash2 className="size-3.5" />
+          </Button>
+        </div>
       </div>
-      {server.status.status === "connected" ? (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={busy !== null}
-          onClick={() => runAction(`disconnect:${server.name}`, () => api.mcpDisconnect(server.name))}
-        >
-          {busy === `disconnect:${server.name}` ? "…" : "Disconnect"}
-        </Button>
-      ) : (
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={busy !== null}
-          onClick={() => runAction(`connect:${server.name}`, () => api.mcpConnect(server.name))}
-        >
-          {busy === `connect:${server.name}` ? "…" : "Connect"}
-        </Button>
+      {confirming && (
+        <p className="text-[11px] text-[var(--surface-warning-strong)]">
+          Remove “{server.name}”? Click the bin again to confirm.
+        </p>
       )}
+      {server.status.status === "failed" && (
+        <p className="text-[11px] text-[var(--surface-critical-strong)]">{server.status.error}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Add a server. There is no read route for a single server's config, so this
+ * is deliberately ADD-only: an "edit" without the current config would
+ * silently clobber it (PUT replaces).
+ */
+function McpServerForm({
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  busy: boolean;
+  onSubmit: (name: string, config: McpServerConfig) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<"local" | "remote">("local");
+  const [command, setCommand] = useState("");
+  const [url, setUrl] = useState("");
+
+  const canSave =
+    name.trim() !== "" && (type === "local" ? command.trim() !== "" : url.trim() !== "");
+
+  const submit = () => {
+    if (!canSave || busy) return;
+    const config: McpServerConfig =
+      type === "local"
+        ? { type: "local", command: command.trim().split(/\s+/) }
+        : { type: "remote", url: url.trim() };
+    onSubmit(name.trim(), config);
+  };
+
+  return (
+    <div
+      data-oc-mcp-add
+      className="flex flex-col gap-2 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] p-2"
+    >
+      <div className="flex items-center gap-1">
+        {(["local", "remote"] as const).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => setType(kind)}
+            className={`cursor-pointer rounded px-2 py-0.5 text-[11px] transition-colors ${
+              type === kind
+                ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
+                : "text-[var(--text-weak)] hover:text-[var(--text-strong)]"
+            }`}
+          >
+            {kind}
+          </button>
+        ))}
+      </div>
+      <Input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="server name"
+        className="h-7 text-xs"
+        autoFocus
+      />
+      {type === "local" ? (
+        <Input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="command (e.g. npx -y some-mcp-server)"
+          className="h-7 font-mono text-xs"
+        />
+      ) : (
+        <Input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://example.com/mcp"
+          className="h-7 font-mono text-xs"
+        />
+      )}
+      <div className="flex justify-end gap-1">
+        <Button size="xs" variant="ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button size="xs" variant="outline" disabled={!canSave || busy} onClick={submit}>
+          {busy ? "…" : "Add"}
+        </Button>
+      </div>
     </div>
   );
 }

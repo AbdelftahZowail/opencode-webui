@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { Check, Folder } from "lucide-react";
 import { api, type LocationInfo, type ProjectInfo } from "../api/client";
-import { useStore } from "../store";
+import {
+  createWorktree,
+  loadWorktrees,
+  moveSessionToDirectory,
+  refreshWorktrees,
+  removeWorktree,
+  useStore,
+} from "../store";
+import { Target } from "../extensions/registry";
 import { Button } from "./ui/button";
 import {
   DropdownMenu,
@@ -25,6 +33,9 @@ function projectName(p: ProjectInfo): string {
 
 export function WorkspacePicker({ sessionID }: { sessionID: string }) {
   const session = useStore((s) => s.sessions.find((x) => x.id === sessionID));
+  const worktrees = useStore((s) => s.worktrees);
+  const worktreesBusy = useStore((s) => s.worktreesBusy);
+  const worktreesError = useStore((s) => s.worktreesError);
   const [location, setLocation] = useState<LocationInfo | null>(null);
   const [current, setCurrent] = useState<ProjectInfo | null>(null);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -42,6 +53,9 @@ export function WorkspacePicker({ sessionID }: { sessionID: string }) {
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
+    // Worktrees are location-scoped — always list them for THIS session's
+    // directory, never the engine's ambient location.
+    void loadWorktrees(dir ?? null);
   }
 
   return (
@@ -96,6 +110,21 @@ export function WorkspacePicker({ sessionID }: { sessionID: string }) {
             );
           })
         )}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Worktrees</DropdownMenuLabel>
+        <div className="px-1.5 pb-1" data-oc-workspace-worktrees>
+          <Target
+            id="worktree.panel"
+            location={dir ?? null}
+            worktrees={worktrees}
+            busy={worktreesBusy}
+            error={worktreesError}
+            onCreate={createWorktree}
+            onRemove={removeWorktree}
+            onRefresh={refreshWorktrees}
+            onUse={dir ? (target: string) => void moveSessionToDirectory(sessionID, target) : undefined}
+          />
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Blocks, ChevronLeft, ChevronRight, ShieldCheck, Smartphone, XIcon } from "lucide-react";
+import { Blocks, ChevronLeft, ChevronRight, Puzzle, ShieldCheck, Smartphone, XIcon } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
@@ -24,7 +24,9 @@ import {
 } from "../../lib/extensionDiagnostics";
 import { AccessSection } from "./AccessSection";
 import { AppSection } from "./AppSection";
+import { PluginsSection } from "./PluginsSection";
 import { Empty, SectionHeader, inputCls } from "./shared";
+import { checkPlugins, loadPlugins, updatePlugins, useStore } from "../../store";
 
 let openRequest: ((section?: string) => void) | null = null;
 
@@ -100,6 +102,7 @@ export function SettingsDialog() {
   const tabs = useMemo(
     () => [
       { id: "extensions", label: "Extensions", icon: Blocks },
+      { id: "plugins", label: "Plugins", icon: Puzzle },
       { id: "security", label: "Security", icon: ShieldCheck },
       ...(phone ? [{ id: "app", label: "App", icon: Smartphone }] : []),
     ],
@@ -137,7 +140,7 @@ export function SettingsDialog() {
           <DialogHeader className="pr-8">
             <DialogTitle>Settings</DialogTitle>
             <p className="text-xs text-[var(--text-weaker)]">
-              Extensions · security{phone ? " · app" : ""}
+              Extensions · plugins · security{phone ? " · app" : ""}
             </p>
           </DialogHeader>
 
@@ -153,6 +156,9 @@ export function SettingsDialog() {
             <ScrollArea className="min-h-0 flex-1 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] p-3">
               <TabsContent value="extensions">
                 <ExtensionsSection />
+              </TabsContent>
+              <TabsContent value="plugins">
+                <PluginsTab />
               </TabsContent>
               <TabsContent value="security">
                 <AccessSection />
@@ -337,6 +343,29 @@ function ExtensionContract({ info }: { info: RuntimeExtensionInfo }) {
         </p>
       ))}
     </div>
+  );
+}
+
+/**
+ * Settings › Plugins. Thin store-connected host so the section itself stays
+ * presentational: the catalog + action state live in the store (the plugin
+ * actions are side effects and belong there), and the section just renders.
+ */
+function PluginsTab() {
+  const plugins = useStore((s) => s.plugins);
+  const busy = useStore((s) => s.pluginsBusy);
+  const error = useStore((s) => s.pluginsError);
+  useEffect(() => {
+    void loadPlugins();
+  }, []);
+  return (
+    <PluginsSection
+      plugins={plugins ?? []}
+      busy={busy}
+      error={error}
+      onCheck={(target) => void checkPlugins(target)}
+      onUpdate={(targets) => void updatePlugins(targets)}
+    />
   );
 }
 
