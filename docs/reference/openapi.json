@@ -509,6 +509,332 @@
         "summary": "List plugins"
       }
     },
+    "/api/plugin/await-activation": {
+      "post": {
+        "tags": [
+          "plugin"
+        ],
+        "operationId": "v2.plugin.awaitActivation",
+        "parameters": [
+          {
+            "name": "location",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "style": "deepObject",
+            "explode": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Wait for configured plugin activation at a Location to settle, including missing-package installs. Completion does not imply every plugin succeeded or background resource discovery finished. Cancelling this wait does not cancel activation.",
+        "summary": "Wait for plugin activation"
+      }
+    },
+    "/api/plugin/check": {
+      "post": {
+        "tags": [
+          "plugin"
+        ],
+        "operationId": "v2.plugin.check",
+        "parameters": [
+          {
+            "name": "location",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "style": "deepObject",
+            "explode": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "$ref": "#/components/schemas/Location.InfoEncoded"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Plugin.Info"
+                      }
+                    }
+                  },
+                  "required": [
+                    "location",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Check one or all package plugins for available updates.",
+        "summary": "Check plugin updates",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/plugin/update": {
+      "post": {
+        "tags": [
+          "plugin"
+        ],
+        "operationId": "v2.plugin.update",
+        "parameters": [
+          {
+            "name": "location",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "style": "deepObject",
+            "explode": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Update package plugins concurrently and notify active locations to reload them. Responds once every update has finished; fails when any update fails.",
+        "summary": "Update plugins",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "targets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "targets"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/session": {
       "get": {
         "tags": [
@@ -829,6 +1155,16 @@
                     "anyOf": [
                       {
                         "$ref": "#/components/schemas/Session.Metadata"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "permissions": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Permission.Ruleset"
                       },
                       {
                         "type": "null"
@@ -1372,14 +1708,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
                 }
               }
             }
@@ -3067,6 +3396,156 @@
         "summary": "Get session context"
       }
     },
+    "/api/session/{sessionID}/diff": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "operationId": "v2.session.diff",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^msg_"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "User message whose turn to diff. Defaults to the turn of the newest user message."
+            },
+            "required": false
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^msg_"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Later user message whose turn ends the range. Defaults to the turn of `from` alone."
+            },
+            "required": false
+          },
+          {
+            "name": "context",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Unchanged lines around each hunk. Omit for full-file patches."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/FileDiff.Info"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "MessageNotFoundError | SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/MessageNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "UnknownError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnknownErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Structured per-file diffs of the files a turn changed. A turn runs from the first prompt after the session was last idle until its next idle marker, so prompts steered in while it was busy belong to the same turn; `to` extends the range through a later turn. Compares the range's first recorded snapshot with its last; a step still running in the active session compares against the working copy. Ranges that span a location change are rejected. In sessions without any idle marker, a prompt's turn spans until the next user message.",
+        "summary": "Diff session turns"
+      }
+    },
     "/api/session/{sessionID}/inbox": {
       "get": {
         "tags": [
@@ -4162,149 +4641,6 @@
         },
         "description": "Retrieve one projected message owned by the Session.",
         "summary": "Get session message"
-      },
-      "patch": {
-        "tags": [
-          "session"
-        ],
-        "operationId": "v2.session.messageUpdate",
-        "parameters": [
-          {
-            "name": "sessionID",
-            "in": "path",
-            "schema": {
-              "type": "string",
-              "pattern": "^ses"
-            },
-            "required": true
-          },
-          {
-            "name": "messageID",
-            "in": "path",
-            "schema": {
-              "type": "string",
-              "pattern": "^msg_"
-            },
-            "required": true
-          }
-        ],
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "$ref": "#/components/schemas/Session.Message.Assistant"
-                    }
-                  },
-                  "required": [
-                    "data"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "InvalidRequestError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
-                    },
-                    {
-                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "UnauthorizedError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "SessionNotFoundError | MessageNotFoundError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
-                    },
-                    {
-                      "$ref": "#/components/schemas/MessageNotFoundErrorEncoded"
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "SessionBusyError | ConflictError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/SessionBusyErrorEncoded"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ConflictErrorEncoded"
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        },
-        "description": "Replace the content of a completed assistant message in an idle session.",
-        "summary": "Update assistant message content",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "content": {
-                    "type": "array",
-                    "items": {
-                      "anyOf": [
-                        {
-                          "$ref": "#/components/schemas/Session.Message.Assistant.Text"
-                        },
-                        {
-                          "$ref": "#/components/schemas/Session.Message.Assistant.Reasoning"
-                        },
-                        {
-                          "$ref": "#/components/schemas/Session.Message.Assistant.Tool"
-                        }
-                      ]
-                    }
-                  }
-                },
-                "required": [
-                  "content"
-                ],
-                "additionalProperties": false
-              }
-            }
-          },
-          "required": true
-        }
       }
     },
     "/api/session/{sessionID}/environment": {
@@ -4530,6 +4866,34 @@
               ]
             },
             "required": false
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "agent-switched",
+                    "model-switched",
+                    "location-switched",
+                    "user",
+                    "synthetic",
+                    "system",
+                    "skill",
+                    "shell",
+                    "assistant",
+                    "compaction"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by message type before pagination. When omitted, all message types are returned. Pass the same type when following cursors."
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -4592,7 +4956,7 @@
             }
           }
         },
-        "description": "Retrieve projected messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.",
+        "description": "Retrieve projected messages for a session, optionally filtered by type. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline, passing the same type filter on each page.",
         "summary": "Get session messages"
       }
     },
@@ -7407,7 +7771,7 @@
             }
           }
         },
-        "description": "Update project display metadata and workspace commands.",
+        "description": "Update the project canonical directory, display metadata, and workspace commands.",
         "summary": "Update project",
         "requestBody": {
           "content": {
@@ -7415,6 +7779,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "canonical": {
+                    "type": "string"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -8810,6 +9177,89 @@
         }
       }
     },
+    "/api/session/{sessionID}/permission/rules": {
+      "put": {
+        "tags": [
+          "permission"
+        ],
+        "operationId": "v2.session.permission.rules",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Replace the session-scoped permission rules. Rules are evaluated after the agent's rules, and the last matching rule wins.",
+        "summary": "Replace session permission rules",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "permissions": {
+                    "$ref": "#/components/schemas/Permission.Ruleset"
+                  }
+                },
+                "required": [
+                  "permissions"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/fs/read/*": {
       "get": {
         "tags": [
@@ -8890,6 +9340,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "FileNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileNotFoundErrorEncoded"
+                }
+              }
+            }
           }
         },
         "description": "Serve one file relative to the requested location.",
@@ -8954,7 +9414,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "An absolute path or a path relative to the requested location. Defaults to the location directory."
             },
             "required": false
           }
@@ -9008,7 +9469,7 @@
             }
           }
         },
-        "description": "List direct children of one directory relative to the requested location.",
+        "description": "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations.",
         "summary": "List directory"
       }
     },
@@ -12216,7 +12677,7 @@
         "summary": "List references"
       }
     },
-    "/api/worktree/{projectID}": {
+    "/api/worktree": {
       "get": {
         "tags": [
           "worktree"
@@ -12224,12 +12685,44 @@
         "operationId": "v2.worktree.list",
         "parameters": [
           {
-            "name": "projectID",
-            "in": "path",
+            "name": "location",
+            "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "required": true
+            "required": false,
+            "style": "deepObject",
+            "explode": true
           }
         ],
         "security": [],
@@ -12245,11 +12738,18 @@
             }
           },
           "400": {
-            "description": "InvalidRequestError",
+            "description": "WorktreeError | InvalidRequestError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/WorktreeErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                    }
+                  ]
                 }
               }
             }
@@ -12265,7 +12765,7 @@
             }
           }
         },
-        "description": "List known local worktrees for a project.",
+        "description": "Discover worktrees through the requested location's strategies and return its project's inventory.",
         "summary": "List worktrees"
       },
       "post": {
@@ -12275,12 +12775,44 @@
         "operationId": "v2.worktree.create",
         "parameters": [
           {
-            "name": "projectID",
-            "in": "path",
+            "name": "location",
+            "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "required": true
+            "required": false,
+            "style": "deepObject",
+            "explode": true
           }
         ],
         "security": [],
@@ -12323,35 +12855,13 @@
             }
           }
         },
-        "description": "Create a worktree for a project and run its configured setup script.",
+        "description": "Create a local worktree using the location's registered strategy and directory defaults, then run the project's setup script.",
         "summary": "Create worktree",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "strategy": {
-                    "type": "string"
-                  },
-                  "from": {
-                    "type": "string"
-                  },
-                  "branch": {
-                    "type": "string"
-                  },
-                  "directory": {
-                    "type": "string"
-                  },
-                  "name": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "strategy",
-                  "directory"
-                ],
-                "additionalProperties": false
+                "$ref": "#/components/schemas/Worktree.CreateInput"
               }
             }
           },
@@ -12365,12 +12875,44 @@
         "operationId": "v2.worktree.remove",
         "parameters": [
           {
-            "name": "projectID",
-            "in": "path",
+            "name": "location",
+            "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "required": true
+            "required": false,
+            "style": "deepObject",
+            "explode": true
           }
         ],
         "security": [],
@@ -12406,26 +12948,13 @@
             }
           }
         },
-        "description": "Remove a managed worktree from a project.",
+        "description": "Remove a managed worktree from the requested location's project using its recorded strategy.",
         "summary": "Remove worktree",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "directory": {
-                    "type": "string"
-                  },
-                  "force": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "directory",
-                  "force"
-                ],
-                "additionalProperties": false
+                "$ref": "#/components/schemas/Worktree.RemoveInput"
               }
             }
           },
@@ -12433,7 +12962,7 @@
         }
       }
     },
-    "/api/worktree/{projectID}/refresh": {
+    "/api/worktree/refresh": {
       "post": {
         "tags": [
           "worktree"
@@ -12441,12 +12970,44 @@
         "operationId": "v2.worktree.refresh",
         "parameters": [
           {
-            "name": "projectID",
-            "in": "path",
+            "name": "location",
+            "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "directory": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "workspace": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "required": true
+            "required": false,
+            "style": "deepObject",
+            "explode": true
           }
         ],
         "security": [],
@@ -12482,7 +13043,7 @@
             }
           }
         },
-        "description": "Reconcile stored worktrees with the project repositories.",
+        "description": "Discover worktrees from the requested location and reconcile the shared project inventory.",
         "summary": "Refresh worktrees"
       }
     },
@@ -13826,6 +14387,149 @@
         "description": "Return configuration documents and discovery sources for the requested location, from lowest to highest priority.",
         "summary": "Get configuration"
       }
+    },
+    "/api/config/preferences": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "v2.config.preferences",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Config.Preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config.Preferences"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return preferences from the highest-precedence global configuration document.",
+        "summary": "Get global preferences"
+      },
+      "patch": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "v2.config.updatePreferences",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Config.Preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config.Preferences"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Patch preferences in the highest-precedence global configuration document.",
+        "summary": "Update global preferences",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Config.PreferencesPatch"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/config/shell": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "v2.config.shells",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigShell.Option"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return shells available to terminal and agent execution.",
+        "summary": "List available shells"
+      }
     }
   },
   "components": {
@@ -14133,13 +14837,28 @@
                   "package"
                 ]
               },
-              "package": {
+              "target": {
                 "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "outdated": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "updating": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
               }
             },
             "required": [
               "type",
-              "package"
+              "target"
             ],
             "additionalProperties": false
           },
@@ -14231,6 +14950,9 @@
               },
               "error": {
                 "type": "string"
+              },
+              "ref": {
+                "type": "string"
               }
             },
             "required": [
@@ -14261,6 +14983,35 @@
           "source",
           "features",
           "state"
+        ],
+        "additionalProperties": false
+      },
+      "ServiceUnavailableErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": [
+              "ServiceUnavailableError"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "_tag",
+          "message"
         ],
         "additionalProperties": false
       },
@@ -14514,6 +15265,9 @@
           },
           "metadata": {
             "$ref": "#/components/schemas/Session.Metadata"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/Permission.Ruleset"
           },
           "revert": {
             "$ref": "#/components/schemas/Session.Revert"
@@ -15943,6 +16697,62 @@
         ],
         "additionalProperties": false
       },
+      "Session.Message.ProviderState_5": {
+        "type": "object"
+      },
+      "Session.ProviderContext.Provenance": {
+        "type": "object",
+        "properties": {
+          "providerID": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "providerID",
+          "provider",
+          "modelID",
+          "route",
+          "protocol",
+          "endpoint"
+        ],
+        "additionalProperties": false
+      },
+      "Session.ProviderContext": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Session.ProviderContext.Provenance"
+          },
+          "messages": {}
+        },
+        "required": [
+          "version",
+          "provenance",
+          "messages"
+        ],
+        "additionalProperties": false
+      },
       "Session.Message.Compaction.Completed": {
         "type": "object",
         "properties": {
@@ -15984,11 +16794,26 @@
               "manual"
             ]
           },
+          "model": {
+            "$ref": "#/components/schemas/Model.Ref"
+          },
+          "providerState": {
+            "$ref": "#/components/schemas/Session.Message.ProviderState_5"
+          },
           "summary": {
             "type": "string"
           },
           "recent": {
             "type": "string"
+          },
+          "providerContext": {
+            "$ref": "#/components/schemas/Session.ProviderContext"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage.Info"
           }
         },
         "required": [
@@ -16045,6 +16870,12 @@
           },
           "error": {
             "$ref": "#/components/schemas/Session.StructuredError"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage.Info"
           }
         },
         "required": [
@@ -16069,6 +16900,51 @@
             "$ref": "#/components/schemas/Session.Message.Compaction.Failed"
           }
         ]
+      },
+      "Session.Message.Idle": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^msg_"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "created"
+            ],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "idle"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed",
+              "interrupted"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "type",
+          "outcome"
+        ],
+        "additionalProperties": false
       },
       "Session.Message.Info": {
         "anyOf": [
@@ -16101,6 +16977,9 @@
           },
           {
             "$ref": "#/components/schemas/Session.Message.Compaction"
+          },
+          {
+            "$ref": "#/components/schemas/Session.Message.Idle"
           }
         ]
       },
@@ -16569,35 +17448,6 @@
         ],
         "additionalProperties": false
       },
-      "ServiceUnavailableErrorEncoded": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": [
-              "ServiceUnavailableError"
-            ]
-          },
-          "message": {
-            "type": "string"
-          },
-          "service": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "_tag",
-          "message"
-        ],
-        "additionalProperties": false
-      },
       "SessionBusyErrorEncoded": {
         "type": "object",
         "properties": {
@@ -16864,6 +17714,44 @@
         },
         "additionalProperties": false
       },
+      "Provider.Compaction": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "local"
+                ]
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "provider"
+                ]
+              },
+              "threshold": {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
       "Model.Capabilities": {
         "type": "object",
         "properties": {
@@ -16984,6 +17872,9 @@
           "providerID": {
             "type": "string"
           },
+          "canonical": {
+            "type": "string"
+          },
           "family": {
             "type": "string"
           },
@@ -16995,6 +17886,12 @@
           },
           "package": {
             "type": "string"
+          },
+          "compaction": {
+            "$ref": "#/components/schemas/Provider.Compaction"
+          },
+          "websocket": {
+            "type": "boolean"
           },
           "settings": {
             "type": "object"
@@ -17109,6 +18006,9 @@
           "id": {
             "type": "string"
           },
+          "canonical": {
+            "type": "string"
+          },
           "integrationID": {
             "type": "string"
           },
@@ -17125,6 +18025,12 @@
           },
           "package": {
             "type": "string"
+          },
+          "compaction": {
+            "$ref": "#/components/schemas/Provider.Compaction"
+          },
+          "websocket": {
+            "type": "boolean"
           },
           "settings": {
             "type": "object"
@@ -19275,6 +20181,29 @@
           "reject"
         ]
       },
+      "FileNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": [
+              "FileNotFoundError"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "_tag",
+          "path",
+          "message"
+        ],
+        "additionalProperties": false
+      },
       "FileSystem.Entry": {
         "type": "object",
         "properties": {
@@ -20071,18 +21000,6 @@
           "$ref": "#/components/schemas/Worktree.Directory"
         }
       },
-      "Worktree.Info": {
-        "type": "object",
-        "properties": {
-          "directory": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "directory"
-        ],
-        "additionalProperties": false
-      },
       "WorktreeErrorEncoded": {
         "type": "object",
         "properties": {
@@ -20118,6 +21035,55 @@
         "required": [
           "name",
           "data"
+        ],
+        "additionalProperties": false
+      },
+      "Worktree.CreateInput": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Worktree.Info": {
+        "type": "object",
+        "properties": {
+          "directory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "directory"
+        ],
+        "additionalProperties": false
+      },
+      "Worktree.RemoveInput": {
+        "type": "object",
+        "properties": {
+          "directory": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "directory",
+          "force"
         ],
         "additionalProperties": false
       },
@@ -20475,8 +21441,12 @@
               }
             ]
           },
-          "subtask": {
+          "subagent": {
             "type": "boolean"
+          },
+          "subtask": {
+            "type": "boolean",
+            "description": "Deprecated alias for subagent."
           }
         },
         "required": [
@@ -20532,7 +21502,8 @@
                 "type": "string",
                 "enum": [
                   "random"
-                ]
+                ],
+                "description": "Reuse a randomly selected provider until it is rate limited, then switch to another available provider."
               },
               {
                 "type": "string"
@@ -20557,6 +21528,18 @@
         },
         "required": [
           "package"
+        ],
+        "additionalProperties": false
+      },
+      "Config.Worktree": {
+        "type": "object",
+        "properties": {
+          "directory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "directory"
         ],
         "additionalProperties": false
       },
@@ -20625,6 +21608,12 @@
       "Config.ModelEncoded": {
         "type": "object",
         "properties": {
+          "compaction": {
+            "$ref": "#/components/schemas/Provider.Compaction"
+          },
+          "websocket": {
+            "type": "boolean"
+          },
           "modelID": {
             "type": "string"
           },
@@ -20719,6 +21708,15 @@
       "Config.ProviderEncoded": {
         "type": "object",
         "properties": {
+          "compaction": {
+            "$ref": "#/components/schemas/Provider.Compaction"
+          },
+          "websocket": {
+            "type": "boolean"
+          },
+          "canonical": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -20794,17 +21792,12 @@
           "default_agent": {
             "type": "string"
           },
-          "autoupdate": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "notify"
-                ]
-              }
+          "update": {
+            "type": "string",
+            "enum": [
+              "disable",
+              "notify",
+              "auto"
             ]
           },
           "share": {
@@ -21057,6 +22050,9 @@
               ]
             }
           },
+          "worktree": {
+            "$ref": "#/components/schemas/Config.Worktree"
+          },
           "warming": {
             "anyOf": [
               {
@@ -21213,6 +22209,84 @@
             "$ref": "#/components/schemas/Config.ClaudeDirectoryEncoded"
           }
         ]
+      },
+      "Config.Preferences": {
+        "type": "object",
+        "properties": {
+          "shell": {
+            "type": "string"
+          },
+          "websearch": {
+            "anyOf": [
+              {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              },
+              {
+                "$ref": "#/components/schemas/ConfigWebSearch.InfoEncoded"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Config.PreferencesPatch": {
+        "type": "object",
+        "properties": {
+          "shell": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "websearch": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConfigWebSearch.InfoEncoded"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigShell.Option": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "acceptable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "acceptable"
+        ],
+        "additionalProperties": false
       }
     },
     "securitySchemes": {}
@@ -21316,7 +22390,7 @@
     },
     {
       "name": "worktree",
-      "description": "Project worktree management routes."
+      "description": "Location-scoped worktree management routes."
     },
     {
       "name": "workspace",

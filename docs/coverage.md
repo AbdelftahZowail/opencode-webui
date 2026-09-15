@@ -1,23 +1,39 @@
 # API coverage — have / don't have / why
 
 Source of truth for the HTTP contract: `docs/reference/openapi.json`
-(snapshot of the running service's `/openapi.json`, 115 paths as of this doc).
+(snapshot of the running service's `/openapi.json`, 123 paths as of this doc).
 Refresh: `bun run scripts/fetch-openapi.ts` (via `Service.ensure()` like the proxy).
 Diff against live: `bun run scripts/diff-openapi.ts` (also `--json`, `--check` for CI).
 Raw diff: `git diff docs/reference/openapi.json`.
 
-`src/api/client.ts:368` holds one typed function per resource group; `src/api/types.ts:1`
-holds the schema types. `server/index.ts:78` proxies any `/api/*` + websockets generically,
-so new routes work without a proxy change. Keep the store as sole state (`src/store.ts:1`).
+`src/api/client.ts` holds one typed function per resource group (plus its own
+wire-shape interfaces); `src/api/types.ts` holds the session/message/permission
+schema types. `server/index.ts` proxies any `/api/*` + websockets generically,
+so new routes work without a proxy change. Keep the store as sole state
+(`src/store.ts`).
 
 > Roadmap principle: "everything the engine can do must eventually be reachable from the UI"
 > — but only user-facing resources get UI; internals stay client-only. This doc is that map.
+>
+> **Scope note (2026-09-15):** the engine also serves a *legacy unprefixed*
+> surface (`/session/**`, `/lsp`, `/formatter`, `/session/{id}/todo`,
+> `/session/{id}/share`, `/path`, `/experimental/workspace/*`,
+> `/experimental/console/*`, `/global/upgrade`) that this OpenAPI snapshot does
+> **not** document. Verified live: those paths answer on the 2.0.3 engine while
+> their `/api/*` counterparts 404.
+>
+> **It is still out of scope.** `@opencode/client` on branch `v2` declares 115
+> endpoints and all of them are `/api/*` — the v2 TUI never touches the legacy
+> surface, which exists for the **v1** TUI. `server/index.ts` forwarding only
+> `/api/*` is therefore correct, no proxy bridge is wanted, and the legacy-only
+> features the v1 TUI had (todos, LSP/formatter status, session share, console
+> orgs) are **not** v2 capabilities. See `docs/tui-parity-roadmap.md`.
 
 ## Have — wired in the webapp
 
 | API group | OpenAPI paths | Client | UI |
 | --- | --- | --- | --- |
-| health/server | `GET /api/health`, `GET /api/server` | `api.health`, `api.serverInfo` | connection footer / Settings → Server |
+| health/server | `GET /api/health`, `GET /api/server` | `api.health`, `api.serverInfo` | Connection footer (reads `/api/webui/status` via `api.health`). `api.serverInfo` is client-only — the Settings → Server tab was deliberately de-surfaced as informational |
 | session lifecycle | `GET/POST /api/session`, `GET/DELETE /api/session/{id}`, `GET /api/session/active`, `POST import`, `GET export`, `POST fork`, `POST rename`, `POST move`, `POST compact`, `POST wait` | `listSessions`, `createSession`, `getSession`, `deleteSession`, `activeSessions`, `forkSession`, `renameSession`, `exportSession`, `compactSession`, `sessionWait` (via store) | Sidebar, session page, session actions (rename/fork/export/compact/move via inbox) |
 | prompt/command/skill/synthetic/shell | `POST /api/session/{id}/prompt`, `POST command`, `POST skill`, `POST synthetic`, `POST shell`, `POST generate` (session-scoped), `GET context`, `GET/PUT/DELETE instructions/entries`, `GET message`, `GET message/{id}` | `prompt`, `promptWithFiles`, `runCommand`, `activateSkill`, `sessionShell`, `sessionGenerate`, `messages`, `inbox*` | Composer, slash menu, `@` file refs, `!` bash, skill picker, shell panel |
 | events (SSE) | `GET /api/event` | `src/api/events.ts` | `store.handleEvent` live streaming (queued→running→ordered parts, poll fallback) |
@@ -25,13 +41,17 @@ so new routes work without a proxy change. Keep the store as sole state (`src/st
 | inbox/steering | `GET /api/session/{id}/inbox`, `DELETE inbox/{id}`, `POST steer/queue` | `inboxList/Queue/Steer/Delete`, `inboxPrompt`, `prompt/promptWithFiles` (optional `delivery`) | Explicit STEER vs QUEUE system: busy sends become tracked inbox rows in `QueueStrip` (toggle/send-now/cancel), reconciled by `session.inbox.*` events + poll; queue-drain failsafe on turn end. `InboxPanel` unchanged |
 | revert | `POST revert/stage`, `POST revert/clear`, `POST revert/commit` | `revertStage/Clear/Commit` | `/undo` `/redo`, `applyRevertView` cut of transcript |
 | agent/model/command/skill catalog | `GET /api/agent`, `GET /api/agent/{id}`, `GET /api/model`, `GET /api/model/default`, `GET /api/command`, `GET /api/skill` | `agents`, `models`, `modelDefault`, `commands`, `skills` | Pickers (`Pickers.tsx`), command palette, skill picker, variants; `resolveDefaultModel` uses `modelDefault` so new sessions match the engine/TUI default |
-| provider/integration/credential | `GET /api/provider`, `GET /api/provider/{id}`, `GET /api/integration`, `POST connect/key|oauth|command`, `PATCH/DELETE/POST-activate /api/credential/{id}` | `providerList/Get`, `integration*`, `credentialPatch/Delete/Activate` | Settings → Providers/Integrations/Credentials (activate button on each stored credential) |
-| mcp/plugin | `GET/PUT/DELETE /api/mcp*`, `POST connect/disconnect`, `GET resource`, `GET /api/plugin` | `mcpList/Put/Delete/Connect/Disconnect/Resource`, `pluginList` | Settings → MCP / Plugins |
-| filesystem/location/project | `GET /api/fs/read/*`, `GET /api/fs/list`, `GET /api/fs/find`, `GET /api/location`, `GET /api/project`, `GET /api/project/current` | `fsRead/ReadBytes/List/Find`, `location`, `project*` | FileExplorer, workspace picker, path chips |
+| provider/integration/credential | `GET /api/provider`, `GET /api/provider/{id}`, `GET /api/integration`, `POST connect/key|oauth|command`, `PATCH/DELETE/POST-activate /api/credential/{id}` | `providerList/Get`, `integration*`, `credentialPatch/Delete/Activate` | `ConnectDialog` (`/connect`, via `/connect` or the palette): integrations catalog, API-key/OAuth/CLI-command connect, stored credentials + activate. **Not a Settings tab** — Settings has only Extensions / Security / App(phone) |
+| mcp | `GET/PUT/DELETE /api/mcp*`, `POST connect/disconnect`, `GET resource` | `mcpList/Put/Delete/Connect/Disconnect/Resource` | `McpIndicator` header popover (per-server status, connect/disconnect). MCP add/remove (`mcpPut`/`mcpDelete`) and `mcpResource` are client-only |
+| filesystem/location/project | `GET /api/fs/read/*`, `GET /api/fs/list`, `GET /api/fs/find`, `GET /api/location`, `GET /api/project`, `GET /api/project/current`, `PATCH /api/project/{id}` | `fsRead/ReadBytes/List/Find`, `location`, `project*`, `projectUpdate` | FileExplorer, workspace picker, path chips (`projectUpdate` is client-only) |
 | vcs | `GET /api/vcs`, `GET /api/vcs/status`, `GET /api/vcs/diff` (+ `base` param), `GET /api/vcs/branches`, `GET /api/vcs/base` | `vcsStatus/Diff/Base`, `vcsQuery` helper | FileExplorer diff (infers the review base via `vcsBase` and passes its `ref` to `vcsDiff`, so ambiguous Git history doesn't need an explicit base), VCS status badge |
 | pty/shell | `GET/POST /api/pty`, `GET/PUT/DELETE /api/pty/{id}`, `POST connect-token`, `GET connect`, `GET/POST /api/shell*` | `pty*`, `shell*` | Shell panel, `TerminalView.tsx` (xterm) via websocket proxy |
-| websearch/config | `GET /api/websearch/provider`, `POST /api/websearch`, `GET /api/config` | `websearch*`, `configGet` | Settings → WebSearch / Config |
-| worktree | `GET/POST/DELETE /api/worktree/{projectID}`, `POST refresh` | (proxied, not yet wrapped) | surfaced via workspace selection |
+| permissions (session rules) | `PUT /api/session/{id}/permission/rules`, `permissions` on `POST /api/session` | `sessionPermissionRules`, `createSession({permissions})` | (client wrapped, UI pending — roadmap P4) |
+| session diff (turn-scoped) | `GET /api/session/{id}/diff?from&to&context` | `sessionDiff` | (client wrapped, UI pending — roadmap P2). Distinct from `vcs` diff: this is "what did ONE TURN change", not the working tree |
+| worktree | `GET/POST/DELETE /api/worktree`, `POST /api/worktree/refresh` (+ `location` query) | `worktreeList/Create/Remove/Refresh` | (client wrapped, UI pending — roadmap P3). Location-scoped; the old `{projectID}` routes were **removed upstream** |
+| config preferences | `GET/PATCH /api/config/preferences`, `GET /api/config/shell` | `configPreferences`, `configPreferencesUpdate`, `configShells` | (client wrapped, UI pending — roadmap P4) |
+| plugin updates | `POST /api/plugin/check`, `POST /api/plugin/update`, `POST /api/plugin/await-activation` | `pluginCheck`, `pluginUpdate`, `pluginAwaitActivation` | (client wrapped, UI pending — roadmap P4) |
+| websearch/config | `GET /api/websearch/provider`, `POST /api/websearch`, `GET /api/config` | `websearch*`, `configGet` | **No UI** (client-only) — see the client-only table |
 | interrupt/background | `POST /api/session/{id}/interrupt?continue`, `POST background` | `interrupt`, `flushSteersNow` (`continue=true`: interrupt + resume steering, queue stays parked), `sessionBackground` | Esc two-step interrupt, QueueStrip "interrupt & send now", Ctrl+B background subagents |
 
 ## Webui extension surface (proxy-owned — not engine OpenAPI, no snapshot drift)
@@ -81,13 +101,69 @@ malformed schema shapes surface as visible diagnostics
 | `GET /api/session/stats` | `v2.session.stats ?from&to&project&timezone&tools` | (add on next client pass) | Aggregate activity/usage/tool reliability — dashboard/telemetry surface, deliberate follow-up (see Extending checklist). |
 | `POST /api/workspace`, `DELETE /api/workspace/{id}` | `v2.workspace.create/destroy` | (add on next client pass) | Logical workspace lifecycle (idempotent create/destroy `{id?, provider}`) — we use `project` today; track for future workspace UI. |
 
+### Wrapped but not surfaced — audit 2026-09-15
+
+The 2026-09-15 audit found these reachable from `api.*` with **no consumer
+anywhere in `src/`**. Two different situations hide behind that, and they need
+different responses:
+
+- **Deliberately de-surfaced (not a gap).** The Settings tabs for Plugins,
+  WebSearch, Config and Server were **removed on purpose** as purely
+  informational — display-only panels that didn't earn their place. The old
+  "Settings → …" entries this file used to carry were accurate at the time, not
+  wrong. Revisit only where a route powers a real *action* rather than a
+  readout.
+- **Genuine gaps.** Wrapped but never wired anywhere — these need a UI or an
+  explicit reason row.
+
+| Client method | Route | Status |
+| --- | --- | --- |
+| `api.pluginList` (+ `pluginCheck`/`pluginUpdate`/`pluginAwaitActivation`) | `GET /api/plugin`, `POST /api/plugin/{check,update,await-activation}` | **Actionable → revisit (roadmap P4).** The informational "Settings → Plugins" tab was de-surfaced deliberately. The new trio *acts* (check for updates, update, await activation), so the update flow deserves a real surface rather than a restored display panel. |
+| `api.configGet` | `GET /api/config` | **De-surfaced (deliberate).** "Settings → Config" was a read-only dump. `configPreferences`/`configPreferencesUpdate`/`configShells` are separate, actionable, and wrapped (roadmap P4). |
+| `api.websearch`, `api.websearchProviders` | `GET /api/websearch/provider`, `POST /api/websearch` | **De-surfaced (deliberate).** "Settings → WebSearch" was informational. Kept wrapped for a future in-chat search surface, not a settings panel. `ToolCard`'s "websearch" label is display only. |
+| `api.mcpPut`, `api.mcpDelete`, `api.mcpResource` | `PATCH`/`DELETE /api/mcp/{server}`, `GET /api/mcp/resource` | **Genuine gap.** Read + connect/disconnect are wired in `McpIndicator`; adding, editing and removing servers is not. |
+| `api.providerGet`, `api.credentialPatch`, `api.credentialDelete` | `GET /api/provider/{id}`, `PATCH`/`DELETE /api/credential/{id}` | **Genuine gap.** List + activate are wired in `ConnectDialog`; per-provider detail, credential relabel and delete are not. |
+| `api.shellGet` | `GET /api/shell/{id}` | **Genuine gap (minor).** `shellList`/`shellOutput`/`shellDelete` are wired; single-fetch is not. |
+| `api.serverInfo`, `api.serviceStop` | `GET /api/server`, `POST /api/service/stop` | **De-surfaced (deliberate).** "Settings → Server" was informational; the connection footer reads `/api/webui/status` (`api.health`). `serviceStop` has no UI — the process is managed by `setup`/the lifecycle plugin. |
+| `api.sessionQuestionList`, `api.questionRequestGet` | `GET /api/session/{id}/question`, `GET /api/question/request` | Superseded by the event + form channel; the reply/reject halves ARE used by `store.replyQuestion`/`rejectQuestion`. |
+
 ## Experimental / infra — not surfaced in webapp
 
 | API group | Paths | Notes |
 | --- | --- | --- |
-| persistent-pty | `GET/POST /api/experimental/persistent-pty/*`, `GET/POST /api/experimental/session/{id}/terminal` | Prototype persistent PTY (`server.experimental.persistentPty.*`) — keep `src/api/client.ts:642` location-scoped `pty` as canonical; revisit if promoted from experimental. |
+| persistent-pty | `GET/POST /api/experimental/persistent-pty/*`, `GET/POST /api/experimental/session/{id}/terminal` | Prototype persistent PTY (`server.experimental.persistentPty.*`) — keep the location-scoped `pty` group in `src/api/client.ts` as canonical; revisit if promoted from experimental. |
 
-## What changed vs last snapshot (115 → 116 paths)
+## What changed vs last snapshot (116 → 123 paths)
+
+Snapshot `docs/reference/openapi.json` at `2026-09-01` was 116 paths.
+Refreshed to **123** (live as of `2026-09-15`, engine reports 2.0.3). All new
+client methods were smoke-tested live (each returns the documented status).
+
+**Added (9)** — all wrapped:
+
+- `GET/PATCH /api/config/preferences`, `GET /api/config/shell` → `configPreferences`, `configPreferencesUpdate`, `configShells`. Note: preferences come from the highest-precedence **global** config document — there is no `location` parameter.
+- `POST /api/plugin/check`, `POST /api/plugin/update`, `POST /api/plugin/await-activation` → `pluginCheck`, `pluginUpdate`, `pluginAwaitActivation`. The plugin-update flow (was missing entirely).
+- `GET /api/session/{id}/diff` → `sessionDiff`. **Turn-scoped** per-file diffs (idle-marker to idle-marker; steered prompts fold into the same turn), distinct from the repo-scoped `/api/vcs/diff`. This is the TUI diff viewer's third source.
+- `PUT /api/session/{id}/permission/rules` → `sessionPermissionRules` (204). Session rules evaluate *after* the agent's; last match wins.
+- `GET/POST/DELETE /api/worktree`, `POST /api/worktree/refresh` → `worktreeList/Create/Remove/Refresh`.
+
+**Removed (2) — breaking, but unused by us:**
+
+- `GET/POST/DELETE /api/worktree/{projectID}` and `POST /api/worktree/{projectID}/refresh` are gone, replaced by the **location-scoped** `/api/worktree`. Nothing in `src/` called them, so no code change was needed beyond the doc row.
+- `PATCH /api/session/{id}/message/{messageID}` is gone; that path now serves only `GET`. We never called it.
+
+**Modified (7):**
+
+- `POST /api/session` accepts `permissions` (`Permission.Ruleset | null`) → `createSession` widened.
+- `GET /api/session/{id}/message` accepts a `type` filter (10 values) before pagination → `messages`/`messagesWithCursor` widened. Re-send the filter on every page.
+- `PATCH /api/project/{id}` accepts `canonical` → `projectUpdate` added.
+- `GET /api/fs/read/*` documents a `404 FileNotFoundError` (new schema).
+- `GET /api/fs/list` description/behaviour: absolute paths and parents/siblings outside the location dir now list, while entry paths stay relative to the location.
+- `DELETE /api/session/{id}` 404 schema dedupe (`anyOf` → `$ref`) — cosmetic.
+
+**New schemas (12):** `Config.Preferences`, `Config.PreferencesPatch`, `Config.Worktree`, `ConfigShell.Option`, `FileNotFoundErrorEncoded`, `Provider.Compaction`, `Session.Message.Idle`, `Session.Message.ProviderState_5`, `Session.ProviderContext`, `Session.ProviderContext.Provenance`, `Worktree.CreateInput`, `Worktree.RemoveInput`.
+
+## Previous snapshot change (115 → 116 paths)
 
 Snapshot `docs/reference/openapi.json` at `2026-08-31` was 115 paths.
 Refreshed to 116 (live as of 2026-09-01):
@@ -138,7 +214,7 @@ same contract:
 - `packages/client/src/generated` (Promise/`fetch`) vs `generated-effect` (`Effect` + `HttpClient`/`@opencode-ai/schema`)
 - `packages/plugin/src/v2/promise` vs `v2/effect`, `packages/sdk` pinned `effect@4.0.0-beta.83`
 
-Webapp stays on Promise: `server/index.ts:13` `Service.ensure()` + `src/api/client.ts:113` `request<T>`.
+Webapp stays on Promise: `server/index.ts` `Service.ensure()` + `src/api/client.ts` `request<T>`.
 The `/effect` entrypoints are additive — same OpenAPI at `/openapi.json`. Building a server plugin
 or embedding via SDK would pick one style; webapp contributors ignore it. Doc ref:
 `opencode.ai/v2/docs/build` (Build overview) · `/build/plugins` + `/build/plugins/cli` ·
@@ -150,7 +226,7 @@ or embedding via SDK would pick one style; webapp contributors ignore it. Doc re
 2. Add missing client methods + types in `src/api/client.ts` / `src/api/types.ts` (one per endpoint, additive-only).
 3. Decide UI: add a component/extension, or mark here as **client-only with reason** (don't leave a gap without a reason row).
 4. Update this file if the feature is user-visible.
-5. `bun run typecheck` must stay green. No new deps without justification (`AGENTS.md:117`).
+5. `bun run typecheck` must stay green. No new deps without justification (`AGENTS.md`, "Rules for editing").
 
 ## How to run the check
 

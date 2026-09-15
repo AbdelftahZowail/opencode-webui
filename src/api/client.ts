@@ -13,10 +13,12 @@ import type {
   InboxInfo,
   MessageInfo,
   MessagesResponse,
+  MessageTypeFilter,
   ModelInfo,
   ModelRef,
   PermissionReply,
   PermissionRequest,
+  PermissionRuleset,
   QuestionAnswer,
   QuestionRequest,
   SessionInfo,
@@ -65,6 +67,25 @@ export interface VcsBase {
   name: string;
   ref: string;
   source: "reflog" | "default";
+}
+
+/**
+ * `FileDiff.Info` — returned by `GET /api/session/{id}/diff`. Structurally
+ * identical to `VcsDiffFile` today (the engine inlines the same shape for
+ * both); kept as its own name because the two endpoints are independent and
+ * may diverge. Session diffs are TURN-scoped, not working-tree-scoped.
+ */
+export type FileDiffInfo = VcsDiffFile;
+
+/**
+ * What a turn changed. `from`/`to` are user message ids (`^msg_`); omitting
+ * both diffs the newest user message's turn. `context` is the unchanged
+ * lines around each hunk — omit for full-file patches.
+ */
+export interface SessionDiffOptions {
+  from?: string | null;
+  to?: string | null;
+  context?: string | null;
 }
 
 export interface ShellInfo {
@@ -323,8 +344,95 @@ export interface McpRemoteConfig {
 
 export type McpServerConfig = McpLocalConfig | McpRemoteConfig;
 
+/** `Plugin.Source` — where a plugin came from, with update info for packages. */
+export type PluginSource =
+  | { type: "builtin" }
+  | { type: "package"; target: string; version?: string; outdated?: true; updating?: true }
+  | { type: "local"; path: string }
+  | { type: "sdk" };
+
+export interface PluginFeatures {
+  server?: true;
+  tui?: true;
+  rpc?: true;
+}
+
+export type PluginState =
+  | { status: "active" }
+  | { status: "failed"; error: string; ref?: string };
+
+/** `Plugin.Info` — note `id` is optional in the schema; `source` is the key. */
 export interface PluginInfo {
-  id: string;
+  id?: string;
+  source: PluginSource;
+  features: PluginFeatures;
+  state: PluginState;
+}
+
+/** `GET|POST /api/plugin/check` result. */
+export interface PluginCheckResult {
+  location: LocationInfo;
+  data: PluginInfo[];
+}
+
+// ---- worktrees ----------------------------------------------------------
+//
+// Location-scoped (NOT project-scoped — the old `{projectID}` routes were
+// removed upstream). A worktree is a managed parallel checkout: `list`
+// discovers via the location's registered strategy, `create` runs the
+// project's setup script, `remove` uses the strategy recorded at create time.
+
+export interface WorktreeDirectory {
+  directory: string;
+  strategy?: string;
+}
+
+export interface WorktreeInfo {
+  directory: string;
+}
+
+/**
+ * `Worktree.CreateInput` — all fields optional; the engine fills from the
+ * location's registered strategy and its directory defaults.
+ */
+export interface WorktreeCreateInput {
+  strategy?: string;
+  from?: string;
+  branch?: string;
+  directory?: string;
+  name?: string;
+}
+
+/** `Worktree.RemoveInput` — `force` is required by the schema. */
+export interface WorktreeRemoveInput {
+  directory: string;
+  force: boolean;
+}
+
+// ---- config preferences -------------------------------------------------
+
+/** `Config.Preferences` — from the highest-precedence global config doc. */
+export interface ConfigPreferences {
+  shell?: string;
+  websearch?: false | ConfigWebSearchInfo;
+}
+
+/** `Config.PreferencesPatch` — `null` clears a preference. */
+export interface ConfigPreferencesPatch {
+  shell?: string | null;
+  websearch?: false | ConfigWebSearchInfo | null;
+}
+
+export interface ConfigWebSearchInfo {
+  /** `"random"` reuses one randomly chosen provider until rate limited. */
+  provider: "random" | string;
+}
+
+/** `ConfigShell.Option` — a shell the engine can run commands with. */
+export interface ConfigShellOption {
+  path: string;
+  name: string;
+  acceptable: boolean;
 }
 
 export interface WebSearchProvider {
@@ -517,7 +625,14 @@ const apiRaw = {
       return null;
     }
   },
-  createSession: (body: { title?: string | null; agent?: string | null; model?: ModelRef | null; location?: { directory: string } | null }) =>
+  createSession: (body: {
+    title?: string | null;
+    agent?: string | null;
+    model?: ModelRef | null;
+    location?: { directory: string } | null;
+    /** Session-scoped permission rules, evaluated after the agent's. */
+    permissions?: PermissionRuleset | null;
+  }) =>
     request<{ data: SessionInfo }>("/api/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -593,6 +708,32 @@ const apiRaw = {
   /** Background the session's synchronous (task-tool) subagents. */
   sessionBackground: (sessionID: string) =>
     request<unknown>(`/api/session/${sessionID}/background`, { method: "POST" }),
+  /**
+   * Structured per-file diffs of the files ONE TURN changed. A turn runs from
+   * the first prompt after the session went idle until its next idle marker,
+   * so prompts steered in while busy belong to the same turn. Unlike
+   * `vcsDiff` (working tree / branch base), this is turn-scoped.
+   */
+  sessionDiff: (sessionID: string, opts: SessionDiffOptions = {}) => {
+    const params = new URLSearchParams();
+    if (opts.from) params.set("from", opts.from);
+    if (opts.to) params.set("to", opts.to);
+    if (opts.context) params.set("context", opts.context);
+    const qs = params.toString();
+    return request<{ data: FileDiffInfo[] }>(
+      `/api/session/${sessionID}/diff${qs ? `?${qs}` : ""}`,
+    );
+  },
+  /**
+   * Replace the session-scoped permission rules. Returns 204 (no body).
+   * Rules evaluate after the agent's rules and the LAST match wins.
+   */
+  sessionPermissionRules: (sessionID: string, permissions: PermissionRuleset) =>
+    request<unknown>(`/api/session/${sessionID}/permission/rules`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ permissions }),
+    }),
   sessionShell: (sessionID: string, command: string) =>
     request<unknown>(`/api/session/${sessionID}/shell`, {
       method: "POST",
@@ -601,12 +742,18 @@ const apiRaw = {
     }),
 
   // messaging
-  messages: (sessionID: string, limit = 100) =>
-    request<MessagesResponse>(`/api/session/${sessionID}/message?limit=${limit}&order=desc`),
-  messagesWithCursor: (sessionID: string, limit = 100, cursor?: string | null) => {
+  messages: (sessionID: string, limit = 100, type?: MessageTypeFilter) => {
+    const params = new URLSearchParams({ limit: String(limit), order: "desc" });
+    if (type) params.set("type", type);
+    return request<MessagesResponse>(`/api/session/${sessionID}/message?${params.toString()}`);
+  },
+  messagesWithCursor: (sessionID: string, limit = 100, cursor?: string | null, type?: MessageTypeFilter) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     else params.set("order", "desc");
+    // The filter must be re-sent on every page or the cursor walks a
+    // different result set than the one it was created against.
+    if (type) params.set("type", type);
     return request<MessagesResponse>(`/api/session/${sessionID}/message?${params.toString()}`);
   },
   /**
@@ -713,6 +860,36 @@ const apiRaw = {
   locationInfo: () => request<LocationInfo>("/api/location"),
   projectCurrent: () => request<ProjectInfo>("/api/project/current"),
   projectList: () => request<ProjectInfo[]>("/api/project"),
+  /**
+   * `PATCH /api/project/{id}` — update display metadata and workspace
+   * commands. `canonical` (added upstream) moves the project's canonical
+   * directory. All fields optional; only send what changes.
+   */
+  projectUpdate: (
+    projectID: string,
+    body: { canonical?: string; name?: string; icon?: { color?: string } | null; commands?: unknown[] | null },
+  ) =>
+    patch<unknown>(`/api/project/${projectID}`, body),
+
+  // worktrees — location-scoped managed checkouts (the old project-scoped
+  // /api/worktree/{projectID} routes were removed upstream).
+  worktreeList: (location?: VcsLocation) =>
+    request<{ data: WorktreeDirectory[] }>(`/api/worktree?${vcsQuery(location)}`),
+  worktreeCreate: (body: WorktreeCreateInput, location?: VcsLocation) =>
+    request<{ data: WorktreeInfo }>(`/api/worktree?${vcsQuery(location)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  worktreeRemove: (body: WorktreeRemoveInput, location?: VcsLocation) =>
+    request<unknown>(`/api/worktree?${vcsQuery(location)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** Rediscover worktrees and reconcile the shared project inventory (204). */
+  worktreeRefresh: (location?: VcsLocation) =>
+    request<unknown>(`/api/worktree/refresh?${vcsQuery(location)}`, { method: "POST" }),
   fsFind: (query: string, opts?: { location?: string; type?: "file" | "directory"; limit?: number }) => {
     const params = new URLSearchParams({ query });
     if (opts?.location) params.set("location[directory]", opts.location);
@@ -924,8 +1101,28 @@ const apiRaw = {
     post<unknown>(`/api/mcp/${server}/disconnect`, null),
 
   // plugins
-  pluginList: () =>
-    request<{ location: unknown; data: PluginInfo[] }>("/api/plugin"),
+  pluginList: (location?: VcsLocation) =>
+    request<{ location: unknown; data: PluginInfo[] }>(`/api/plugin?${vcsQuery(location)}`),
+  /** Check one (`target`) or every package plugin for available updates. */
+  pluginCheck: (target?: string | null, location?: VcsLocation) =>
+    post<PluginCheckResult>(`/api/plugin/check?${vcsQuery(location)}`, {
+      target: target ?? null,
+    }),
+  /**
+   * Update package plugins concurrently and tell active locations to reload
+   * them. Responds once every update finished; fails if any update fails.
+   * Returns 204 (no body).
+   */
+  pluginUpdate: (targets: string[], location?: VcsLocation) =>
+    post<unknown>(`/api/plugin/update?${vcsQuery(location)}`, { targets }),
+  /**
+   * Wait for plugin activation at a location to settle (incl. missing-package
+   * installs). Completion does NOT mean every plugin succeeded — check
+   * `pluginList` state. Returns 204; cancelling the wait doesn't cancel
+   * activation.
+   */
+  pluginAwaitActivation: (location?: VcsLocation) =>
+    post<unknown>(`/api/plugin/await-activation?${vcsQuery(location)}`, null),
 
   // folder extensions (Settings › Extensions on/off switch)
   webuiExtensionState: (id: string, disabled: boolean) =>
@@ -945,6 +1142,16 @@ const apiRaw = {
 
   // config & credentials
   configGet: () => request<ConfigEntry[]>("/api/config"),
+  /**
+   * Preferences from the highest-precedence GLOBAL config document (no
+   * location parameter — this is not per-project).
+   */
+  configPreferences: () => request<ConfigPreferences>("/api/config/preferences"),
+  /** Patch global preferences; `null` clears a key. Returns the new state. */
+  configPreferencesUpdate: (prefs: ConfigPreferencesPatch) =>
+    patch<ConfigPreferences>("/api/config/preferences", prefs),
+  /** Shells available to terminal and agent execution. */
+  configShells: () => request<ConfigShellOption[]>("/api/config/shell"),
   credentialPatch: (credentialID: string, label: string) =>
     patch<unknown>(`/api/credential/${credentialID}`, { label }),
   credentialActivate: (credentialID: string) =>

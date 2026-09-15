@@ -69,6 +69,23 @@ export type MessageInfo =
   | LocationSwitchedMessage
   | CompactionMessage;
 
+/**
+ * `GET /api/session/{id}/message?type=` — filters by message type BEFORE
+ * pagination. Pass the same value when following cursors, or pages will
+ * disagree about what "next" means.
+ */
+export type MessageTypeFilter =
+  | "user"
+  | "assistant"
+  | "system"
+  | "synthetic"
+  | "skill"
+  | "shell"
+  | "compaction"
+  | "agent-switched"
+  | "model-switched"
+  | "location-switched";
+
 interface MessageBase {
   id: string;
   metadata?: Record<string, unknown>;
@@ -192,6 +209,22 @@ export interface PermissionRequest {
   metadata?: Record<string, unknown>;
   source?: { type: "tool"; messageID: string; id: string };
 }
+
+export type PermissionEffect = "allow" | "deny" | "ask";
+
+/** `Permission.Rule` — one action/resource glob pair with its effect. */
+export interface PermissionRule {
+  action: string;
+  resource: string;
+  effect: PermissionEffect;
+}
+
+/**
+ * `Permission.Ruleset` — evaluated in order, last matching rule wins. Accepted
+ * by `PUT /api/session/{id}/permission/rules` and `POST /api/session`
+ * (`permissions`), where session rules are evaluated after the agent's.
+ */
+export type PermissionRuleset = PermissionRule[];
 
 // ---- forms --------------------------------------------------------------
 
