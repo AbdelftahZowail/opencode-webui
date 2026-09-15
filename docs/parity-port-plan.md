@@ -333,7 +333,7 @@ turning it off silences everything; no notification storm on reload.
 
 | v2 | us |
 | --- | --- |
-| `/stats` (`opencode.stats`, `feature-plugins/system/stats.tsx`) is a **full-screen plugin route**: year-to-date tokens as giant block digits, a GitHub-style activity calendar, best streak / active days / sessions, `opencode.ai` footer, loading + error states. Data = **`GET /api/experimental/session/stats`** (unwrap it), `{from: Jan 1, timezone, tools: "none"}` | Nothing. The endpoint is unwrapped |
+| `/stats` (`opencode.stats`, `feature-plugins/system/stats.tsx`) is a **full-screen plugin route**: year-to-date tokens as giant block digits, a GitHub-style activity calendar, best streak / active days / sessions, `opencode.ai` footer, loading + error states. Data = **`GET /api/session/stats`** (unwrap it — the snapshot carries this path; `?from&to&project&timezone&tools`), `{from: Jan 1, timezone, tools: "none"}` | Nothing. The endpoint is unwrapped (`docs/coverage.md` lists it under "add on next client pass") |
 
 **Deliverable:** `StatsPanel.tsx` + `lib/stats.ts` (new), the client method, and
 a route/mount (our extension `pages` collection or a core dialog — see §8.4).

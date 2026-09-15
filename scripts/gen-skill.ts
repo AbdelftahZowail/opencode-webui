@@ -242,6 +242,11 @@ Contribute collections (registry-owned lists — data, not new kinds):
 \`conversation.empty\`, \`composer.above\`, \`composer.actions\`,
 \`sidebar.header.actions\`).
 
+A \`contextMenu.*\` item's \`run(ctx)\` receives \`{ sessionID?, messageID?, file? }\`:
+\`file\` is the path and is populated only for \`contextMenu.file\` (consumed by
+the FileExplorer's file rows on right-click); \`messageID\` only for
+\`contextMenu.message\`; \`sessionID\` for the session and file menus.
+
 ### Hook catalog
 
 ${hookTable}

@@ -477,6 +477,13 @@ extensions break silently on every redesign.
 | `data-oc-queue-strip` | QueueStrip (steer/queue rows) |
 | `data-oc-subagent-strip` | SubagentStrip |
 | `data-oc-runs-panel` | RunsPanel |
+| `data-oc-stash-panel` | StashPanel (prompt stash — replaces the composer) |
+| `data-oc-diff-viewer` + `data-oc-diff-source` + `data-oc-diff-file` + `data-oc-diff-open` | The turn-scoped DiffViewer root, its source switcher buttons, its file-tree rows, and the FileExplorer "Review" trigger |
+| `data-oc-worktree-panel` + `data-oc-worktree-row` + `data-oc-worktree-confirm` | WorktreePanel root, one per worktree, the inline remove confirm |
+| `data-oc-workspace-worktrees` | The WorkspacePicker dropdown section that hosts `worktree.panel` |
+| `data-oc-plugins-section` + `data-oc-plugin` | Settings › Plugins section; `data-oc-plugin` is one per plugin (keyed by source) |
+| `data-oc-permission-rules-editor` + `data-oc-permission-rule-row` + `data-oc-permission-rule-effect` | PermissionRulesEditor root, one per rule row, one per effect button |
+| `data-oc-mcp-server` + `data-oc-mcp-add` | McpIndicator: one per server row, and the add-server form |
 | `data-oc-slot` | Slot wrapper (`slot:<id>` — one per known slot id) |
 
 ```ts
