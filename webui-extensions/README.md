@@ -369,6 +369,12 @@ Settings › Extensions), `contextMenu.message`, `contextMenu.session`,
 `contextMenu.file` (item `{ label, run, order? }`), and the `slot:<id>`
 placement collections (see Slots below).
 
+A context-menu item's `run(ctx)` receives `{ sessionID?, messageID?, file? }`:
+`file` is the file path and is populated only for `contextMenu.file`, which is
+consumed by the FileExplorer's file rows (right-click); `messageID` is
+populated for `contextMenu.message`, and `sessionID` for both session and file
+menus.
+
 ```tsx
 register({
   kind: "contribute",
