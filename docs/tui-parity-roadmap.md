@@ -91,7 +91,7 @@ Everything below is either v2-API-native or read directly from `v2` source.
 | P4 | Actionable settings: plugins, permissions, MCP, credentials | **done** for plugins / permission rules / MCP add-remove / credential relabel-delete. **Shell selection deferred** (no settings host; global preference) |
 | P5 | ~~Legacy-only capabilities~~ | **dropped** (not v2 features) |
 | P6 | Client-side conveniences (stash, timeline, frecency) | **partial** — prompt stash (panel + Ctrl+S + pop) and `@`-mention frecency are done; **timeline jump-to-message and directory recents are not built** |
-| P7 | Webui correctness debts | in progress — see below |
+| P7 | Webui correctness debts | **done** — interrupt truthfulness, `contextMenu.file` consumer, client aligned to `@opencode/client@2.0.3`; the scheduler fallback is kept and documented |
 
 ---
 

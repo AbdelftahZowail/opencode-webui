@@ -85,7 +85,7 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
   const state = join(tmp, "state");
   const install = join(tmp, "bunx-1000-opencode-webui@9.9.9");
   const entry = join(install, "node_modules", "opencode-webui", "server", "index.ts");
-  const dep = join(install, "node_modules", "@opencode-ai", "client", "index.js");
+  const dep = join(install, "node_modules", "@opencode", "client", "index.js");
   const bin = join(install, "node_modules", ".bin", "opencode-webui");
   mkdirSync(dirname(entry), { recursive: true });
   mkdirSync(dirname(dep), { recursive: true });
@@ -104,7 +104,7 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
     const expected = join(mirrored, "opencode-webui", "server", "index.ts");
     check("stable entry: bunx install mirrored under the state dir", stable.url === pathToFileURL(expected).href, stable.url);
     check("stable entry: mirrored file carries the entry", existsSync(expected) && readFileSync(expected, "utf8") === "// entry\n");
-    check("stable entry: dependencies are mirrored too", existsSync(join(mirrored, "@opencode-ai", "client", "index.js")));
+    check("stable entry: dependencies are mirrored too", existsSync(join(mirrored, "@opencode", "client", "index.js")));
     check("stable entry: symlinks stay symlinks", readlinkSync(join(mirrored, ".bin", "opencode-webui")) === join("..", "opencode-webui", "server", "index.ts"));
     check("stable entry: launch command uses the mirror", resolveLaunchCommand(stable.url).cmd[1] === expected);
 

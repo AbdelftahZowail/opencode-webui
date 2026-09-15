@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Archive, Download, EllipsisVertical, GitFork, Pencil, ShieldCheck } from "lucide-react";
 import {
   compactSession,
+  deleteSavedPermission,
   exportSession,
   forkSession,
+  listSavedPermissions,
   loadSessionDetail,
   renameSession,
   selectSession,
@@ -11,6 +13,7 @@ import {
   useStore,
 } from "../store";
 import type { SessionExportData } from "../api/client";
+import type { PermissionSavedInfo } from "../api/types";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -75,11 +78,22 @@ export function SessionMenu({ sessionID }: { sessionID: string }) {
  */
 function PermissionRulesDialog({ sessionID, onClose }: { sessionID: string; onClose: () => void }) {
   const rules = useStore((s) => s.sessionDetails[sessionID]?.permissions);
+  const projectID = useStore(
+    (s) => s.sessionDetails[sessionID]?.projectID ?? s.sessions.find((x) => x.id === sessionID)?.projectID,
+  );
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<PermissionSavedInfo[] | null>(null);
 
   useEffect(() => {
     void loadSessionDetail(sessionID);
   }, [sessionID]);
+
+  const refreshSaved = () => {
+    void listSavedPermissions(projectID)
+      .then(setSaved)
+      .catch(() => setSaved(null));
+  };
+  useEffect(refreshSaved, [projectID]);
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
@@ -100,6 +114,35 @@ function PermissionRulesDialog({ sessionID, onClose }: { sessionID: string; onCl
           }}
           onCancel={onClose}
         />
+
+        {/* What "always" replies have persisted for this project. Ordered like
+            the ruleset (last match wins) and removable one by one. */}
+        {saved && saved.length > 0 && (
+          <section className="space-y-1.5 rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-base)] p-3">
+            <h4 className="text-[12px] font-medium text-[var(--text-strong)]">
+              Always allowed in this project
+            </h4>
+            {saved.map((rule) => (
+              <div key={rule.id} className="flex items-center gap-2 font-mono text-[11px]">
+                <span className="min-w-0 flex-1 truncate text-[var(--text-base)]">
+                  {rule.action} → {rule.resource}
+                </span>
+                <button
+                  type="button"
+                  title="Remove this saved permission"
+                  className="shrink-0 cursor-pointer rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[10px] text-[var(--text-weak)] transition-colors hover:text-[var(--surface-critical-strong)]"
+                  onClick={() => {
+                    void deleteSavedPermission(rule.id)
+                      .then(refreshSaved)
+                      .catch(() => undefined);
+                  }}
+                >
+                  remove
+                </button>
+              </div>
+            ))}
+          </section>
+        )}
       </DialogContent>
     </Dialog>
   );

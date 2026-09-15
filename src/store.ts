@@ -34,6 +34,7 @@ import type {
   ModelRef,
   PermissionRequest,
   PermissionRuleset,
+  PermissionSavedInfo,
   QuestionAnswer,
   QuestionInfo,
   QuestionRequest,
@@ -3352,7 +3353,9 @@ export async function loadPlugins() {
 /** Check one package (by target) or every package plugin for updates. */
 export async function checkPlugins(target?: string | null) {
   const dir = sessionDirectory(state.currentSessionID);
-  setState({ pluginsBusy: "check", pluginsError: null });
+  // Encode the target in the busy key so the row that started the action owns
+  // the spinner (``check:<target>``); a whole-catalog check stays bare.
+  setState({ pluginsBusy: target ? `check:${target}` : "check", pluginsError: null });
   try {
     const res: PluginCheckResult = await api.pluginCheck(
       target ?? null,
@@ -3372,7 +3375,11 @@ export async function checkPlugins(target?: string | null) {
 export async function updatePlugins(targets: string[]) {
   const dir = sessionDirectory(state.currentSessionID);
   const location = dir ? { directory: dir } : undefined;
-  setState({ pluginsBusy: "update", pluginsError: null });
+  // A single target names its row; a batch is a whole-catalog action.
+  setState({
+    pluginsBusy: targets.length === 1 ? `update:${targets[0]}` : "update",
+    pluginsError: null,
+  });
   try {
     await api.pluginUpdate(targets, location);
     await api.pluginAwaitActivation(location).catch(() => undefined);
@@ -3398,10 +3405,10 @@ export async function updateSessionPermissionRules(
 }
 
 /** P4 — the project's saved ("always allow") permissions. */
-export async function listSavedPermissions(): Promise<
-  { id: string; action: string; resource: string }[]
-> {
-  const res = await api.permissionSavedList();
+export async function listSavedPermissions(
+  projectID?: string,
+): Promise<PermissionSavedInfo[]> {
+  const res = await api.permissionSavedList(projectID);
   return res.data;
 }
 
