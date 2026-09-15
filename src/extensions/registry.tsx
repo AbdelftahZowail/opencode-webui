@@ -164,7 +164,11 @@ export interface SettingsContribution {
 /** Item for the "contextMenu.message/session/file" collections. */
 export interface ContextMenuContribution {
   label: string;
-  run: (ctx: { sessionID?: string; messageID?: string }) => void;
+  /**
+   * `file` is set only for `contextMenu.file` consumers (the FileExplorer file
+   * rows); message/session menus use `messageID`/`sessionID`.
+   */
+  run: (ctx: { sessionID?: string; messageID?: string; file?: string }) => void;
 }
 
 /** Item for the "message.decoration" collection (row under the body). */

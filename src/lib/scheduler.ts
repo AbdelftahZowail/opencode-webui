@@ -62,7 +62,11 @@ const TICK_MS = 1_000;
 
 function currentTier(): Tier {
   if (typeof document !== "undefined" && document.hidden) return "hidden";
-  if (!signals) return "live"; // not wired yet — assume the fast tier
+  // Signals are wired by `startStore()` (store.ts) before the loop starts in
+  // the app. The fallback only applies to headless callers that start the
+  // scheduler without signals (e.g. the extension battery), where assuming the
+  // fast tier is the safe default: never miss a terminal event.
+  if (!signals) return "live";
   return signals.isBusy() || signals.isSseStale() ? "live" : "idle";
 }
 

@@ -7,7 +7,7 @@
  *      event; behavior on an idle session.
  *   C) POST /session/{sid}/view — what the ack does; active-map re-probe (§4.4).
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };

@@ -176,15 +176,27 @@ frecency** (`prompt/frecency.tsx`), **directory recents/completion**
 
 ## P7 — Webui correctness debts (measured on our own code)
 
-- `store` ignores the `interrupt` response body (`{interrupted: bool}`).
-- The `contextMenu.file` collection is documented in the spec and authoring
-  guide but **has no core consumer** — third-party contributions are silently
-  dropped. Consume it in `FileExplorer` or remove it from the contract.
-- `src/lib/scheduler.ts` `if (!signals) return "live"` — the "not wired yet"
-  note assumes the fast tier.
-- Pinned `@opencode-ai/client@0.0.0-next-17444` is a **`dev`-scope** package
-  while we target the **`v2`** engine. Re-check the skew at the next contract
-  refresh.
+- ✅ `store` ignored the `interrupt` response body (`{interrupted: bool}`). It
+  now uses it: a failed abort surfaces a run notice instead of faking a stop,
+  and `interrupted: false` (verified live against an idle session) no longer
+  fabricates a `run.ended`. The flags are left to the LIVE-tier reconcile,
+  which settles them within a tick, so nothing can stick.
+- ✅ The `contextMenu.file` collection is documented in the spec and authoring
+  guide but had **no core consumer** — third-party contributions were silently
+  dropped. File rows in `FileExplorer` now render it (plus a built-in "Copy
+  path"), and `ContextMenuContribution.run` learned the `file` context field.
+- ℹ️ `src/lib/scheduler.ts` `if (!signals) return "live"` is **kept**: it is
+  the right default for headless callers that start the scheduler without
+  signals (the extension battery does). The "not wired yet" note was stale
+  (`startStore` wires them) and has been corrected.
+- ✅ Pinned `@opencode-ai/client@0.0.0-next-17444` was a **`dev`-scope
+  prerelease** while we target the **`v2`** engine. Migrated to
+  **`@opencode/client@2.0.3`** — what the engine line actually publishes
+  (`npm dist-tags latest = 2.0.3`) — which ships the same `./service` surface
+  (`discover` / `ensure` / `stop` / `headers`). Drop-in: proxy service
+  discovery, the event recorder, all four batteries and the browser smoke
+  checks were re-verified after the swap, and `diff-openapi --check` still
+  reports zero drift.
 
 ---
 

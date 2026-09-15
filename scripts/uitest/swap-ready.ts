@@ -15,7 +15,7 @@
  *   1 = NOT READY — engine still cannot serve backlog
  *   2 = endpoint gone/changed — remap the probe first
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };

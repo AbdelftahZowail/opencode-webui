@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Capture ALL distinct event types (with payload shape hints) during one short run.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };
 const B = ep.url;

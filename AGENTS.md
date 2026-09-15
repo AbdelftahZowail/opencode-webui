@@ -15,7 +15,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 ```
 
 - **The browser never holds service credentials.** The proxy discovers the
-  service with `Service.ensure()` from `@opencode-ai/client/service` and
+  service with `Service.ensure()` from `@opencode/client/service` and
   attaches auth headers. Do not bypass the proxy.
 - **Dev**: `bun run dev` starts the dev proxy on its own port (default 4098,
   `WEBUI_PROXY_PORT`) and Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies

@@ -14,7 +14,7 @@
  *
  * Usage: bun scripts/uitest/probe-gzip.ts [seconds=25] ["identity"|"browser"]
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const SECONDS = Number(process.argv[2] ?? 25);
 const MODE = process.argv[3] ?? "browser";

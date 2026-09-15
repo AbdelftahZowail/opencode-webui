@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Does REST serve GROWING content during a run — via the listing AND via the
 // per-message endpoint? Sample fast, print part-length evolution.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };
 const B = ep.url;

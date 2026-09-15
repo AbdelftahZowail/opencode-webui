@@ -558,7 +558,7 @@ re-discovers them by trial:
   REST `POST /api/session` create — the setup-bridge create drops it.
 - **Discovery + auth:** the engine registers at
   `$XDG_STATE_HOME/opencode/service.json` (Basic `opencode:password` —
-  mirror `@opencode-ai/client`'s service helper); provider credentials live
+  mirror `@opencode/client`'s service helper); provider credentials live
   under `XDG_DATA_HOME`, so a `STATE`-only sandbox sees the engine but no
   models. When agent testing misbehaves, verify the provider first with
   `POST /session/{id}/generate {"prompt":"OK"}`; when runs fail blank,

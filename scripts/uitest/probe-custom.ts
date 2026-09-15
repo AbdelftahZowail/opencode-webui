@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Multiselect + custom-answer reply shape ground truth.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const h = { ...Service.headers(ep), "content-type": "application/json" };
 const B = ep.url;

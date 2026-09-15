@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Cancel-path ground truth: raise a question, cancel via REST, record events.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const H = Service.headers(ep);
 const B = ep.url;

@@ -1,7 +1,7 @@
 /**
  * SPIKE 3 (throwaway): follow variants + active-map entry shape + §4.4 re-samples.
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };

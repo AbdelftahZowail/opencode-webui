@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Permission round-trip ground truth.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const H = Service.headers(ep);
 const B = ep.url;

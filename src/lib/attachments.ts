@@ -1,7 +1,7 @@
 /**
  * Image attachment helpers (pure transforms only — no store, no fetch).
  *
- * Contract facts (docs/reference/openapi.json + @opencode-ai/client types):
+ * Contract facts (docs/reference/openapi.json + @opencode/client types):
  * - POST /session/{id}/prompt accepts files as PromptInput.FileAttachment =
  *   {uri, name?, description?, mention?} — uri is a plain string, and the
  *   engine resolves `data:` URLs (the TUI pastes images exactly this way:

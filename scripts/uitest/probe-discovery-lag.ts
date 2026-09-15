@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Watch ALL discovery paths for the next question raised on ses_fc4f49174.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const h = Service.headers(ep);
 const B = ep.url;

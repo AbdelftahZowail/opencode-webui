@@ -3,7 +3,7 @@
 //  A) steer delivery: does the inbox item leave GET /inbox after delivery? which event fires, with which fields?
 //  B) run end: which terminal events fire (execution.* / session.status / session.idle)?
 //  C) edit flow: revert/stage -> prompt -> does the engine auto-commit? what does GET /session report?
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };

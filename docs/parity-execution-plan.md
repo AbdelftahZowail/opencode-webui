@@ -41,7 +41,7 @@ building on it — but do not re-open settled questions.
 
 | Fact | How to verify |
 | --- | --- |
-| Engine version | `bun -e 'import {Service} from "@opencode-ai/client/service"; const ep=await Service.ensure(); const r=await fetch(ep.url+"/api/health",{headers:Service.headers(ep)}); console.log((await r.json()).version)'` → `2.0.3` |
+| Engine version | `bun -e 'import {Service} from "@opencode/client/service"; const ep=await Service.ensure(); const r=await fetch(ep.url+"/api/health",{headers:Service.headers(ep)}); console.log((await r.json()).version)'` → `2.0.3` |
 | Proxy forwards only `/api/*` | `server/index.ts`, the `if (path.startsWith("/api"))` branch |
 | v2 client is 100% `/api/*` | in the v2 extraction: `grep -oE 'path: \`[^\`]+\`' packages/client/src/promise/generated/client.ts \| sed 's/path: `//;s/`//' \| sort -u` → 115 unique paths, **all** starting `/api/` |
 | v2 has no todo/lsp/formatter/share/question endpoints | same file, grep those words → 0 |
@@ -328,7 +328,7 @@ delete it — never touch a real one):
 
 ```bash
 bun -e '
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const h = { ...Service.headers(ep), "content-type": "application/json" };
 const r = await fetch(`${ep.url}/api/session`, { method:"POST", headers:h,

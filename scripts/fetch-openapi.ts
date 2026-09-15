@@ -2,7 +2,7 @@
 // Fetch the live OpenAPI spec from the opencode service via Service discovery
 // (same auth path as the proxy) into docs/reference/openapi.json.
 //   bun run scripts/fetch-openapi.ts
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const res = await fetch(`${ep.url}/openapi.json`, { headers: Service.headers(ep) });

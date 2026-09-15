@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Ground-truth probe: drive a real question through a scratch session and
 // record EXACTLY what the engine exposes over REST for the webui.
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const h = { ...Service.headers(ep), "content-type": "application/json" };
 const B = ep.url;

@@ -9,7 +9,7 @@
  *             2 = ENV-BLOCKED (the run never produced content — provider or
  *             model trouble, not our code).
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 // 1) direct engine access for run orchestration (as the engine sees it)
 const ep = await Service.ensure();

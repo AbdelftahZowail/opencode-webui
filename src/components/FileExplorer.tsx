@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   File,
@@ -15,6 +15,18 @@ import {
 import { api } from "../api/client";
 import type { FsEntry } from "../api/client";
 import { isDraftSession, openDiffViewer, useStore } from "../store";
+import {
+  getContributions,
+  subscribeRegistry,
+  type ContextMenuContribution,
+} from "../extensions/registry";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
 import { cn } from "../lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -70,11 +82,15 @@ interface TreeRowProps {
   depth: number;
   nodes: Record<string, TreeNode>;
   selectedPath: string | null;
+  /** `contextMenu.file` contributions (core + extensions). */
+  fileMenus: { id: string; item: ContextMenuContribution }[];
+  /** Context for those contributions. */
+  sessionID: string | null;
   onToggle: (entry: FsEntry) => void;
   onOpen: (entry: FsEntry) => void;
 }
 
-function TreeRow({ entry, depth, nodes, selectedPath, onToggle, onOpen }: TreeRowProps) {
+function TreeRow({ entry, depth, nodes, selectedPath, fileMenus, sessionID, onToggle, onOpen }: TreeRowProps) {
   const isDir = entry.type === "directory";
   const key = normPath(entry.path);
   const node = nodes[key];
@@ -82,8 +98,7 @@ function TreeRow({ entry, depth, nodes, selectedPath, onToggle, onOpen }: TreeRo
   const selected = selectedPath === key;
   const indent = 6 + depth * 13;
   const act = () => (isDir ? onToggle(entry) : onOpen(entry));
-  return (
-    <div>
+  const row = (
       <div
         role="button"
         tabIndex={0}
@@ -128,6 +143,35 @@ function TreeRow({ entry, depth, nodes, selectedPath, onToggle, onOpen }: TreeRo
         {node?.loading && <Loader2 className="ml-auto size-3 shrink-0 animate-spin text-[var(--text-weaker)]" />}
         {node?.error && <span className="ml-auto shrink-0 text-[10px] text-[var(--text-on-critical-base)]">!</span>}
       </div>
+  );
+  return (
+    <div>
+      {isDir ? (
+        row
+      ) : (
+        // `contextMenu.file` finally has a consumer: a third-party item used to
+        // be accepted by the registry and silently dropped. Built-in "Copy
+        // path" keeps the menu useful with no extensions installed.
+        <ContextMenu>
+          <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+          <ContextMenuContent className="min-w-40">
+            <ContextMenuItem
+              onSelect={() => void navigator.clipboard.writeText(entry.path).catch(() => undefined)}
+            >
+              Copy path
+            </ContextMenuItem>
+            {fileMenus.length > 0 && <ContextMenuSeparator />}
+            {fileMenus.map((c) => (
+              <ContextMenuItem
+                key={c.id}
+                onSelect={() => c.item.run({ sessionID: sessionID ?? undefined, file: entry.path })}
+              >
+                {c.item.label}
+              </ContextMenuItem>
+            ))}
+          </ContextMenuContent>
+        </ContextMenu>
+      )}
       {isDir && node?.expanded && (
         <div>
           {node.loading ? (
@@ -151,6 +195,8 @@ function TreeRow({ entry, depth, nodes, selectedPath, onToggle, onOpen }: TreeRo
                 depth={depth + 1}
                 nodes={nodes}
                 selectedPath={selectedPath}
+                fileMenus={fileMenus}
+                sessionID={sessionID}
                 onToggle={onToggle}
                 onOpen={onOpen}
               />
@@ -181,6 +227,13 @@ function ChangeBadge({ count, error }: { count: number | null; error: string | n
   );
 }
 
+/** Repaint on late/hot extension registrations (same pattern as MessageItem). */
+function useRegistryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
 export function FileExplorer({
   open,
   onOpenChange,
@@ -192,6 +245,12 @@ export function FileExplorer({
     (s) => s.sessions.find((x) => x.id === s.currentSessionID)?.location?.directory,
   );
   const currentSessionID = useStore((s) => s.currentSessionID);
+  // `contextMenu.file` contributions (registry-reactive, like MessageItem's).
+  const registryVersion = useRegistryVersion();
+  const fileMenus = useMemo(
+    () => getContributions<ContextMenuContribution>("contextMenu.file"),
+    [registryVersion],
+  );
   const [locationDir, setLocationDir] = useState<string | null>(null);
   const [rootEntries, setRootEntries] = useState<FsEntry[] | null>(null);
   const [rootError, setRootError] = useState<string | null>(null);
@@ -390,6 +449,8 @@ export function FileExplorer({
                       depth={0}
                       nodes={nodes}
                       selectedPath={selected ? normPath(selected.path) : null}
+                      fileMenus={fileMenus}
+                      sessionID={currentSessionID}
                       onToggle={toggle}
                       onOpen={openFile}
                     />

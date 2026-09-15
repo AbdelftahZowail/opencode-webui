@@ -180,7 +180,7 @@ Refreshed to 116 (live as of 2026-09-01):
 
 - `POST /api/session/{id}/command` takes `{command, text, files?, agents?,
   skills?, delivery?}` with **`text` required** — not the `arguments` key the
-  pinned `@opencode-ai/client` protocol types still declare. Sending
+  pinned `@opencode/client` protocol types still declare. Sending
   `arguments` fails validation with `Missing key at ["text"]`, which is what
   made every leading-slash message error. `api.runCommand` now sends `text`
   (the command's argument string; `""` when there are none).
@@ -193,7 +193,7 @@ Refreshed to 116 (live as of 2026-09-01):
 
 ## Previous snapshot change (99 → 115)
 
-Snapshot `docs/reference/openapi.json` at `2026-08-16` was 99 paths (`@opencode-ai/client@0.0.0-next-17444`).
+Snapshot `docs/reference/openapi.json` at `2026-08-16` was 99 paths (`@opencode/client@0.0.0-next-17444`).
 Refreshed to 111 (`2026-08-26`), then to 115 (2026-08-31):
 
 - Added 111 → 115: `POST /api/credential/{id}/activate`, `POST /api/experimental/persistent-pty/handoff`,
@@ -218,7 +218,7 @@ Webapp stays on Promise: `server/index.ts` `Service.ensure()` + `src/api/client.
 The `/effect` entrypoints are additive — same OpenAPI at `/openapi.json`. Building a server plugin
 or embedding via SDK would pick one style; webapp contributors ignore it. Doc ref:
 `opencode.ai/v2/docs/build` (Build overview) · `/build/plugins` + `/build/plugins/cli` ·
-`/build/client` (`@opencode-ai/client@beta`) · `/build/sdk` (`@opencode-ai/sdk@dev`).
+`/build/client` (`@opencode/client@beta`) · `/build/sdk` (`@opencode-ai/sdk@dev`).
 
 ## Extending checklist — when the diff grows
 

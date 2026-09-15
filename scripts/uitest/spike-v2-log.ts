@@ -5,7 +5,7 @@
  *  - does after=<seq>&follow=true tail live events?
  *  - exclusivity of `after`.
  */
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const ep = await Service.ensure();
 const H = { ...Service.headers(ep), "content-type": "application/json" };

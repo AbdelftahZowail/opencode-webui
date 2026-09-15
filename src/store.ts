@@ -4402,8 +4402,25 @@ export async function interrupt(sessionID?: string) {
   const sid = sessionID ?? state.currentSessionID;
   if (!sid || isDraftSession(sid)) return;
   disarmInterrupt();
-  await api.interrupt(sid);
-  // Reflect the stop immediately; events/poll reconciliation confirms after.
+  // The response says whether an active execution was ACTUALLY interrupted.
+  // Claiming a stop we did not make leaves the UI lying about a run that is
+  // still going, so only the confirmed case clears optimistically.
+  let interrupted: boolean | undefined;
+  try {
+    const res = await api.interrupt(sid);
+    interrupted = res?.interrupted;
+  } catch (err) {
+    // A failed abort must not read as a successful stop.
+    pushRunNotice(sid, "failed", err instanceof Error ? err.message : String(err));
+    return;
+  }
+  if (interrupted === false) {
+    // Nothing was interrupted (already settling, or owned elsewhere). Leave
+    // the flags to the events/poll reconciliation: `running` keeps the tier
+    // LIVE, so the transcript reconcile settles it within a tick.
+    return;
+  }
+  // Reflect the confirmed stop immediately; events/poll confirm after.
   noteRunEnd(sid);
   setState({
     running: { ...state.running, [sid]: false },

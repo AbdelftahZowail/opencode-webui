@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 //   bun run scripts/diff-openapi.ts            # pretty summary to stdout
 //   bun run scripts/diff-openapi.ts --json     # machine-readable JSON
 //   bun run scripts/diff-openapi.ts --check    # exit 1 if added/removed/modified
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 
 const SNAP_PATH = fileURLToPath(new URL("../docs/reference/openapi.json", import.meta.url));
 const asJson = process.argv.includes("--json");

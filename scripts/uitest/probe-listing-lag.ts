@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Measure how fast a newly created question-form shows up in:
 //   (a) global /api/form/request   (b) per-session /api/session/{sid}/form   (c) /form/{id}/state
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 const ep = await Service.ensure();
 const h = { ...Service.headers(ep), "content-type": "application/json" };
 const B = ep.url;

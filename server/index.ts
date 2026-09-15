@@ -19,7 +19,7 @@
  * are ever logged.
  */
 
-import { Service } from "@opencode-ai/client/service";
+import { Service } from "@opencode/client/service";
 import type { Server } from "bun";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
