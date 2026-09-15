@@ -10,6 +10,12 @@ import { useEffect, useState } from "react";
  */
 function isTextEntry(el: Element | null): boolean {
   if (!el || !(el instanceof HTMLElement)) return false;
+  // Overlay search fields (the model picker's filter) opt out: they summon the
+  // soft keyboard too, but treating them as "the message composer is typing"
+  // collapsed the mobile composer chrome — hiding the picker's own trigger
+  // mid-open, which on Android repositioned the anchored menu off-screen once
+  // the keyboard resized the viewport.
+  if (el.closest("[data-keyboard-ignore]")) return false;
   return (
     el.closest(
       'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="button"]):not([type="submit"]), [contenteditable="true"]',

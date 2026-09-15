@@ -464,6 +464,7 @@ extensions break silently on every redesign.
 | `data-oc-transcript` | MessageScroller content |
 | `data-oc-message` + `data-oc-message-id` + `data-oc-message-type` | MessageItem root per type branch |
 | `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` | Composer card, textarea, send button |
+| `data-oc-composer-attach` + `data-oc-composer-attach-input` + `data-oc-composer-attachments` | Composer paperclip button + hidden file input, staged attachment strip |
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
 | `data-oc-sidebar` | Sidebar root |

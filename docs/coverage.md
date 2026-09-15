@@ -100,6 +100,21 @@ Refreshed to 116 (live as of 2026-09-01):
   (client + activate button in Settings → Integrations). Still unimplemented:
   the experimental persistent-pty/terminal routes (see the experimental table).
 
+### Client correctness fixes (no snapshot change)
+
+- `POST /api/session/{id}/command` takes `{command, text, files?, agents?,
+  skills?, delivery?}` with **`text` required** — not the `arguments` key the
+  pinned `@opencode-ai/client` protocol types still declare. Sending
+  `arguments` fails validation with `Missing key at ["text"]`, which is what
+  made every leading-slash message error. `api.runCommand` now sends `text`
+  (the command's argument string; `""` when there are none).
+- Attachment `files` only become prompt content for `image/png|jpeg|gif|webp`,
+  `application/pdf`, `text/plain` and `application/x-directory` — every other
+  mime is **silently dropped** by the engine. The composer therefore stages
+  only those four image types (paste/drop/picker/`@`-pick), reports anything
+  else instead of dropping it, and downscales to the engine's `image.*`
+  defaults (2000×2000 / 5 MiB base64) before send.
+
 ## Previous snapshot change (99 → 115)
 
 Snapshot `docs/reference/openapi.json` at `2026-08-16` was 99 paths (`@opencode-ai/client@0.0.0-next-17444`).

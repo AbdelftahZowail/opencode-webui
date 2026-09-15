@@ -13,6 +13,7 @@ import {
 } from "./api/client";
 import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { fireHooks } from "./extensions/hooks";
+import { promptFilesToHistory } from "./lib/attachments";
 import { log } from "./lib/log";
 import { publishEvent } from "./lib/eventBus";
 import { registerPoller, startScheduler } from "./lib/scheduler";
@@ -3404,6 +3405,12 @@ export interface SendPromptOptions {
    * a run immediately, exactly as before this option existed.
    */
   delivery?: PromptDelivery;
+  /**
+   * Attachments to deliver with the prompt (PromptInput.FileAttachment
+   * uri-only shape: pasted images as data: URIs, @-picked files as file:
+   * URIs). Rides both the idle send and the busy steer/queue admission.
+   */
+  files?: PromptFile[];
 }
 
 /**
@@ -3422,7 +3429,7 @@ export async function sendPromptTo(
 ) {
   log(
     "send",
-    `prompt ${sessionID}: ${text.slice(0, 80)}${opts?.delivery ? ` (${opts.delivery})` : ""}`,
+    `prompt ${sessionID}: ${text.slice(0, 80)}${opts?.files?.length ? ` (+${opts.files.length} files)` : ""}${opts?.delivery ? ` (${opts.delivery})` : ""}`,
   );
   // Interception hook (spec §5.1): `session.prompt` handlers may rewrite
   // ctx.text / ctx.delivery before the prompt goes out. Awaited — the send
@@ -3431,6 +3438,7 @@ export async function sendPromptTo(
     sessionID,
     text,
     ...(opts?.delivery ? { delivery: opts.delivery } : {}),
+    ...(opts?.files?.length ? { files: opts.files } : {}),
   };
   await fireHooks("session.prompt", promptCtx);
   text = typeof promptCtx.text === "string" ? promptCtx.text : text;
@@ -3438,17 +3446,19 @@ export async function sendPromptTo(
     promptCtx.delivery === "steer" || promptCtx.delivery === "queue"
       ? promptCtx.delivery
       : opts?.delivery;
+  const files = Array.isArray(promptCtx.files) ? (promptCtx.files as PromptFile[]) : opts?.files;
   await ensureSessionModel(sessionID);
   if (!isDraftSession(sessionID) && sessionBusy(sessionID)) {
     commitRevertOptimistically(sessionID);
-    await admitWhileBusy(sessionID, text, delivery);
+    await admitWhileBusy(sessionID, text, delivery, files);
     return;
   }
   commitRevertOptimistically(sessionID);
-  appendOptimisticUserMessage(sessionID, text);
+  appendOptimisticUserMessage(sessionID, text, files);
   markPending(sessionID);
   try {
-    await api.prompt(sessionID, text);
+    if (files && files.length > 0) await api.promptWithFiles(sessionID, text, files, delivery);
+    else await api.prompt(sessionID, text, delivery);
     // Arm the engine-native idle wait even though events normally drive the
     // run lifecycle: if the SSE channel is dead at send time, wait-204 is
     // the signal that settles the transcript (the §7 staircase's floor).
@@ -3522,7 +3532,12 @@ function patchPendingSend(
 }
 
 /** Admit a busy-send: track it locally, POST it, stamp the returned item. */
-async function admitWhileBusy(sessionID: string, text: string, delivery?: PromptDelivery) {
+async function admitWhileBusy(
+  sessionID: string,
+  text: string,
+  delivery?: PromptDelivery,
+  files?: PromptFile[],
+) {
   const key = `pend_${Date.now().toString(36)}_${++pendingSendSeq}`;
   pushPendingSend(sessionID, {
     key,
@@ -3536,7 +3551,10 @@ async function admitWhileBusy(sessionID: string, text: string, delivery?: Prompt
     // The response is the standard {data} envelope — the item lives in
     // `.data`. (Reading `info.id` off the envelope left every row "sending"
     // forever: no id to drop it by once the engine delivered the item.)
-    const res = await api.prompt(sessionID, text, delivery);
+    const res =
+      files && files.length > 0
+        ? await api.promptWithFiles(sessionID, text, files, delivery)
+        : await api.prompt(sessionID, text, delivery);
     // The engine loop is running (or about to be): the wait loop may not be
     // armed if this busy state arose outside this tab — arm it; idempotent.
     ensureSessionWait(sessionID);
@@ -3780,26 +3798,20 @@ export async function sendShell(command: string) {
   }
 }
 
-export async function sendPromptWithFiles(text: string, files: PromptFile[]) {
+/**
+ * Send a prompt carrying attachments. Thin wrapper over `sendPromptTo` so the
+ * busy steer/queue path, hooks, model pinning and optimistic transcript turn
+ * are identical to a plain send — only the wire body differs (`files`).
+ */
+export async function sendPromptWithFiles(
+  text: string,
+  files: PromptFile[],
+  opts?: SendPromptOptions,
+) {
   const sid = state.currentSessionID;
   if (!sid) return;
   assertRealTarget(sid);
-  log("send", `prompt+files ${sid}: ${text.slice(0, 80)}`);
-  await ensureSessionModel(sid);
-  commitRevertOptimistically(sid);
-  appendOptimisticUserMessage(sid, text);
-  markPending(sid);
-  try {
-    await api.promptWithFiles(sid, text, files);
-    try {
-      const { clearDraft } = await import("./lib/drafts");
-      clearDraft(DRAFT_SESSION_ID);
-    } catch {}
-  } catch (err) {
-    clearPending(sid);
-    recordSendError(sid, err);
-    throw err;
-  }
+  await sendPromptTo(sid, text, { ...opts, files });
 }
 
 /** Dismiss a rendered send failure. */
@@ -3916,12 +3928,13 @@ async function drainQueuedPending(sessionID: string) {
   }
 }
 
-function appendOptimisticUserMessage(sid: string, text: string) {
+function appendOptimisticUserMessage(sid: string, text: string, files?: PromptFile[]) {
   const optimistic: MessageInfo = {
     id: `msg_local_${Date.now()}`,
     type: "user",
     text,
     time: { created: Date.now() },
+    ...(files && files.length > 0 ? { files: promptFilesToHistory(files) } : {}),
   };
   setState({
     messages: { ...state.messages, [sid]: [...(state.messages[sid] ?? []), optimistic] },

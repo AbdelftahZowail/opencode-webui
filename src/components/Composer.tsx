@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListTree, Pencil, Send, Square, Terminal, X } from "lucide-react";
+import { ListTree, Paperclip, Pencil, Send, Square, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry, LocationInfo, ProjectInfo, PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
 import {
   attachmentPromptFile,
-  bytesToBase64,
-  imagesToAttachments,
-  looksLikeImagePath,
-  mimeFromName,
+  collectImageAttachments,
+  ENGINE_IMAGE_ACCEPT,
+  engineImageMimeFromName,
+  fileToAttachment,
+  isEngineImageFile,
   type PendingAttachment,
 } from "../lib/attachments";
 import {
@@ -45,6 +46,7 @@ import {
 } from "../store";
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
+import { notify } from "../lib/notify";
 import { hasCoarsePointer } from "../lib/platform";
 import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
@@ -102,6 +104,12 @@ async function copyTranscript(sessionID: string) {
 // description — no icons, no group headings.
 
 const SLASH_MENU_LIMIT = 10;
+
+/**
+ * Cap staged attachments so one paste/drop can't build an unbounded request.
+ * The engine accepts several images per prompt; this is a UI sanity limit.
+ */
+const MAX_ATTACHMENTS = 8;
 
 interface SlashEntry {
   key: string;
@@ -279,6 +287,8 @@ export function Composer({
   const slashExtensions = useMemo(() => getContributions<SlashContribution>("slash"), [registryVersion]);
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Hidden `<input type=file>` behind the attachment (paperclip) button. */
+  const fileInputRef = useRef<HTMLInputElement>(null);
   /**
    * Caret offset in the textarea. The slash menu anchors on the text BEFORE
    * the caret, so caret movement alone (arrows, click) must reach the render.
@@ -471,20 +481,20 @@ export function Composer({
         run: (args) => {
           const dir = args.trim();
           if (isDraftSession(sessionID)) {
-            window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: "Create a session first", variant: "destructive" } }));
+            notify({ title: "Create a session first", variant: "destructive" });
             return;
           }
           if (dir) {
             void api
               .moveSession(sessionID, dir)
               .then(() => {
-                window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Moved to ${dir}` } }));
+                notify({ title: `Moved to ${dir}` });
                 void loadSessionDetail(sessionID);
                 void refreshSessions();
               })
               .catch((err: unknown) => {
                 const msg = err instanceof Error ? err.message : String(err);
-                window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Move failed: ${msg}`, variant: "destructive" } }));
+                notify({ title: `Move failed: ${msg}`, variant: "destructive" });
               });
             return;
           }
@@ -729,32 +739,83 @@ export function Composer({
     void switchAgent(sessionID, next.id).then(() => void loadSessionDetail(sessionID));
   }
 
+  /**
+   * Merge staged attachments, enforcing the count cap. Kept out of the state
+   * updater so the toast side effect never runs twice under StrictMode.
+   */
+  function addAttachments(next: PendingAttachment[]) {
+    if (next.length === 0) return;
+    const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+    if (room === 0) {
+      notify({ title: `Up to ${MAX_ATTACHMENTS} attachments`, variant: "destructive" });
+      return;
+    }
+    const taken = next.slice(0, room);
+    if (taken.length < next.length) {
+      notify({ title: `Up to ${MAX_ATTACHMENTS} attachments`, variant: "destructive" });
+    }
+    setAttachments((prev) => [...prev, ...taken]);
+  }
+
+  /**
+   * Stage user-provided files: engine-supported images become attachments,
+   * everything else is reported. Never throws — a rejected file must not
+   * abort the paste/drop that carried it.
+   */
+  async function stageImageFiles(files: Iterable<File>) {
+    const { attachments: staged, errors, unsupported } = await collectImageAttachments(files);
+    addAttachments(staged);
+    for (const error of errors) {
+      notify({ title: "Attachment failed", description: error, variant: "destructive" });
+    }
+    if (unsupported > 0) {
+      notify({
+        title: `${unsupported} file${unsupported === 1 ? "" : "s"} skipped`,
+        description: "The engine only accepts PNG, JPEG, GIF and WebP images.",
+        variant: "destructive",
+      });
+    }
+  }
+
   /** Stage an image attachment from raw workspace-file bytes. */
   function attachImageBytes(path: string, buf: ArrayBuffer) {
-    const mime = mimeFromName(path) ?? "application/octet-stream";
-    setAttachments((prev) => [
-      ...prev,
-      {
-        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        name: path.split("/").pop() || path,
-        mime,
-        uri: `data:${mime};base64,${bytesToBase64(buf)}`,
-      },
-    ]);
+    const name = path.split("/").pop() || path;
+    const mime = engineImageMimeFromName(path);
+    if (!mime) {
+      notify({
+        title: "Unsupported image",
+        description: `${name} — the engine only accepts PNG, JPEG, GIF and WebP.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    void fileToAttachment(new File([buf], name, { type: mime }))
+      .then((att) => addAttachments([att]))
+      .catch((err) =>
+        notify({
+          title: "Attachment failed",
+          description: `${name}: ${err instanceof Error ? err.message : "could not read"}`,
+          variant: "destructive",
+        }),
+      );
   }
 
   function handleFilePick(entry: FsEntry) {
     const idx = text.lastIndexOf("@");
     if (idx === -1) return;
-    if (entry.type === "file" && looksLikeImagePath(entry.path)) {
-      // Images can't ride the @file text-content flow — attach them as real
-      // image attachments and remove the "@query" token from the buffer.
+    const imageMime = entry.type === "file" ? engineImageMimeFromName(entry.path) : undefined;
+    if (imageMime) {
+      // Engine-supported images can't ride the @file text-content flow —
+      // attach them as real image attachments and remove the "@query" token
+      // from the buffer. Unsupported "image" files (svg/avif/bmp/…) fall
+      // through to the normal @-file path so we never stage something the
+      // engine would silently drop.
       setText(text.slice(0, idx) + text.slice(idx + 1 + (mentionQuery?.length ?? 0)));
       refocusComposer();
       api
         .fsReadBytes(entry.path, sessionLocation)
         .then((buf) => attachImageBytes(entry.path, buf))
-        .catch(() => undefined);
+        .catch(() => notify({ title: "Could not read image", description: entry.path, variant: "destructive" }));
       return;
     }
     const token = `@${entry.path}`;
@@ -798,24 +859,35 @@ export function Composer({
     setBusy(true);
     setHistIdx(null);
     try {
+      // Classify a leading slash ONCE. A "/" only reaches the engine as a
+      // slash command when its first token is an actual command in the loaded
+      // catalog — otherwise the whole buffer is a normal message ("/tmp/foo",
+      // "/r/some-url", a lone "/"). That keeps "Missing key"/"Command not
+      // found" errors scoped to commands the user really invoked instead of
+      // erroring on any text that happens to start with a slash.
+      const slashParts = value.startsWith("/") ? value.slice(1).split(" ") : null;
+      const slashName = slashParts?.[0] ?? "";
+      const slashArgs = slashParts ? slashParts.slice(1).join(" ") : "";
+      const isEngineCommand =
+        slashParts !== null && (commandNames.size === 0 || commandNames.has(slashName));
       // Built-in slash actions are pure UI operations — they must run WITHOUT
       // materializing the draft ("/new" on a draft would otherwise create an
       // orphan session before opening the next one).
-      if (!shellMode && value.startsWith("/")) {
-        const parts = value.slice(1).split(" ");
-        const name = parts[0]!;
-        const action = slashActions.find((a) => a.name === name || a.aliases?.includes(name));
+      if (!shellMode && slashParts) {
+        const action = slashActions.find((a) => a.name === slashName || a.aliases?.includes(slashName));
         if (action) {
           // UI action, not a message: the consumed token is cleared so the
           // composer doesn't keep showing the command it just ran.
           setText("");
           setDismissedAt(null);
-          action.run(parts.slice(1).join(" "));
+          action.run(slashArgs);
           return;
         }
-        const slashExt = slashExtensions.find((s) => s.item.name === name || s.item.aliases?.includes(name));
+        const slashExt = slashExtensions.find(
+          (s) => s.item.name === slashName || s.item.aliases?.includes(slashName),
+        );
         if (slashExt) {
-          await slashExt.item.run(parts.slice(1).join(" "), { sessionID });
+          await slashExt.item.run(slashArgs, { sessionID });
           return;
         }
       }
@@ -833,11 +905,8 @@ export function Composer({
         await sendShell(value.startsWith("!") ? value.slice(1) : value);
       } else if (value.startsWith("!")) {
         await sendShell(value.slice(1));
-      } else if (value.startsWith("/")) {
-        const parts = value.slice(1).split(" ");
-        const name = parts[0]!;
-        const args = parts.slice(1).join(" ");
-        await sendCommand(name, args || undefined);
+      } else if (isEngineCommand) {
+        await sendCommand(slashName, slashArgs || undefined);
       } else if (pickedFiles.length > 0 || attachments.length > 0) {
         // A draft has no server-side location yet — its workspace only lives
         // in the store, so fall back to it for @file URI resolution.
@@ -860,7 +929,7 @@ export function Composer({
           files.push(attachmentPromptFile(att));
         }
         if (files.length > 0) {
-          await sendPromptWithFiles(value, files);
+          await sendPromptWithFiles(value, files, opts);
         } else {
           await sendPromptTo(sid, value, opts);
         }
@@ -966,12 +1035,11 @@ export function Composer({
               onDrop={(e) => {
                 setDragDepth(0);
                 if (e.dataTransfer.files.length === 0) return;
-                // Dropping images stages them; non-image files keep the
-                // @-mention text flow, so plain file drops do nothing here.
+                // Dropping engine-supported images stages them; anything else
+                // is reported (never silently swallowed). Plain text files
+                // still belong to the @-mention flow.
                 e.preventDefault();
-                void imagesToAttachments(e.dataTransfer.files).then((atts) => {
-                  if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
-                });
+                void stageImageFiles(e.dataTransfer.files);
               }}
               className={`rounded-lg border bg-[color:var(--input-base)] p-2 transition-colors focus-within:border-[color:var(--border-selected)] ${
                 dragDepth > 0 || shellMode
@@ -994,7 +1062,10 @@ export function Composer({
                 </div>
               )}
               {attachments.length > 0 && (
-                <div className="mb-1.5 flex flex-wrap items-start gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5">
+                <div
+                  data-oc-composer-attachments
+                  className="mb-1.5 flex flex-wrap items-start gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5"
+                >
                   {attachments.map((att) => (
                     <span key={att.id} className="relative inline-block" title={`${att.name} (${att.mime})`}>
                       <img
@@ -1046,22 +1117,31 @@ export function Composer({
                     onKeyUp={(e) => syncCaret(e.currentTarget)}
                     onPaste={(e) => {
                       // Image paste (screenshots): stage as attachments.
-                      // Only intercept when an image is actually present so
-                      // normal text/file pastes keep working untouched.
+                      // Only intercept when an engine-supported image is
+                      // present so normal text/file pastes keep working; a
+                      // lone unsupported file is reported, never silently
+                      // dropped.
                       const files: File[] = [];
                       for (const item of Array.from(e.clipboardData?.items ?? [])) {
                         if (item.kind !== "file") continue;
                         const file = item.getAsFile();
                         if (file) files.push(file);
                       }
-                      const hasImage = files.some(
-                        (f) => f.type.startsWith("image/") || looksLikeImagePath(f.name),
-                      );
-                      if (!hasImage) return;
+                      if (files.length === 0) return;
+                      if (!files.some(isEngineImageFile)) {
+                        // Keep a paste that also carries text (some apps add
+                        // both); only swallow when there's nothing else.
+                        if ((e.clipboardData?.getData("text/plain") ?? "").length > 0) return;
+                        e.preventDefault();
+                        notify({
+                          title: "Unsupported paste",
+                          description: "The engine only accepts PNG, JPEG, GIF and WebP images.",
+                          variant: "destructive",
+                        });
+                        return;
+                      }
                       e.preventDefault();
-                      void imagesToAttachments(files).then((atts) => {
-                        if (atts.length > 0) setAttachments((prev) => [...prev, ...atts]);
-                      });
+                      void stageImageFiles(files);
                     }}
                     onKeyDown={(e) => {
                       if (isSlash) {
@@ -1242,6 +1322,38 @@ export function Composer({
                     }}
                   />
                   {/*
+                    Attachment (paperclip): opens the OS picker filtered to
+                    the image mimes the engine actually turns into media. The
+                    input stays hidden; the picker can still surface other
+                    types on some platforms, so validation + error reporting
+                    live in stageImageFiles (never a silent drop).
+                  */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept={ENGINE_IMAGE_ACCEPT}
+                    multiple
+                    data-oc-composer-attach-input
+                    className="hidden"
+                    onChange={(e) => {
+                      const picked = e.currentTarget.files;
+                      if (picked && picked.length > 0) void stageImageFiles(picked);
+                      // Reset so re-picking the same file fires change again.
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    data-oc-composer-attach
+                    aria-label="Attach images"
+                    title="Attach images (PNG, JPEG, GIF, WebP)"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Paperclip />
+                  </Button>
+                  {/*
                     Extension slot: voice input etc. Core default is null —
                     wraps receive { sessionID, appendDraft } and render their
                     controls to the LEFT of Send. Added for voice-input
@@ -1360,7 +1472,7 @@ export function Composer({
           onClose={() => setMovePickerOpen(false)}
           onMoved={(dir) => {
             setMovePickerOpen(false);
-            window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Moved to ${dir}` } }));
+            notify({ title: `Moved to ${dir}` });
             void loadSessionDetail(sessionID);
             void refreshSessions();
           }}
@@ -1398,7 +1510,7 @@ function MovePickerDialog({ sessionID, currentDirectory, onClose, onMoved }: { s
     if (!trimmed) return;
     void api.moveSession(sessionID, trimmed).then(() => onMoved(trimmed)).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      window.dispatchEvent(new CustomEvent("opencode:notify", { detail: { title: `Move failed: ${msg}`, variant: "destructive" } }));
+      notify({ title: `Move failed: ${msg}`, variant: "destructive" });
     });
   };
   return (

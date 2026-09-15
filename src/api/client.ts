@@ -633,11 +633,19 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(delivery ? { text, files, delivery } : { text, files }),
     }).then((res) => res.data),
+  /**
+   * Run a slash command. The engine's `session.command` body is the same
+   * prompt-input shape as `/prompt` plus a required `command`; the command's
+   * argument text rides `text` (NOT the old `arguments` key — sending that
+   * made every leading-slash message fail validation with `Missing key
+   * at ["text"]`). `text` is required even with no arguments, so it is
+   * always sent as a string.
+   */
   runCommand: (sessionID: string, command: string, args?: string) =>
     request<unknown>(`/api/session/${sessionID}/command`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command, arguments: args ?? null }),
+      body: JSON.stringify({ command, text: args ?? "" }),
     }),
   activateSkill: (sessionID: string, skill: string) =>
     request<unknown>(`/api/session/${sessionID}/skill`, {

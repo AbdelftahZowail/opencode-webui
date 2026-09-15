@@ -55,6 +55,11 @@ function useAnchoredMenu({
     const el = anchorRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
+    // A hidden anchor (display:none — e.g. the mobile composer meta-row
+    // collapsing while another field has focus) reports a zero rect; keep the
+    // last good position instead of pinning the menu to the viewport edge or
+    // off-screen. The menu reappears where it was once the anchor returns.
+    if (r.width === 0 && r.height === 0) return;
     const gap = 4;
     const margin = 8;
     const left = Math.max(
@@ -342,13 +347,19 @@ export function ModelPicker({
   }, [enabledModels, q]);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  // Fresh open: unfiltered, caret in the search box.
+  // Fresh open: unfiltered.
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      inputRef.current?.focus();
-    }
+    if (open) setQuery("");
   }, [open]);
+  // The search box lives in a portal that only exists once `useAnchoredMenu`
+  // has measured the trigger (`menuStyle` flips null → set exactly once per
+  // open). Focusing on `open` alone ran before the input mounted, so the
+  // caret never landed in the field — key the focus on the portal being
+  // mounted instead.
+  const inputMounted = !!menuStyle;
+  useEffect(() => {
+    if (open && inputMounted) inputRef.current?.focus();
+  }, [open, inputMounted]);
 
   const current: ModelRef | undefined =
     pendingModel ?? detail?.model ?? session?.model ?? fallback ?? undefined;
@@ -403,7 +414,10 @@ export function ModelPicker({
             style={menuStyle}
             className="z-50 w-72 overflow-hidden rounded-lg border border-[color:var(--border-weak-base)] bg-[color:var(--surface-float-base)] shadow-xl"
           >
-            <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[color:var(--border-weak-base)] px-2.5">
+            <div
+              data-keyboard-ignore
+              className="flex h-8 shrink-0 items-center gap-2 border-b border-[color:var(--border-weak-base)] px-2.5"
+            >
               <Search className="size-3.5 shrink-0 text-[color:var(--text-weaker)]" />
               <input
                 ref={inputRef}
@@ -413,6 +427,7 @@ export function ModelPicker({
                 aria-label="Filter models"
                 autoComplete="off"
                 spellCheck={false}
+                autoFocus
                 className="h-full w-full bg-transparent font-mono text-[11px] text-[color:var(--text-strong)] outline-none placeholder:text-[color:var(--text-weaker)]"
               />
             </div>

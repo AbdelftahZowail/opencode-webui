@@ -39,6 +39,9 @@
  * | `data-oc-composer`            | Composer root card, Composer.tsx          |
  * | `data-oc-composer-input`      | composer textarea                         |
  * | `data-oc-composer-send`       | composer send button                      |
+ * | `data-oc-composer-attach` +   | composer paperclip button + hidden file   |
+ * | `data-oc-composer-attach-input` | input behind it (stages images)         |
+ * | `data-oc-composer-attachments` | staged attachment strip (thumbnails)     |
  * | `data-oc-tool-card` +         | ToolCard root, ToolCard.tsx               |
  * | `data-oc-tool-name`           | (tool call name, e.g. "edit")             |
  * | `data-oc-session-header`      | Conversation header bar                   |
@@ -69,6 +72,9 @@ export const OC_ANCHORS = {
   composer: "data-oc-composer",
   composerInput: "data-oc-composer-input",
   composerSend: "data-oc-composer-send",
+  composerAttach: "data-oc-composer-attach",
+  composerAttachInput: "data-oc-composer-attach-input",
+  composerAttachments: "data-oc-composer-attachments",
   toolCard: "data-oc-tool-card",
   toolName: "data-oc-tool-name",
   sessionHeader: "data-oc-session-header",
