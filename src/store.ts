@@ -22,6 +22,7 @@ import { connectEvents, sseStale, type V2Event } from "./api/events";
 import { fireHooks } from "./extensions/hooks";
 import { promptFilesToHistory } from "./lib/attachments";
 import { log } from "./lib/log";
+import { VCS_DIFF_CONTEXT_LINES, type DiffSource } from "./lib/sessionDiff";
 import { publishEvent } from "./lib/eventBus";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import { getPrefs } from "./prefs";
@@ -279,14 +280,10 @@ export interface SplitPane {
 //   "branch"  — the inferred base merge-base vs the working copy
 //   "turn"    — the newest idle-to-idle turn (steered prompts fold into it)
 // Everything the viewer renders is derived from this slice; the component is
-// presentational and emits store actions.
+// presentational and emits store actions. The source type + labels live in
+// `lib/sessionDiff.ts` so the pure lib and the store share one definition.
 
-export type DiffSource = "working" | "branch" | "turn";
-
-export const DIFF_SOURCES: readonly DiffSource[] = ["turn", "working", "branch"];
-
-/** Unchanged lines kept around each hunk when asking the engine for a diff. */
-export const VCS_DIFF_CONTEXT_LINES = 12;
+export type { DiffSource } from "./lib/sessionDiff";
 
 export interface SessionDiffState {
   source: DiffSource;
@@ -3157,7 +3154,11 @@ export async function loadSessionDiff(sessionID: string, source?: DiffSource) {
     let files: FileDiffInfo[];
     let base: VcsBase | null = null;
     if (mode === "turn") {
-      const res = await api.sessionDiff(sessionID, {});
+      // Ask for the same bounded context as the vcs sources: the engine's
+      // default here is a FULL-FILE patch (192 KB for a 4.5k-line file).
+      const res = await api.sessionDiff(sessionID, {
+        context: String(VCS_DIFF_CONTEXT_LINES),
+      });
       files = res.data;
     } else {
       if (mode === "branch") {

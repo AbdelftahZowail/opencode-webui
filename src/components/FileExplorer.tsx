@@ -9,11 +9,12 @@ import {
   FileText,
   Folder,
   FolderTree,
+  GitCompare,
   Loader2,
 } from "lucide-react";
 import { api } from "../api/client";
 import type { FsEntry } from "../api/client";
-import { useStore } from "../store";
+import { isDraftSession, openDiffViewer, useStore } from "../store";
 import { cn } from "../lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -190,6 +191,7 @@ export function FileExplorer({
   const sessionLocation = useStore(
     (s) => s.sessions.find((x) => x.id === s.currentSessionID)?.location?.directory,
   );
+  const currentSessionID = useStore((s) => s.currentSessionID);
   const [locationDir, setLocationDir] = useState<string | null>(null);
   const [rootEntries, setRootEntries] = useState<FsEntry[] | null>(null);
   const [rootError, setRootError] = useState<string | null>(null);
@@ -346,6 +348,18 @@ export function FileExplorer({
             <FolderTree className="size-4 text-[var(--text-weak)]" />
             Files
             <ChangeBadge count={changedCount} error={vcsError} />
+            {currentSessionID && !isDraftSession(currentSessionID) && (
+              <button
+                type="button"
+                title="Review what the last turn changed"
+                data-oc-diff-open
+                onClick={() => openDiffViewer(currentSessionID)}
+                className="ml-auto flex shrink-0 cursor-pointer items-center gap-1 rounded-md border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--text-weak)] transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
+              >
+                <GitCompare className="size-3" />
+                Review
+              </button>
+            )}
           </SheetTitle>
           {locationDir && (
             <SheetDescription className="truncate font-mono text-[11px] text-[var(--text-weaker)]">

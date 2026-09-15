@@ -20,6 +20,8 @@ import {
   MAIN_PANE,
   MAX_SPLITS,
   childSessionsOf,
+  closeDiffViewer,
+  emptyDiffState,
   focusPane,
   focusedPaneKey,
   isDraftSession,
@@ -33,8 +35,12 @@ import {
   revealSubagentComposer,
   selectSession,
   sessionOrSubagentsLive,
+  setDiffReviewed,
+  setDiffSelectedFile,
+  setDiffSource,
   startDraftSession,
   useStore,
+  type DiffSource,
 } from "./store";
 
 /** Extension page routes: /ext/{id} (id auto-derived from the extension id). */
@@ -334,11 +340,43 @@ export default function App() {
       <ImageViewer />
       <ConnectDialog />
       <HelpDialog />
+      <DiffViewerHost />
       {/* The app's ONLY ShellPanel instance: trigger-less (hidden-span
           trigger), opened by requestShellPanel() ticks from the runs panel /
           composer chips — the sidebar no longer hosts one. */}
       <ShellPanel trigger={<span className="hidden" />} />
     </div>
+  );
+}
+
+/**
+ * The P2 diff viewer's store-connected host: reads the open session's diff
+ * slice and renders the registered `diff.viewer` target, so extensions can
+ * wrap or replace the viewer without touching App. Mounted app-wide rather
+ * than inside FileExplorer — the viewer is a full dialog and its trigger can
+ * live anywhere.
+ */
+function DiffViewerHost() {
+  const sessionID = useStore((s) => s.diffViewerSessionID);
+  const slice = useStore((s) => (s.diffViewerSessionID ? s.diffs[s.diffViewerSessionID] : undefined));
+  if (!sessionID) return null;
+  const diff = slice ?? emptyDiffState();
+  return (
+    <Target
+      id="diff.viewer"
+      sessionID={sessionID}
+      files={diff.files}
+      source={diff.source}
+      loading={diff.loading}
+      error={diff.error}
+      reviewed={diff.reviewed}
+      selectedFile={diff.selectedFile}
+      base={diff.base}
+      onSelectSource={(source: DiffSource) => setDiffSource(sessionID, source)}
+      onSelectFile={(file: string | null) => setDiffSelectedFile(sessionID, file)}
+      onToggleReviewed={(file: string, reviewed: boolean) => setDiffReviewed(sessionID, file, reviewed)}
+      onClose={closeDiffViewer}
+    />
   );
 }
 

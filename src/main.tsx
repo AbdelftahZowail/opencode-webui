@@ -15,6 +15,7 @@ import "./components/Conversation";
 import "./components/Composer";
 import "./components/MessageItem";
 import "./components/ToolCard";
+import "./components/DiffViewer";
 import { log } from "./lib/log";
 import { hasCoarsePointer } from "./lib/platform";
 import { registerServiceWorker, startLiveTile } from "./lib/pwa";
