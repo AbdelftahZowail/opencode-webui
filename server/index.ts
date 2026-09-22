@@ -56,6 +56,7 @@ import {
   validatePatch,
   type ConfigPatch,
 } from "./config";
+import { createEngineResolver } from "./engineResolver";
 import {
   clearPidFile,
   ensureSetup,
@@ -166,26 +167,30 @@ async function writeDebug(lines: unknown[]) {
   }
 }
 
-let endpoint: Awaited<ReturnType<typeof Service.ensure>> | null = null;
+// Engine endpoint resolution. Discovery-first, single-flight and breakered —
+// see server/engineResolver.ts for why calling Service.ensure() per request is
+// a fork bomb. Explicit env still wins: WEBUI_ENGINE_URL aims the proxy at a
+// chosen engine and skips discovery/ensure entirely — no spawn from a stale
+// service.json pid (the rogue-serve incident), no version-kill of the chosen
+// engine. Same resolution as ctx.engine (see server/ext/engine.ts).
+const engineResolver = createEngineResolver({
+  discover: () => Service.discover(),
+  ensure: () => Service.ensure(),
+  resolveOverride: resolveEngineOverride,
+  onConnected: (url, suffix) =>
+    console.log(`[webui] connected to opencode service at ${url}${suffix}`),
+  onFailure: ({ error, failures, backoffMs }) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[webui] engine: could not start the opencode service (${message}) — ` +
+        `failure ${failures}, no further attempt for ${Math.round(backoffMs / 1000)}s`,
+    );
+  },
+  onInvalidated: (reason) => dbg("engine endpoint invalidated:", reason),
+});
 
 async function serviceEndpoint() {
-  // Explicit env wins: WEBUI_ENGINE_URL aims the proxy at a chosen engine.
-  // An override URL also SKIPS Service.ensure() — no spawn from a stale
-  // service.json pid (the rogue-serve incident), no version-kill of the
-  // chosen engine. Same resolution as ctx.engine (see server/ext/engine.ts).
-  const override = resolveEngineOverride();
-  if (override) {
-    if (!endpoint || endpoint.url !== override.url) {
-      endpoint = override;
-      console.log(`[webui] connected to opencode service at ${override.url} (WEBUI_ENGINE_URL)`);
-    }
-    return endpoint;
-  }
-  if (!endpoint) {
-    endpoint = await Service.ensure();
-    console.log(`[webui] connected to opencode service at ${endpoint.url}`);
-  }
-  return endpoint;
+  return engineResolver.endpoint();
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +331,14 @@ function recordEvent(evt: RecordedEvent) {
   }
 }
 
+// Reconnect backoff. A fixed retry turned a hard-down engine into a permanent
+// driver of the (up to 120s, spawning) ensure() loop.
+const RECORDER_BACKOFF_BASE_MS = 1_500;
+const RECORDER_BACKOFF_MAX_MS = 30_000;
+
 let recorderRunning = false;
+let recorderBackoffMs = RECORDER_BACKOFF_BASE_MS;
+
 async function startEventRecorder() {
   if (recorderRunning) return;
   recorderRunning = true;
@@ -337,6 +349,7 @@ async function startEventRecorder() {
         const res = await fetch(`${ep.url}/api/event`, { headers: Service.headers(ep) });
         if (!res.ok || !res.body) throw new Error(`recorder: ${res.status}`);
         console.log("[webui] event recorder connected");
+        recorderBackoffMs = RECORDER_BACKOFF_BASE_MS;
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -361,10 +374,13 @@ async function startEventRecorder() {
         }
       } catch (err) {
         console.warn("[webui] event recorder dropped, reconnecting:", err instanceof Error ? err.message : err);
-        // The service may have restarted with a NEW url — re-discover.
-        endpoint = null;
+        // The service may have restarted with a NEW url — re-resolve. Dropping
+        // the memo is spawn-free: resolution runs discovery before it can reach
+        // ensure() (see server/engineResolver.ts).
+        engineResolver.invalidate("event recorder dropped");
+        recorderBackoffMs = Math.min(recorderBackoffMs * 2, RECORDER_BACKOFF_MAX_MS);
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, recorderBackoffMs));
     }
   })();
 }
@@ -1334,6 +1350,10 @@ const server: Server<Record<string, unknown>> = Bun.serve({
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        // A client disconnect is not an engine failure — the memo stays valid.
+        // Anything else thrown here failed to reach the engine, so drop it and
+        // let the next request re-resolve (discovery runs first, spawn-free).
+        if (!req.signal.aborted) engineResolver.invalidate(`proxy error: ${message}`);
         console.error("[webui] proxy error:", message);
         return Response.json({ error: message }, { status: 502 });
       }
@@ -1509,10 +1529,17 @@ function settingsPayload() {
 
 // First-run setup: the global command + OpenCode lifecycle plugin. A matching
 // install is a no-op; the first install (and a refresh after an upgrade) shows
-// a one-time notice with the undo. The pidfile lets `stop`/`restart`/`update`
-// find this server.
-writePidFile(server.port ?? PROXY_PORT);
-process.on("exit", clearPidFile);
+// a one-time notice with the undo.
+//
+// The pidfile lets `stop`/`restart`/`update` find THIS server — so a sandbox
+// must never write it. The sandbox is a throwaway second instance on its own
+// port; claiming the shared pidfile would aim those verbs at the sandbox and
+// orphan the real webui (observed: `restart` stopped the sandbox while :4097
+// kept serving the old build). Sandbox is stopped by its own terminal/process.
+if (!SANDBOX()) {
+  writePidFile(server.port ?? PROXY_PORT);
+  process.on("exit", clearPidFile);
+}
 const SETUP = ensureSetup({
   entryUrl: import.meta.url,
   port: server.port ?? PROXY_PORT,
