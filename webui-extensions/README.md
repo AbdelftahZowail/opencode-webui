@@ -599,7 +599,9 @@ One folder becomes pixels through four files — follow them in order:
    `GET /api/webui/extensions` (`{ id, url?v=mtime, domUrl?v=mtime,
    source, origin, name?, description?, disabled?, settings?, requires?,
    capabilities? }`), pushes a `{ type: "webui.extensions", version }`
-   event per manifest change on `GET /api/webui/extensions/events`, and
+   frame on the main event stream (`GET /api/event`: a hello on connect plus
+   one per manifest change; the legacy `GET /api/webui/extensions/events`
+   route stays for external consumers), and
    bundles each entry standalone with `Bun.build` (`bundleUIEntry` —
    react external, build logs printed loudly, never silent).
 4. **Import + register (page).** `src/lib/runtimeExtensions.ts` fetches
@@ -642,9 +644,11 @@ External (user/project-dir) extensions use the one extension API surface
 
 - **Browser extensions (external dirs):** the proxy watches all three
   sources, rebuilds changed bundles, bumps the `?v=` version, and pushes the
-  manifest over SSE (`GET /api/webui/extensions/events`); the page
-  re-imports the bundle (browser ESM cache-busts on the query) and the
-  registry same-id-swaps → live repaint, sub-second. Replaces the old 8s
+  manifest over SSE on the MAIN event stream (`GET /api/event` — the same
+  one-SSE-per-tab channel the app already holds; the legacy
+  `GET /api/webui/extensions/events` route remains for external consumers);
+  the page re-imports the bundle (browser ESM cache-busts on the query) and
+  the registry same-id-swaps → live repaint, sub-second. Replaces the old 8s
   poll. Delete/move = uninstall (the id vanishes from the manifest);
   `disabled: true` = paused.
 - **Browser extensions (repo dev):** Vite HMR — same folder format, same

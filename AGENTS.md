@@ -44,13 +44,17 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 
 | Path | Purpose |
 | --- | --- |
-| `server/index.ts` | Bun proxy: service discovery, auth, `/api/*` passthrough, static serving, event recorder |
+| `server/index.ts` | Bun proxy: service discovery (+ registration fallback on drifted engines), auth, `/api/*` passthrough, static serving, event recorder + browser SSE fan-out |
+| `server/shelf.ts` | Core file shelf: read-only, auth-gated, traversal-proof serving + listing (`/api/shelf/*`) |
+| `server/shelfEnginePlugin.ts` | Embedded engine payload installing the `shelf_share`/`shelf_list`/`shelf_remove` tools + system hint |
 | `src/api/types.ts` | All API schemas — copy from the service's `/openapi.json` (the contract) |
 | `src/api/client.ts` | Typed REST client (one function per endpoint) |
 | `src/api/events.ts` | SSE parser for `/api/event` + reconnection + watchdog |
 | `src/lib/scheduler.ts` | The one fetch/tick scheduler — tiers (live/idle/hidden), registered pollers, no component-owned `setInterval` |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
 | `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip`, `PendingRequestsPanel`, `ui` (primitives) |
+| `src/components/markdown/` | Core markdown pipeline: single memoized ReactMarkdown mapping — `Table.tsx` (from-scratch table rendering), `PreviewBlock.tsx` (tilde-fence live previews html/svg/pdf/image), `ShelfChip.tsx` (`/api/shelf/file/…` link chips) |
+| `src/components/shelf/` | Shelf browse page + inline media preview components |
 | `src/extensions/registry.tsx` | The extension registry (v2 contract: kinds, target chains, collections, services, hooks — do not change lightly) |
 | `src/extensions/context.ts` | Activation lifecycle: `activate(ctx)` entry + disposal; the `ctx` surface (poll/after/on/subscribe/store/settings/collections/bus) |
 | `src/extensions/manifest.ts` | Manifest contract: `settings` schema + `requires` parse/resolve/check |
@@ -63,9 +67,11 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/lib/extBus.ts` | Extension-to-extension peer bus (`publish`/`subscribe`, many-to-many) |
 | `src/lib/extensionApi.ts` | The ONE extension API surface (bridge): `window.__opencodeUI` / `getExtensionApi()` + `EXT_API_VERSION` |
 | `src/lib/runtimeExtensions.ts` | Browser loader client: manifest fetch + SSE push, bundle import, same-id swap |
+| `src/lib/modelCatalog.ts` | Shared prefetched model catalog (one fetch, subscribers, loading/error states) |
+| `src/lib/modelMemory.ts` | New-session model memory: pinned default, last-used, recents + resolution cascade (pin → last-used → engine default → first enabled) |
 | `server/ext/` | Proxy-stratum loader + mount points (`routes`, `middleware`, `onEvent`, `pollers`, KV) |
 | `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
-| `server/setup.ts` | First-run setup: global `opencode-webui` command, lifecycle-plugin install, launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
+| `server/setup.ts` | First-run setup: global `opencode-webui` command, managed engine-plugin install (lifecycle + shelf tools), launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
 | `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
 | `server/config.ts` | Serve/security config: `~/.config/opencode/webui/config.json`, env-override resolution, validation, exposure analysis; `config` CLI |
 | `src/components/settings/AccessSection.tsx` | Settings › Security — the UI for those settings (source badges, restart-to-apply). Settings has four tabs: Extensions, Plugins, Security, and App (phone-only) |
@@ -100,14 +106,15 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
   engine inbox entry rendered by `QueueStrip` — ⚡ steer (next LLM-call
   boundary, Enter) vs ⏳ queue (parked until turn end, Ctrl/Cmd+Enter).
   Rows can be flipped, deleted, or sent now.
-- **Model pinning**: `resolveDefaultModel()` asks the engine for its own
-  default (`GET /api/model/default` — configured `model` when available, else
-  newest supported) so the webui matches the TUI; it falls back to the primary
-  agent's model, then the first enabled catalog model, only if that call fails
-  or returns null. New sessions are created WITH that model (`POST /session`);
-  legacy unpinned sessions get pinned on first send (`ensureSessionModel`). The
-  pickers read the authoritative `GET /api/session/{id}` from the
-  `sessionDetails` store slice.
+- **Model pinning**: `resolveDefaultModel()` resolves a new session's model
+  through the model-memory cascade: a user **pin** → **last used** → the
+  engine's own default (`GET /api/model/default` — configured `model` when
+  available, else newest supported) → the first enabled catalog model. New
+  sessions are created WITH that model (`POST /session`); legacy unpinned
+  sessions get pinned on first send (`ensureSessionModel`). A committed send
+  records the model as last-used/recents, and the pickers expose the pin footer
+  + a Recent section (`Pickers.tsx`, `src/lib/modelMemory.ts`). The pickers read
+  the authoritative `GET /api/session/{id}` from the `sessionDetails` slice.
 - **Esc** interrupts the active run site-wide in TWO steps
   (`requestInterrupt`): first press arms (yellow hint, self-reverts after
   2.5s), second press aborts. Esc yields to the focused composer and to
@@ -310,6 +317,11 @@ lifecycle and keeps an ordered live projection:
   SSE reconnect) and feeds it through the normal event path, with id-based
   dedupe and overlap-safe delta appends. `bun run check:swap` tracks
   whether the engine's durable per-session log can replace the recorder.
+  Browsers never open their own engine `/api/event` passthrough: every tab
+  attaches to the recorder's single engine subscription (N tabs → 1 engine
+  subscriber), served with 15s comment heartbeats; when the recorder
+  reconnects, attached clients are released so each reconnects and pulls
+  replay (id-deduped) for the gap.
 - **`store.queued`**: set optimistically on send and
   `session.inbox.enqueued`; cleared on the first live event. Covers the
   provider cold-start gap and messages queued behind an active run.
@@ -325,13 +337,15 @@ lifecycle and keeps an ordered live projection:
   timers. One 1s loop picks a tier — LIVE ~2s, IDLE ~12s, HIDDEN ~60s —
   and runs registered pollers with jitter and in-flight guards.
   Components never own `setInterval`.
-- **Poll fallback** (`store.pollOnce`): on the LIVE tier, running/queued/
-  pending sessions' messages are fetched and reconciled; optimistic
+- **Poll fallback** (`store.pollOnce`): on the LIVE tier, WATCHED sessions'
+  messages (mounted panes + focused session) are fetched and reconciled;
+  background sessions rebuild on adopt (`loadMessages` + `fetchReplay`) so a
+  tab never polls another tab's work; optimistic
   `msg_local_` copies are dropped once the real message exists; sessions
   whose fetches keep failing are retired so a deleted session can't 404
   forever.
 - **`session.wait` long-poll** (`ensureSessionWait`): one loop per running
-  session; 204 with a still-set running flag means the terminal event was
+  session THIS tab shows (`isWatched`); 204 with a still-set running flag means the terminal event was
   missed (dead SSE) — clear the flag, settle history.
 - **`settleLiveMessages` / `adoptPendingAssistant`**: on run end, reload
   history (retry once if not yet persisted); `step.started` re-keys the
@@ -397,24 +411,28 @@ calls `ensureSetup()` after the port binds:
   (hardlinks — no disk, no network) and the wrapper + `launch.json` point at the
   mirror; that is what keeps `bunx opencode-webui` and the lifecycle plugin
   working across reboots.
-- **Lifecycle plugin**: the built-in plugin (`server/lifecyclePlugin.ts`,
-  embedded source, CommonJS `{ id, setup }`) is written to
-  `<config>/opencode/plugins/opencode-webui/`, which the engine auto-discovers
-  globally. Activation is LAZY on the engine's side (verified with
-  `check:setup:engine`): the first `/api/plugin` read — i.e. first use — loads
-  the location's plugins, and `setup()` then starts the proxy detached
-  (fire-and-forget) if the port isn't already answering. This is the documented
-  exception to "the webui never installs engine plugins" (see
-  `docs/engine-payload-convention.md` §2).
+- **Managed engine plugins (two)**: first-run setup writes BOTH built-in engine
+  plugins, each in its own marker-gated directory under
+  `<config>/opencode/plugins/`, which the engine auto-discovers globally:
+  - `opencode-webui/` — the lifecycle plugin (`server/lifecyclePlugin.ts`,
+    embedded CommonJS `{ id, setup }`). Activation is LAZY on the engine's side
+    (verified with `check:setup:engine`): the first `/api/plugin` read — i.e.
+    first use — loads the location's plugins, and `setup()` then starts the
+    proxy detached (fire-and-forget) if the port isn't already answering.
+  - `opencode-webui-shelf/` — the shelf tools plugin
+    (`server/shelfEnginePlugin.ts`): the `shelf_share` / `shelf_list` /
+    `shelf_remove` tools + the shelf system hint.
+  This is the documented exception to "the webui never installs engine plugins"
+  (see `docs/engine-payload-convention.md` §2).
 - **Handoff**: each boot writes `launch.json` in the state dir (argv + port +
   version) — the stable thing the plugin and `restart` read; plus `webui.pid`
   so `stop`/`restart`/`update` can find the server (verified pid before signal).
-- **One gate, user-owned**: `uninstall` removes the wrapper + plugin + handoff
-  and writes a declined marker so the next boot won't resurrect it;
-  `opencode-webui setup` re-enables. `WEBUI_NO_SETUP=1` skips a run,
-  `WEBUI_NO_PLUGIN=1` installs the command but not the plugin, `WEBUI_SETUP=1`
+- **One gate, user-owned**: `uninstall` removes the wrapper + BOTH managed plugin
+  dirs + handoff and writes a declined marker so the next boot won't resurrect
+  it; `opencode-webui setup` re-enables. `WEBUI_NO_SETUP=1` skips a run,
+  `WEBUI_NO_PLUGIN=1` installs the command but neither plugin, `WEBUI_SETUP=1`
   forces a dev checkout. Sandbox never installs.
-- **Foreign files are never clobbered**: the wrapper and plugin dir are only
+- **Foreign files are never clobbered**: the wrapper and each plugin dir are only
   overwritten when they carry our marker.
 - **Update**: `opencode-webui update` runs `bun x opencode-webui@latest
   internal:setup` (which installs the NEW version's artifacts), then stops and

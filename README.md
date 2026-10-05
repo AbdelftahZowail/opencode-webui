@@ -149,13 +149,14 @@ chmod +x opencode-webui-linux-x64
 - **It's a client, not a second agent.** OpenCode WebUI talks to the same engine as the `opencode` TUI over its HTTP API — one agent, one history, two frontends. Start a run in the browser, finish it in the terminal.
 - **The browser never holds credentials.** Unlike web UIs that keep API keys in localStorage, a local Bun proxy owns the auth and attaches it server-side. Login is a signed HttpOnly `SameSite=Strict` cookie; the engine's credentials never leave the machine.
 - **Built for coding agents, not chat.** Tool cards with diffs and shell output, permission prompts, subagent strips, steer-vs-queue while busy, staged reverts — the things a coding session actually needs.
+- **Live previews and a file shelf.** `~~~html` / `~~~svg` / `~~~pdf` / `~~~image` fences render as sandboxed live previews, and the read-only **File shelf** (`/shelf`) shares files with the agent through the `shelf_share` / `shelf_list` / `shelf_remove` tools.
 
 ## It starts with OpenCode (first-run setup)
 
-First boot self-installs two things so the webui comes up with OpenCode and you never pay for `bunx` on every start:
+First boot self-installs three things so the webui comes up with OpenCode and you never pay for `bunx` on every start:
 
 1. **A global `opencode-webui` command** (`~/.local/bin/opencode-webui`) that launches the installed entry directly.
-2. **A built-in OpenCode lifecycle plugin** that starts the webui in the background whenever you use OpenCode — detached, fire-and-forget, never a second copy.
+2. **Two built-in OpenCode plugins** in `~/.config/opencode/plugins/`: a **lifecycle plugin** (`opencode-webui/`) that starts the webui in the background whenever you use OpenCode — detached, fire-and-forget, never a second copy — and a **shelf tools plugin** (`opencode-webui-shelf/`) that gives the agent the `shelf_share` / `shelf_list` / `shelf_remove` tools behind the read-only file shelf.
 
 ```sh
 opencode-webui            # start (starts the opencode service first if needed)
@@ -163,10 +164,10 @@ opencode-webui update     # update to the latest version and restart
 opencode-webui status     # command, plugin, launch command, running pid
 opencode-webui restart    # restart the background webui
 opencode-webui stop       # stop it
-opencode-webui uninstall  # remove the command + plugin (remembered; no auto-reinstall)
+opencode-webui uninstall  # remove the command + plugins (remembered; no auto-reinstall)
 ```
 
-A repo checkout (`bun run dev` / `bun run start`) never self-installs. `WEBUI_NO_SETUP=1` skips setup for one run, `WEBUI_NO_PLUGIN=1` installs the command but not the plugin, and `autostart: false` (the **Startup** toggle in Settings › Access) turns it off persistently.
+A repo checkout (`bun run dev` / `bun run start`) never self-installs. `WEBUI_NO_SETUP=1` skips setup for one run, `WEBUI_NO_PLUGIN=1` installs the command but not the OpenCode plugins, and `autostart: false` (the **Startup** toggle in Settings › Access) turns it off persistently.
 
 ## Configuration
 
@@ -181,7 +182,7 @@ Serve/security settings work as env vars or durably in `~/.config/opencode/webui
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Adds a higher-precedence source shadowing both (the sandbox uses this to keep WIP isolated; shipped extensions still load underneath). |
 | `WEBUI_NO_SETUP` | unset | `1` skips first-run setup for this run (CI, one-offs). |
-| `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode lifecycle plugin. |
+| `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode engine plugins (lifecycle + shelf tools). |
 | `WEBUI_SETUP` | unset | `1` forces setup even in a repo checkout (testing). |
 
 ```sh

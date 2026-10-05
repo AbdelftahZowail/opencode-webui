@@ -23,15 +23,19 @@ my-extension/
    extension's `engine/`, the user points the engine at it (e.g. adds the
    path to their opencode plugin config); the webui never installs, enables,
    or configures *extension* engine plugins on the user's behalf. The
-   exception is the webui's **own built-in lifecycle plugin**
-   (`server/lifecyclePlugin.ts`): on first run the webui writes it to
-   `<config>/opencode/plugins/opencode-webui/`, where the engine
-   auto-discovers it, so the proxy starts when OpenCode activates its plugins
-   (lazily, on use). It installs only itself, is announced in the boot banner,
-   and is removed by `opencode-webui uninstall` (or skipped with
-   `WEBUI_NO_PLUGIN=1`). This exception exists because the webui's lifecycle is
-   legitimately the webui's concern; it does not generalize to extension
-   payloads.
+   exception is the webui's **own built-in plugins**
+   (`server/lifecyclePlugin.ts` and `server/shelfEnginePlugin.ts`): on first
+   run the webui writes them to
+   `<config>/opencode/plugins/opencode-webui/` and
+   `…/plugins/opencode-webui-shelf/`, where the engine auto-discovers them —
+   the lifecycle plugin so the proxy starts when OpenCode activates its
+   plugins (lazily, on use), the shelf plugin so the `shelf_*` tools and
+   system hint exist with no extension involved. They install only
+   themselves (separate marker-gated dirs), are announced in the boot banner,
+   and are removed by `opencode-webui uninstall` (or skipped with
+   `WEBUI_NO_PLUGIN=1`). This exception exists because the webui's own
+   lifecycle and core tools are legitimately the webui's concern; it does not
+   generalize to extension payloads.
 3. **No webui loading, no webui hot reload.** The webui serves/carries the
    folder's other strata only. Editing `engine/` follows engine semantics:
    restart on edit, unless the plugin implements its own hot pattern (the
