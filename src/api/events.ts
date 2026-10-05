@@ -64,10 +64,13 @@ const STALL_TIMEOUT_MS = 20_000;
 export const SSE_STALE_MS = 30_000;
 
 // Health signal for the scheduler: wall-clock age of the last byte received
-// on the stream (heartbeats included — they are bytes). On a healthy
-// connection this never exceeds ~15s, so an age beyond SSE_STALE_MS means
-// the push channel is wedged even though the fetch hasn't errored, and REST
-// fallbacks should take over until the fuse reconnects.
+// on the stream (heartbeats included — they are bytes). The browser attaches
+// to the PROXY recorder, not the engine directly, so these bytes are the
+// proxy's own ~15s heartbeats plus whatever it forwards: a stale age means the
+// BROWSER↔PROXY push channel is wedged, not necessarily the engine (a silent
+// engine-side wedge is masked by the proxy's heartbeats). REST fallbacks take
+// over until the fuse reconnects; the 2s live-tier poll and the 15s
+// running-map watchdog remain the engine-side floor.
 let lastByteAt = 0;
 
 /** ms since the last byte on the event stream; Infinity before connecting. */

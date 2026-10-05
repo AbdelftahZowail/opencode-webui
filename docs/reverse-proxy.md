@@ -49,8 +49,9 @@ server {
 		proxy_set_header Upgrade    $http_upgrade;
 		proxy_set_header Connection $connection_upgrade;
 
-		# /api/event heartbeats every ~15s; session/wait long-polls sit
-		# silent for longer — keep timeouts well above 30s
+		# /api/event heartbeats every ~15s. The session/wait long-poll now only
+		# sits on the connection while the stream is stale, but keep timeouts
+		# well above 30s for the cases where it does.
 		proxy_read_timeout 3600s;
 		proxy_send_timeout 3600s;
 
