@@ -44,6 +44,7 @@ import {
   signalUI,
   stashPromptText,
   switchAgent,
+  switchModel,
   undoSession,
   useStore,
   getState,
@@ -51,6 +52,7 @@ import {
 } from "../store";
 import { registerPoller } from "../lib/scheduler";
 import { loadDraft, saveDraft } from "../lib/drafts";
+import { recordModelUsed, resolveNewSessionModel } from "../lib/modelMemory";
 import { notify } from "../lib/notify";
 import { hasCoarsePointer } from "../lib/platform";
 import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
@@ -928,6 +930,28 @@ export function Composer({
         const { commitPendingEdit } = await import("../store");
         await commitPendingEdit(sid);
       }
+      // Model memory: a session with no model of its own (a fresh draft, or a
+      // legacy unpinned session) gets the remembered cascade pinned through the
+      // normal per-session pending-pick path — `ensureSessionModel` commits it
+      // before the prompt goes out. An explicit pick (including one carried off
+      // a draft by `materializeDraft`) always wins, and shell sends never
+      // consume a model.
+      const isShellSend = shellMode || value.startsWith("!");
+      if (!isShellSend) {
+        const st = getState();
+        const sessionModel = st.sessionDetails[sid]?.model ?? st.sessions.find((s) => s.id === sid)?.model;
+        if (!st.pendingModels[sid] && !sessionModel) {
+          const remembered = await resolveNewSessionModel();
+          if (remembered) switchModel(sid, remembered);
+        }
+      }
+      // The model this send commits (for lastUsed/recents), captured before
+      // the send so it is not lost to the post-commit clear.
+      const stBefore = getState();
+      const intendedModel =
+        stBefore.pendingModels[sid] ??
+        stBefore.sessionDetails[sid]?.model ??
+        stBefore.sessions.find((s) => s.id === sid)?.model;
       if (shellMode) {
         await sendShell(value.startsWith("!") ? value.slice(1) : value);
       } else if (value.startsWith("!")) {
@@ -963,6 +987,10 @@ export function Composer({
       } else {
         await sendPromptTo(sid, value, opts);
       }
+      // lastUsed/recents: only a COMMITTED send counts (a dirty pick switched
+      // back never reaches here), and subagents are excluded — the engine owns
+      // their model.
+      if (!parentID && intendedModel) recordModelUsed(intendedModel);
       setText("");
       setPickedFiles([]);
       setAttachments([]);
@@ -1410,23 +1438,32 @@ export function Composer({
                   {busy ? (
                     <Spinner className="mb-1.5 mr-2" />
                   ) : !text.trim() && attachments.length === 0 ? (
-                    // Empty composer = the action is STOP, not a dead Send.
-                    // One press aborts the active run (no Esc-style arming).
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      data-oc-composer-send
-                      disabled={!running && !queued}
-                      onClick={() => void interrupt(sessionID)}
-                      title={
-                        running || queued
-                          ? "Stop the run"
-                          : "Type a message to send, or wait for a run to stop"
-                      }
-                    >
-                      <Square className="fill-current" />
-                      Stop
-                    </Button>
+                    // Empty composer: while a run is active (or queued) the
+                    // action is Stop; otherwise a disabled Send — never a dead
+                    // Stop button on an idle, empty composer.
+                    running || queued ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-oc-composer-send
+                        onClick={() => void interrupt(sessionID)}
+                        title="Stop the run"
+                      >
+                        <Square className="fill-current" />
+                        Stop
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="default"
+                        size="sm"
+                        data-oc-composer-send
+                        disabled
+                        title="Type a message to send"
+                      >
+                        <Send />
+                        Send
+                      </Button>
+                    )
                   ) : (
                     <Button
                       variant="default"

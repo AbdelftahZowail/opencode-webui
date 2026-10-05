@@ -7,6 +7,7 @@ import {
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api/client";
@@ -14,13 +15,29 @@ import type { AgentInfo, ModelInfo, ModelRef } from "../api/types";
 import {
   loadSessionDetail,
   refreshSessions,
-  resolveDefaultModel,
   switchAgent,
   switchModel,
   useStore,
 } from "../store";
-import { Search } from "lucide-react";
+import { AlertTriangle, RotateCcw, Search, Star, X } from "lucide-react";
 import { formatModelRef } from "../lib/modelLabel";
+import {
+  type CatalogStatus,
+  ensureModels,
+  getCatalogStatus,
+  getModels,
+  subscribeCatalog,
+} from "../lib/modelCatalog";
+import {
+  clearNotice,
+  getAvailableRecents,
+  getMemoryVersion,
+  getNotice,
+  getPinnedDefault,
+  resolveNewSessionModel,
+  setPinnedDefault,
+  subscribeModelMemory,
+} from "../lib/modelMemory";
 import { Button } from "./ui";
 
 /**
@@ -263,8 +280,36 @@ export function useSessionDetail(sessionID: string) {
   return { session, detail };
 }
 
+/** Re-render trigger for model memory changes (recents, pin, notice). */
+function useModelMemoryVersion(): number {
+  const [version, setVersion] = useState(getMemoryVersion);
+  useEffect(() => {
+    const unsub = subscribeModelMemory(() => setVersion(getMemoryVersion()));
+    setVersion(getMemoryVersion());
+    return unsub;
+  }, []);
+  return version;
+}
+
+/** Shared prefetched model catalog, kept in sync with the module cache. */
+function useModelCatalog(): { models: ModelInfo[]; status: CatalogStatus } {
+  const [snap, setSnap] = useState(() => ({ models: getModels(), status: getCatalogStatus() }));
+  useEffect(() => {
+    const sync = () => setSnap({ models: getModels(), status: getCatalogStatus() });
+    sync();
+    const unsub = subscribeCatalog(sync);
+    void ensureModels();
+    return unsub;
+  }, []);
+  return snap;
+}
+
 const ITEM_CLASSES =
   "flex w-full cursor-pointer items-center justify-between px-3 py-2 text-left transition-colors hover:bg-[color:var(--surface-base-hover)] data-[hl=true]:bg-[color:var(--surface-raised-base-active)]";
+
+/** Sticky section header for the model picker's recents / provider groups. */
+const SECTION_CLASSES =
+  "sticky top-0 z-10 bg-[color:var(--surface-float-base)] px-3 pt-2 pb-1 font-mono text-[10px] uppercase tracking-wide text-[color:var(--text-weaker)]";
 
 export function ModelPicker({
   sessionID,
@@ -276,9 +321,10 @@ export function ModelPicker({
   align?: "left" | "right";
 }) {
   const { session, detail } = useSessionDetail(sessionID);
-  const pendingModel = useStore((s) => s.pendingModel);
+  const pendingModel = useStore((s) => s.pendingModels[sessionID] ?? null);
+  const memVersion = useModelMemoryVersion();
+  const { models, status } = useModelCatalog();
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState<ModelInfo[]>([]);
   const [fallback, setFallback] = useState<ModelRef | null>(null);
   const { anchorRef, menuRef, style: menuStyle } = useAnchoredMenu({
     open,
@@ -333,7 +379,7 @@ export function ModelPicker({
   // Filter query lives only while the menu is open (reset on every open).
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-  const filteredModels = useMemo(() => {
+  const searched = useMemo(() => {
     if (!q) return enabledModels;
     const scored: { m: ModelInfo; s: number; i: number }[] = [];
     for (let i = 0; i < enabledModels.length; i++) {
@@ -345,6 +391,34 @@ export function ModelPicker({
     scored.sort((a, b) => b.s - a.s || a.i - b.i);
     return scored.map((x) => x.m);
   }, [enabledModels, q]);
+
+  // Recents (newest first) only when not filtering; the rest keep catalog
+  // order, or are provider-grouped when the enabled list is long enough.
+  const grouped = !q && enabledModels.length > 8;
+  const recentModels = useMemo(
+    () => (q ? [] : getAvailableRecents(enabledModels)),
+    [enabledModels, q, memVersion],
+  );
+  const ordered = useMemo(() => {
+    if (q) return searched;
+    const byKey = new Map(enabledModels.map((m) => [`${m.providerID}/${m.modelID}`, m]));
+    const recentInfos: ModelInfo[] = [];
+    const seen = new Set<string>();
+    for (const ref of recentModels) {
+      const m = byKey.get(`${ref.providerID}/${ref.id}`);
+      if (!m) continue;
+      recentInfos.push(m);
+      seen.add(`${m.providerID}/${m.modelID}`);
+    }
+    let rest = searched.filter((m) => !seen.has(`${m.providerID}/${m.modelID}`));
+    if (grouped) {
+      rest = [...rest].sort(
+        (a, b) => a.providerID.localeCompare(b.providerID) || a.name.localeCompare(b.name),
+      );
+    }
+    return [...recentInfos, ...rest];
+  }, [q, searched, recentModels, enabledModels, grouped]);
+  const recentCount = q ? 0 : recentModels.length;
 
   const inputRef = useRef<HTMLInputElement>(null);
   // Fresh open: unfiltered.
@@ -364,20 +438,23 @@ export function ModelPicker({
   const current: ModelRef | undefined =
     pendingModel ?? detail?.model ?? session?.model ?? fallback ?? undefined;
 
+  // A session with no model of its own (fresh draft, or legacy unpinned) shows
+  // what the memory cascade would resolve at draft-open time. An explicit
+  // pending/session model always wins; the effect only runs while `current` is
+  // undefined, so it never fights a real selection.
   useEffect(() => {
-    if (open && models.length === 0) void api.models().then(setModels);
-  }, [open, models.length]);
-
-  useEffect(() => {
-    if (!session?.model && fallback === null) {
-      void resolveDefaultModel().then((m) => {
-        if (m) setFallback(m);
-      });
-    }
-  }, [session?.model, fallback]);
+    if (current) return;
+    let live = true;
+    void resolveNewSessionModel(models.length ? models : undefined).then((m) => {
+      if (live && m) setFallback(m);
+    });
+    return () => {
+      live = false;
+    };
+  }, [current, models]);
 
   const pickModel = (index: number) => {
-    const m = filteredModels[index];
+    const m = ordered[index];
     if (!m) return;
     void switchModel(sessionID, { id: m.modelID, providerID: m.providerID }).then(refreshSessions);
     setOpen(false);
@@ -386,12 +463,93 @@ export function ModelPicker({
   const [highlight, , onListMouseMove] = useMenuKeys({
     open,
     onClose: () => setOpen(false),
-    count: filteredModels.length,
+    count: ordered.length,
     onSelect: pickModel,
     listId,
     query,
     onQueryChange: setQuery,
   });
+
+  const pinned = getPinnedDefault();
+  const notice = getNotice();
+  const noticeFallback = notice?.fallback ?? null;
+  const sameModel = (ref: ModelRef, m: ModelInfo) =>
+    ref.id === m.modelID && ref.providerID === m.providerID;
+
+  function renderRow(m: ModelInfo, index: number) {
+    const isCurrent = current ? sameModel(current, m) : false;
+    const isPinned = pinned ? sameModel(pinned, m) : false;
+    return (
+      <button
+        key={`${m.providerID}/${m.modelID}`}
+        id={`${listId}-item-${index}`}
+        type="button"
+        role="option"
+        aria-selected={isCurrent}
+        data-hl={index === highlight || undefined}
+        className={ITEM_CLASSES}
+        onClick={() => pickModel(index)}
+      >
+        <span className="min-w-0 truncate">
+          <span className="font-mono text-[color:var(--text-strong)]">{m.name}</span>
+          <span className="ml-2 font-mono text-[color:var(--text-weaker)]">{m.providerID}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {isPinned && (
+            <span title="Default for new sessions" className="text-[color:var(--surface-brand-base)]">
+              ★
+            </span>
+          )}
+          {isCurrent && <span className="text-emerald-500">✓</span>}
+        </span>
+      </button>
+    );
+  }
+
+  // Rows are emitted as DIRECT children of the listbox so the keyboard owner's
+  // typeahead (`#${listId} > button`) and mouse→index mapping stay valid;
+  // section headers are plain divs (never `role="option"`).
+  function renderRows() {
+    if (q) return ordered.map((m, i) => renderRow(m, i));
+    const out: ReactNode[] = [];
+    let index = 0;
+    if (recentCount > 0) {
+      out.push(
+        <div key="hdr-recent" className={SECTION_CLASSES}>
+          Recent
+        </div>,
+      );
+      for (let i = 0; i < recentCount && index < ordered.length; i++, index++) {
+        const m = ordered[index];
+        if (m) out.push(renderRow(m, index));
+      }
+      if (index < ordered.length) {
+        out.push(
+          <div key="hdr-more" className={SECTION_CLASSES}>
+            More models
+          </div>,
+        );
+      }
+    }
+    let lastProvider: string | null = null;
+    for (; index < ordered.length; index++) {
+      const m = ordered[index];
+      if (!m) continue;
+      if (grouped && m.providerID !== lastProvider) {
+        lastProvider = m.providerID;
+        out.push(
+          <div key={`hdr-${m.providerID}`} className={SECTION_CLASSES}>
+            {m.providerID}
+          </div>,
+        );
+      }
+      out.push(renderRow(m, index));
+    }
+    return out;
+  }
+
+  const loading = models.length === 0 && (status === "idle" || status === "loading");
+  const errored = models.length === 0 && status === "error";
 
   return (
     <div ref={anchorRef} className="relative">
@@ -431,40 +589,107 @@ export function ModelPicker({
                 className="h-full w-full bg-transparent font-mono text-[11px] text-[color:var(--text-strong)] outline-none placeholder:text-[color:var(--text-weaker)]"
               />
             </div>
+            {notice && (
+              <div
+                data-oc-model-notice
+                className="flex items-start gap-2 border-b border-[color:var(--border-weak-base)] bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300"
+              >
+                <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {notice.role === "pinned" ? "Pinned" : "Last used"} model{" "}
+                  <span className="font-mono">{formatModelRef(notice.ref)}</span> is unavailable
+                  {noticeFallback ? (
+                    <>
+                      {" "}
+                      — using <span className="font-mono">{formatModelRef(noticeFallback)}</span>.
+                    </>
+                  ) : (
+                    "."
+                  )}
+                </span>
+                {noticeFallback && (
+                  <button
+                    type="button"
+                    className="shrink-0 font-medium underline underline-offset-2 hover:no-underline"
+                    onClick={() => setPinnedDefault(noticeFallback)}
+                  >
+                    Pin it
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => clearNotice()}
+                  className="shrink-0 opacity-70 hover:opacity-100"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            )}
             <div
               id={listId}
               role="listbox"
               aria-label="Switch model"
-              aria-activedescendant={filteredModels.length > 0 ? `${listId}-item-${highlight}` : undefined}
+              aria-activedescendant={ordered.length > 0 ? `${listId}-item-${highlight}` : undefined}
               className="max-h-72 overflow-y-auto"
               onMouseMove={onListMouseMove}
             >
-              {filteredModels.length === 0 ? (
+              {loading ? (
+                <div className="px-3 py-4 text-center text-xs text-[color:var(--text-weaker)]">
+                  Loading models…
+                </div>
+              ) : errored ? (
+                <div className="flex flex-col items-center gap-1 px-3 py-4 text-center text-xs text-[color:var(--text-weaker)]">
+                  <span>Couldn't load models.</span>
+                  <button
+                    type="button"
+                    className="font-medium text-[color:var(--surface-brand-base)] underline underline-offset-2"
+                    onClick={() => void ensureModels()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : ordered.length === 0 ? (
                 <div className="px-3 py-4 text-center text-xs text-[color:var(--text-weaker)]">
                   No matching models
                 </div>
               ) : (
-                filteredModels.map((m, i) => (
-                  <button
-                    key={`${m.providerID}/${m.modelID}`}
-                    id={`${listId}-item-${i}`}
-                    type="button"
-                    role="option"
-                    aria-selected={current?.id === m.modelID && current?.providerID === m.providerID}
-                    data-hl={i === highlight || undefined}
-                    className={ITEM_CLASSES}
-                    onClick={() => pickModel(i)}
-                  >
-                    <span>
-                      <span className="font-mono text-[color:var(--text-strong)]">{m.name}</span>
-                      <span className="ml-2 font-mono text-[color:var(--text-weaker)]">{m.providerID}</span>
-                    </span>
-                    {current?.id === m.modelID && current?.providerID === m.providerID && (
-                      <span className="text-emerald-500">✓</span>
-                    )}
-                  </button>
-                ))
+                renderRows()
               )}
+            </div>
+            <div data-oc-model-footer className="border-t border-[color:var(--border-weak-base)]">
+              <button
+                type="button"
+                data-oc-model-default
+                disabled={!current}
+                onClick={() => current && setPinnedDefault(current)}
+                title={current ? `Use ${formatModelRef(current)} for new sessions` : undefined}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-[color:var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Star className="size-3 shrink-0" />
+                <span className="shrink-0">Set as default</span>
+                {current && (
+                  <span className="min-w-0 truncate font-mono text-[color:var(--text-weaker)]">
+                    {formatModelRef(current)}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                data-oc-model-reset
+                disabled={!pinned}
+                onClick={() => setPinnedDefault(null)}
+                title={
+                  pinned
+                    ? `Currently pinned to ${formatModelRef(pinned)}`
+                    : "Already using the engine default"
+                }
+                className="flex w-full items-center gap-2 border-t border-[color:var(--border-weak-base)] px-3 py-2 text-left text-[11px] text-[color:var(--text-weak)] transition-colors hover:bg-[color:var(--surface-base-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RotateCcw className="size-3 shrink-0" />
+                <span className="shrink-0">Reset to engine default</span>
+              </button>
             </div>
           </div>,
           document.body,
@@ -483,9 +708,9 @@ export function VariantPicker({
   align?: "left" | "right";
 }) {
   const { session, detail } = useSessionDetail(sessionID);
-  const pendingModel = useStore((s) => s.pendingModel);
+  const pendingModel = useStore((s) => s.pendingModels[sessionID] ?? null);
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const { models } = useModelCatalog();
   const { anchorRef, menuRef, style: menuStyle } = useAnchoredMenu({
     open,
     onClose: () => setOpen(false),
@@ -503,13 +728,8 @@ export function VariantPicker({
   const current: ModelRef | undefined = pendingModel ?? detail?.model ?? session?.model;
 
   // This picker decides whether to render at all from the model catalog, so the
-  // catalog must load even while the menu is closed — otherwise the trigger
-  // button can never exist to open it (deadlock). ModelPicker/AgentPicker
-  // always render their trigger, so they can load lazily on open.
-  useEffect(() => {
-    if (current && models.length === 0) void api.models().then(setModels);
-  }, [current, models.length]);
-
+  // catalog must be loaded before the trigger can exist (deadlock otherwise).
+  // The shared catalog is prefetched at boot and kept in sync here.
   const model = models.find(
     (m) => m.enabled && m.modelID === current?.id && m.providerID === current?.providerID,
   );
