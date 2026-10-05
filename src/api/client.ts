@@ -782,18 +782,25 @@ const apiRaw = {
       body: JSON.stringify(delivery ? { text, files, delivery } : { text, files }),
     }).then((res) => res.data),
   /**
-   * Run a slash command. The engine's `session.command` body is the same
-   * prompt-input shape as `/prompt` plus a required `command`; the command's
-   * argument text rides `text` (NOT the old `arguments` key — sending that
-   * made every leading-slash message fail validation with `Missing key
-   * at ["text"]`). `text` is required even with no arguments, so it is
-   * always sent as a string.
+   * Run a slash command (the engine expands the command's template itself —
+   * exactly what the TUI does). The command's argument text rides `text` (NOT
+   * the old `arguments` key — sending that made every leading-slash message
+   * fail validation with `Missing key at ["text"]`); `text` is required even
+   * with no arguments, so it is always sent as a string.
+   *
+   * The command's identifier field was RENAMED upstream: the 2.0.3 engine
+   * (our committed snapshot target) requires `command`, while newer engines
+   * (observed 2.0.22) require `name` and reject `{command}` with
+   * `Missing key at ["name"]`. The engine ignores unknown body keys, so we
+   * send BOTH — `name` satisfies new engines, `command` satisfies old ones,
+   * and one request works against either. (Verified live: `{name, command,
+   * text}` → 204 + expanded template on 2.0.22.)
    */
   runCommand: (sessionID: string, command: string, args?: string) =>
     request<unknown>(`/api/session/${sessionID}/command`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command, text: args ?? "" }),
+      body: JSON.stringify({ name: command, command, text: args ?? "" }),
     }),
   activateSkill: (sessionID: string, skill: string) =>
     request<unknown>(`/api/session/${sessionID}/skill`, {

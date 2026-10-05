@@ -188,11 +188,21 @@ Refreshed to 116 (live as of 2026-09-01):
 ### Client correctness fixes (no snapshot change)
 
 - `POST /api/session/{id}/command` takes `{command, text, files?, agents?,
-  skills?, delivery?}` with **`text` required** — not the `arguments` key the
+  skills?, delivery?}` on the documented 2.0.3 engine (**`name`** replaces
+  `command` on newer engines — see the next bullet) with **`text` required** — not the `arguments` key the
   pinned `@opencode/client` protocol types still declare. Sending
   `arguments` fails validation with `Missing key at ["text"]`, which is what
   made every leading-slash message error. `api.runCommand` now sends `text`
   (the command's argument string; `""` when there are none).
+- **Command identifier renamed upstream** (`command` → `name`): the 2.0.3
+  engine the snapshot documents requires `command`, but newer engines (observed
+  `2.0.22`) require `name` and reject `{command}` with `Missing key at
+  ["name"]` — which is what broke `/super-vibe-coder …` (and every slash
+  command) in the webui while the in-process TUI kept working. The engine
+  ignores unknown body keys, so `api.runCommand` now sends **both** `name` and
+  `command` (plus `text`); one request succeeds against either engine version.
+  Verified live on `2.0.22`: `{name, command, text}` → `204` with the
+  command's template expanded into the session (TUI-identical).
 - Attachment `files` only become prompt content for `image/png|jpeg|gif|webp`,
   `application/pdf`, `text/plain` and `application/x-directory` — every other
   mime is **silently dropped** by the engine. The composer therefore stages
