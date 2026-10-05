@@ -10,11 +10,13 @@ the `opencode` TUI, with a Bun proxy in front so the browser never holds
 service credentials. One port for UI + `/api/*`: http://localhost:4097
 (`WEBUI_PROXY_PORT`).
 
-On first boot the webui self-installs a global `opencode-webui` command and an
-OpenCode lifecycle plugin (in `~/.config/opencode/plugins/opencode-webui/`) that
-starts it as soon as you use OpenCode — so an instance is usually already
-running at that port. Check before starting another (a second run reports "already
-running" and exits 0). Manage it with `opencode-webui update|status|stop|restart|uninstall`;
+On first boot the webui self-installs a global `opencode-webui` command and two
+OpenCode plugins under `~/.config/opencode/plugins/`: a lifecycle plugin
+(`opencode-webui/`) that starts it as soon as you use OpenCode — so an instance
+is usually already running at that port — and a shelf tools plugin
+(`opencode-webui-shelf/`) exposing the `shelf_share`/`shelf_list`/`shelf_remove`
+tools. Check before starting another (a second run reports "already running" and
+exits 0). Manage it with `opencode-webui update|status|stop|restart|uninstall`;
 `WEBUI_NO_SETUP=1` skips setup for a one-off run.
 
 Serve/security settings (host, port, auth, allowed hosts, trust proxy, autostart)
@@ -25,7 +27,7 @@ optional (`auth: none`) for private networks/proxies, but reachable-without-a-
 password changes need explicit confirmation.
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 3.1.2 (matches the `v3.1.2` git tag —
+- **This skill's version**: 3.2.0 (matches the `v3.2.0` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -38,20 +40,20 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.1.2/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/docs/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.2.0/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
 
 ## Environment
 
@@ -60,8 +62,8 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | `WEBUI_PASSWORD` | generated on first boot, printed once | Shared login passphrase. |
 | `WEBUI_HOST` | `127.0.0.1` | Bind address — a wildcard is refused without a password. |
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
-| `WEBUI_NO_SETUP` | unset | `1` — skip first-run setup (global command + lifecycle plugin) for this run. |
-| `WEBUI_NO_PLUGIN` | unset | `1` — install the global command but not the OpenCode lifecycle plugin. |
+| `WEBUI_NO_SETUP` | unset | `1` — skip first-run setup (global command + engine plugins) for this run. |
+| `WEBUI_NO_PLUGIN` | unset | `1` — install the global command but not the OpenCode engine plugins (lifecycle + shelf tools). |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Replace both with ONE directory (the sandbox does this to keep WIP isolated). |
 | `WEBUI_ENGINE_URL` | `service.json` discovery | Aim the proxy at a chosen engine — skips `Service.ensure()`, so a stale pid can never spawn a rogue serve. Explicit env wins. |
 | `WEBUI_ENGINE_PASSWORD` | `service.json` password | Engine password for the override above (no file fallback when the URL is overridden — a chosen engine has its own credential). |
