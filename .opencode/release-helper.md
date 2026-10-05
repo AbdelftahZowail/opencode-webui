@@ -5,7 +5,7 @@ cross-check against the actual repo state (`git log`, `package.json`, the
 `AGENTS.md` "Release checklist") before executing anything here — evidence from
 the repo beats this file.
 
-- **Last released version:** `3.2.0` (tag `v3.2.0`)
+- **Last released version:** `3.2.1` (tag `v3.2.1`)
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -100,6 +100,33 @@ From the repo root, on `master`, with a clean release scope:
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
 
 ## Entries
+
+### 3.2.1 — 2026-10-05
+- **Type:** patch (fixes; no extension-contract break).
+- **Shipped:** slash-command engine compat — `api.runCommand` sends **both**
+  `name` and `command` (+ the required `text`); the 2.0.22 engine requires
+  `name` and rejects `{command}` with `Missing key at ["name"]`, the documented
+  2.0.3 snapshot requires `command`, and the engine ignores the extra key.
+  Sidebar sticky-rows fix — live/open/finished-but-unopened sessions render at
+  their own sorted spot instead of widening the newest-N prefix, plus an
+  `unseen` "new" badge on finished-while-unopened sticky rows. Matching docs.
+- **Adversarial verification (3 fresh-context verifiers):** client.ts vs both
+  engine shapes — live runtime proof on 2.0.22 that `{command}` alone → 400
+  `Missing key ["name"]`, while `{name,command,text}` and a deliberately
+  unknown extra key → 404 CommandNotFound (body accepted; excess keys ignored
+  at runtime despite OpenAPI `additionalProperties:false`, Effect-Schema
+  default). Sidebar index math — 300k-case brute force: no negative
+  `moreCount`, no duplicate/dropped rows, collapsed/Show-more/selected
+  preserved. Secrets/quality/docs sweep — clean; one stale coverage bullet
+  fixed. Residual (non-blocking, shipped as-is): 2.0.3 could not be executed
+  here, so "old engine ignores excess keys" is inferred (same Effect-Schema
+  stack), not directly proven; and a "Show more" press can reveal 0 rows when
+  a sticky cluster starts exactly at the prefix boundary (UX-only; every row
+  stays reachable).
+- **Gate evidence:** typecheck ✅, build ✅, batteries 34/10/17/15 = 76/0,
+  `check:setup` 51/0, `npm pack --dry-run` 36 files (dist, server incl.
+  shelf*.ts, skills, webui-extensions/README.md; no src/).
+- **Publish:** _pending — filled in by the follow-up docs commit._
 
 ### 3.2.0 — 2026-10-05
 - **Type:** minor (features; no extension-contract break).
