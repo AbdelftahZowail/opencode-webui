@@ -24,6 +24,7 @@ import { promptFilesToHistory } from "./lib/attachments";
 import { log } from "./lib/log";
 import { VCS_DIFF_CONTEXT_LINES, type DiffSource } from "./lib/sessionDiff";
 import { listStash, pushStash, removeStash, type StashEntry } from "./lib/stash";
+import { recordModelUsed, resolveNewSessionModel } from "./lib/modelMemory";
 import { publishEvent } from "./lib/eventBus";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import { getPrefs } from "./prefs";
@@ -386,13 +387,18 @@ export interface State {
    */
   draftWorkspace: string | null;
   /**
-   * Dirty agent/model selections for the CURRENT session: applied locally
+   * Dirty agent selection for the CURRENT session: applied locally
    * immediately, committed to the engine only when the next message is sent
    * (and silently dropped if switched back first). Never persists an
-   * "Agent/Model switched …" note for a change that never ran.
+   * "Agent switched …" note for a change that never ran.
    */
   pendingAgent: string | null;
-  pendingModel: ModelRef | null;
+  /**
+   * Dirty model picks keyed by session id — one slot per session, so a pick in
+   * split pane A never shows up in (or commits to) pane B. Committed on that
+   * session's next send and dropped if switched back first.
+   */
+  pendingModels: Record<string, ModelRef>;
   /** Last send failure per session — rendered above the composer. */
   sendErrors: Record<string, StructuredError>;
   /**
@@ -504,7 +510,7 @@ const initialState: State = {
   subagentComposerOpen: false,
   draftWorkspace: null,
   pendingAgent: null,
-  pendingModel: null,
+  pendingModels: {},
   sendErrors: {},
   pending: {},
   runNotices: {},
@@ -703,6 +709,11 @@ function updateSessionHistory(sessionID: string | null, mode: "push" | "replace"
         : "/";
   if (window.location.pathname + window.location.search === next && !window.location.hash) return;
   window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", next);
+  // history.pushState/replaceState fire no event, so a route change OUT of a
+  // non-session surface (/shelf, /ext/{id}) would leave App's pathname listener
+  // stale and the old page rendered. Ping it here (mirrors EXT_NAVIGATE_EVENT in
+  // App.tsx / Sidebar.tsx); session routes re-render from store state anyway.
+  window.dispatchEvent(new Event("webui:navigate"));
 }
 
 // ---- refresh helpers ----------------------------------------------------
@@ -762,7 +773,12 @@ export async function refreshSessions() {
       running[id] = true;
       newlyActive.push(id);
     }
-    for (const id of newlyActive) ensureSessionWait(id);
+    // Only arm the per-session idle long-poll for sessions this tab SHOWS.
+    // Background sessions clear their flags via the active map + watchdog;
+    // arming one loop per globally-running session (engine-wide) put a
+    // long-lived socket per running session into every tab for work no tab
+    // displays — the HTTP/1.1 pool pressure behind "a new tab / send hangs".
+    for (const id of newlyActive) if (isWatched(id)) ensureSessionWait(id);
     // Watchdog: the engine says idle AND no live event for a fair window →
     // the flag is stale (its clearing event was missed). Clear it.
     for (const [sid, on] of Object.entries(running)) {
@@ -997,20 +1013,47 @@ function liveForSession(sessionID: string): LiveAssistant[] {
 }
 
 /**
- * Whether to track live-stream events for this session. Pane membership is
- * not sufficient on initial load: state.panes[0] is {id:"main",sessionID:null}
- * until selectSession's sync setState runs, and SSE may connect in the same
- * microtask window. Treating currentSessionID (and any already-tracked live)
- * as live ensures the first text deltas are not dropped (streaming ASAP fix).
+ * A session this tab actually DISPLAYS (mounted in a pane, or the globally
+ * focused one). Everything expensive — localStorage persistence, transcript
+ * polling, the `session.wait` long-poll — is scoped to watched sessions so a
+ * tab only pays for what it shows.
+ */
+function isWatched(sid: string): boolean {
+  if (!sid) return false;
+  return isPaneSession(sid) || sid === state.currentSessionID;
+}
+
+/** Unique session ids this tab currently shows (panes + focused session). */
+function watchedSessionIDs(): string[] {
+  const ids = new Set<string>();
+  for (const p of state.panes) if (p.sessionID) ids.add(p.sessionID);
+  if (state.currentSessionID) ids.add(state.currentSessionID);
+  return [...ids];
+}
+
+/**
+ * Whether to track live-stream events for this session.
+ *
+ * Scoped to what this tab shows (pane membership / current session) plus
+ * sessions this tab has ALREADY projected and that are still in flight — those
+ * keep their in-memory projection so navigating back renders exactly what was
+ * streamed, with no replay gap. Sessions RUNNING ELSEWHERE (another tab,
+ * engine-side) are deliberately NOT tracked: the engine's global active map
+ * puts every running session into `state.running`, and keying live tracking off
+ * it made every tab reduce, persist and reconcile every other session's token
+ * stream. For a session this tab never mounted, the proxy recorder + `fetchReplay`
+ * on adopt rebuild the in-flight projection (the same path a mid-run page load
+ * already uses).
+ *
+ * Pane membership alone is not enough on initial load: state.panes[0] is
+ * {id:"main",sessionID:null} until selectSession's sync setState runs, and SSE
+ * may connect in the same microtask window — so currentSessionID counts too.
  */
 function shouldTrackLive(sid: string): boolean {
   if (!sid) return false;
   if (isPaneSession(sid)) return true;
   if (sid === state.currentSessionID) return true;
   if (liveForSession(sid).length > 0) return true;
-  if (!!state.running[sid]) return true;
-  if (!!state.queued[sid]) return true;
-  if (state.activeIDs.includes(sid)) return true;
   return false;
 }
 
@@ -1044,6 +1087,11 @@ function liveStorageKey(sessionID: string): string {
 
 function persistLiveForSession(sessionID: string) {
   if (!sessionID || isDraftSession(sessionID)) return;
+  // Reload snapshots exist only for sessions this tab is showing. Persisting a
+  // background projection serialized the whole in-flight message to
+  // localStorage (synchronous, every 500ms) for every session streaming
+  // anywhere — the cross-session write storm this scoping removes.
+  if (!isWatched(sessionID)) return;
   try {
     if (typeof localStorage === "undefined") return;
     const entries = liveForSession(sessionID);
@@ -1120,6 +1168,9 @@ function cancelScheduledPersist(sessionID: string) {
 
 function schedulePersistLive(sessionID: string) {
   if (!sessionID || isDraftSession(sessionID)) return;
+  // Only shown sessions need a reload snapshot (re-checked at fire time, so a
+  // session unmounted inside the throttle window still skips the write).
+  if (!isWatched(sessionID)) return;
   if (persistTimers.has(sessionID)) return;
   persistTimers.set(
     sessionID,
@@ -1824,49 +1875,25 @@ export async function loadSessionDetail(sessionID: string) {
   }
 }
 
-let defaultModelPromise: Promise<ModelRef | undefined> | null = null;
-
 /**
- * The model the UI considers the default: the engine's own resolution for a
- * session with no explicit selection (`GET /api/model/default` — the
- * configured `model` when it is enabled and its provider is available, else
- * the newest available supported model). This is the SAME answer the TUI and
- * every model-less session get at run time, so the picker and the engine
- * agree. New sessions are created WITH this model (the service otherwise
- * resolves its own default at run time, which can drift — e.g. a rate-limited
- * provider), and legacy unpinned sessions get pinned on first send
- * (`ensureSessionModel`).
- *
- * Only if that endpoint is unavailable or returns null do we fall back to the
- * primary agent's pinned model, then the first enabled catalog model.
+ * The model a NEW session should open on. Delegates to the model-memory
+ * cascade (`lib/modelMemory`): explicit pin → last used → engine default →
+ * first enabled catalog model, validating remembered refs against the live
+ * enabled catalog (and publishing a one-time notice when a remembered ref is
+ * gone). Deliberately NOT memoized — a pin/last-used change must be visible on
+ * the very next resolution; the old page-lifetime `defaultModelPromise` is the
+ * exact staleness this replaces.
  */
 export function resolveDefaultModel(): Promise<ModelRef | undefined> {
-  defaultModelPromise ??= (async () => {
-    try {
-      const def = await api.modelDefault();
-      if (def) return { id: def.modelID, providerID: def.providerID };
-    } catch {
-      /* fall through */
-    }
-    try {
-      const agents = await api.agents();
-      const primary = agents.find((a) => a.mode === "primary" && !a.hidden);
-      if (primary?.model) return primary.model;
-    } catch {
-      /* fall through */
-    }
-    try {
-      const models = await api.models();
-      const enabled = models.filter((m) => m.enabled);
-      if (enabled.length > 0) {
-        return { id: enabled[0]!.modelID, providerID: enabled[0]!.providerID };
-      }
-    } catch {
-      /* no models */
-    }
-    return undefined;
-  })();
-  return defaultModelPromise;
+  return resolveNewSessionModel();
+}
+
+/** Copy a per-session map without one key (never mutates the shared state). */
+function withoutSession<T>(map: Record<string, T>, sessionID: string | null): Record<string, T> {
+  if (!sessionID || !(sessionID in map)) return map;
+  const next = { ...map };
+  delete next[sessionID];
+  return next;
 }
 
 /**
@@ -1885,15 +1912,22 @@ async function commitPendingSelections(sessionID: string) {
     }
     setState({ pendingAgent: null });
   }
-  if (state.pendingModel && !isDraftSession(sessionID)) {
-    const model = state.pendingModel;
+  const pendingModel = state.pendingModels[sessionID];
+  if (pendingModel && !isDraftSession(sessionID)) {
+    const model = pendingModel;
     try {
       await api.switchModel(sessionID, model);
       log("model", `committed model ${model.providerID}/${model.id} on send`);
+      // lastUsed/recents: only a COMMITTED send counts; subagents are excluded
+      // (the engine owns their model).
+      if (!state.sessions.find((s) => s.id === sessionID)?.parentID) recordModelUsed(model);
     } catch (err) {
       console.warn("switchModel on send failed:", err);
     }
-    setState({ pendingModel: null });
+    // Clear only if no newer pick replaced this one during the await.
+    if (state.pendingModels[sessionID] === model) {
+      setState({ pendingModels: withoutSession(state.pendingModels, sessionID) });
+    }
   }
 }
 
@@ -1901,7 +1935,7 @@ async function ensureSessionModel(sessionID: string) {
   if (isDraftSession(sessionID)) return; // draft pins its model at creation
   // A pending (uncommitted) pick satisfies the "session must have a model"
   // invariant — it will be committed right below before the prompt goes out.
-  if (state.sessions.find((s) => s.id === sessionID)?.model || state.pendingModel) {
+  if (state.sessions.find((s) => s.id === sessionID)?.model || state.pendingModels[sessionID]) {
     await commitPendingSelections(sessionID);
     return;
   }
@@ -2277,7 +2311,9 @@ export function handleEvent(event: V2Event) {
         running: { ...state.running, [data.sessionID]: true },
         queued: { ...state.queued, [data.sessionID]: false },
       });
-      ensureSessionWait(data.sessionID);
+      // Same scoping as refreshSessions: the idle long-poll is display work,
+      // armed only for a session this tab shows.
+      if (isWatched(data.sessionID)) ensureSessionWait(data.sessionID);
       if (forLive(data.sessionID)) ensureLiveAssistant(data.sessionID, data.assistantMessageID ?? "pending", event.created);
       break;
 
@@ -2352,7 +2388,10 @@ export function handleEvent(event: V2Event) {
             running: { ...state.running, [data.sessionID]: true },
             queued: { ...state.queued, [data.sessionID]: false },
           });
-          ensureSessionWait(data.sessionID);
+          // Same watch scoping as every other wait arm: the long-poll is
+          // display work. A tracked-but-unmounted stream settles via its end
+          // event (or the poll/watchdog), not a socket.
+          if (isWatched(data.sessionID)) ensureSessionWait(data.sessionID);
         }
       }
       break;
@@ -2676,11 +2715,11 @@ export async function fetchReplay(sessionID: string) {
 
 /** Which sessions need a catch-up pull right now. */
 function replayTargets(): string[] {
-  const ids = new Set<string>();
-  for (const p of state.panes) if (p.sessionID) ids.add(p.sessionID);
-  if (state.currentSessionID) ids.add(state.currentSessionID);
-  for (const [sid, on] of Object.entries(state.running)) if (on) ids.add(sid);
-  return [...ids].filter((sid) => !!sid && !isDraftSession(sid));
+  // Shown sessions only — replay rebuilds the in-flight projection for what
+  // this tab displays. A session running elsewhere is pulled by
+  // selectSession/adoptFocusedSession (which call fetchReplay) when opened,
+  // so replaying it now would only inflate this tab's reducer work.
+  return watchedSessionIDs().filter((sid) => !isDraftSession(sid));
 }
 
 // ---- session.wait long-poll (engine-native idle signal) -------------------
@@ -2700,6 +2739,7 @@ function replayTargets(): string[] {
 //     with a small backoff while the store still considers it live.
 const waitLoops = new Set<string>();
 const WAIT_REARM_MS = 1_000;
+const WAIT_SSE_GATE_MS = 2_000; // re-check cadence while the SSE stream is healthy
 const WAIT_ABORT_MS = 5 * 60_000; // client cap; a dropped wait is re-armed, never trusted as idle
 
 /** Arms (or no-ops) the per-session wait loop. Idempotent. */
@@ -2713,6 +2753,16 @@ export function ensureSessionWait(sessionID: string) {
 async function sessionWaitLoop(sessionID: string) {
   for (;;) {
     if (!state.running[sessionID] && !state.queued[sessionID]) return;
+    // Connection budget: a `sessionWait` long-poll is a second live socket
+    // per running watched session per tab. The browser's per-origin HTTP/1.1
+    // pool is small (6); with the event stream held too, two or three tabs
+    // saturate it and sends / new tabs can never get a socket. While the SSE
+    // stream is healthy it is the authoritative run-end signal — hold the
+    // long-poll only when the stream is actually stale (its fallback role).
+    if (!sseStale()) {
+      await new Promise((r) => setTimeout(r, WAIT_SSE_GATE_MS));
+      continue;
+    }
     const status = await api
       .sessionWait(sessionID, AbortSignal.timeout(WAIT_ABORT_MS))
       .catch(() => -1);
@@ -2735,7 +2785,31 @@ async function sessionWaitLoop(sessionID: string) {
       continue;
     }
     if (status === 404) {
-      retireVanishedSession(sessionID, "wait 404");
+      // A 404 is ambiguous: "session deleted" OR "this engine build does not
+      // expose the wait endpoint" (its route moved — e.g. a dev server pointed
+      // at a newer engine). Retiring on the second case dropped a LIVE
+      // session's running flag, live projection and pending rows on every
+      // re-arm — the churn behind flaky prompts/queues on a drifted engine.
+      // Only retire when the session is genuinely absent; otherwise stop the
+      // loop and let the transcript poll + active-map watchdog own run-end.
+      // A transient failure fetching the session (or a third endpoint that
+      // drifted) is UNCONFIRMED, never "vanished" — retiring on it would drop
+      // a live session's running flag/projection on a blip.
+      const verdict = await api
+        .getSession(sessionID)
+        .then(() => "exists" as const)
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          return /\b404\b|not found/i.test(msg) ? ("missing" as const) : ("unknown" as const);
+        });
+      if (verdict === "missing") {
+        retireVanishedSession(sessionID, "wait 404");
+      } else {
+        log(
+          "run",
+          `wait unavailable for ${sessionID} (${verdict === "exists" ? "engine drift" : "unconfirmed"}) — poll/watchdog take over`,
+        );
+      }
       return;
     }
     if (!state.running[sessionID] && !state.queued[sessionID]) return;
@@ -2957,23 +3031,21 @@ let pollInFlight = false;
 async function pollOnce() {
   if (pollInFlight) return;
   const sids = new Set<string>();
-  for (const [sid, on] of Object.entries(state.running)) if (on) sids.add(sid);
   // Sessions with undelivered busy-sends reconcile too — attach/drop/hydrate
-  // their QueueStrip rows even when nothing else marks them live.
+  // their QueueStrip rows even when nothing else marks them live. These are
+  // shown by QueueStrip / the ambient chip, so they stay in scope.
   for (const sid of Object.keys(state.pending)) {
     if ((state.pending[sid]?.length ?? 0) > 0 && !isDraftSession(sid)) sids.add(sid);
   }
-  // ANY mounted pane with live content or a queued flag reconciles: streams
-  // run in parallel across panes, so the poll safety net must cover them all.
-  for (const pane of state.panes) {
-    const sid = pane.sessionID;
-    if (sid && !isDraftSession(sid) && (liveForSession(sid).length > 0 || state.queued[sid])) sids.add(sid);
-  }
-  // Sessions holding ANY live projection (background/unmounted included):
-  // their transcripts must keep reconciling so finished entries can retire
-  // instead of haunting the ActivityStrip forever.
-  for (const a of state.live) {
-    if (!isDraftSession(a.sessionID)) sids.add(a.sessionID);
+  // Sessions this tab SHOWS: mounted panes + the focused session, when they
+  // are running (cold-start gap), have live content, or hold a queued flag.
+  // Deliberately NOT the engine's whole running set: a session running in
+  // another tab used to pull 50 messages into every tab every ~2s — against a
+  // busy engine, from every client. Its transcript is reconciled on adopt
+  // (loadMessages + fetchReplay), which is exactly when this tab needs it.
+  for (const sid of watchedSessionIDs()) {
+    if (isDraftSession(sid)) continue;
+    if (state.running[sid] || state.queued[sid] || liveForSession(sid).length > 0) sids.add(sid);
   }
   if (sids.size === 0) return;
 
@@ -3663,16 +3735,18 @@ function pruneSplits() {
  */
 async function adoptFocusedSession(sessionID: string | null) {
   if (state.currentSessionID === sessionID) return;
+  const leaving = state.currentSessionID;
   setState({
     currentSessionID: sessionID,
     // Focus switches must NOT drop other panes' streams — prune only entries
     // whose session is no longer mounted anywhere.
     live: pruneLiveForPanes(state.panes),
     subagentComposerOpen: false,
-    // Uncommitted agent/model picks belong to the pane being left — they
-    // were never sent anywhere, so drop them instead of leaking over.
+    // Uncommitted agent/model picks belong to the pane being left — they were
+    // never sent anywhere, so drop them. Model picks are keyed per session, so
+    // only the LEFT session's slot is cleared (a pick in another pane stays).
     pendingAgent: null,
-    pendingModel: null,
+    pendingModels: withoutSession(state.pendingModels, leaving),
     // Same stale-hygiene as selectSession, same isolation argument: the
     // flag belongs to the newly focused session's single pane only. Live
     // projections and other panes' run state are untouched.
@@ -3794,9 +3868,9 @@ function rememberLastSession(sessionID: string) {
 
 /** Reopen the last active session on startup (TUI resume feel). */
 async function reopenLastSession() {
-  // Deep links into extension pages (/ext/…) are deliberate destinations —
-  // never hijack them back into the last-open session.
-  if (/^\/ext\//.test(window.location.pathname)) return;
+  // Deep links into non-session surfaces (/ext/…, /shelf) are deliberate
+  // destinations — never hijack them back into the last-open session.
+  if (window.location.pathname === "/shelf" || /^\/ext\//.test(window.location.pathname)) return;
   let last: string | null = null;
   try {
     last = localStorage.getItem(LAST_SESSION_KEY);
@@ -3883,7 +3957,9 @@ export async function sendPromptTo(
     // Arm the engine-native idle wait even though events normally drive the
     // run lifecycle: if the SSE channel is dead at send time, wait-204 is
     // the signal that settles the transcript (the §7 staircase's floor).
-    ensureSessionWait(sessionID);
+    // Scoped to shown sessions like every other wait arm — an unshown target
+    // relies on the active-map watchdog instead of pinning a socket.
+    if (isWatched(sessionID)) ensureSessionWait(sessionID);
     if (sessionID === DRAFT_SESSION_ID || (state.messages[DRAFT_SESSION_ID]?.length ?? 0) === 0) {
       try {
         const { clearDraft } = await import("./lib/drafts");
@@ -3978,7 +4054,9 @@ async function admitWhileBusy(
         : await api.prompt(sessionID, text, delivery);
     // The engine loop is running (or about to be): the wait loop may not be
     // armed if this busy state arose outside this tab — arm it; idempotent.
-    ensureSessionWait(sessionID);
+    // Shown sessions only (see shouldTrackLive): an unshown target is settled
+    // by the poll/watchdog rather than a pinned socket in every tab.
+    if (isWatched(sessionID)) ensureSessionWait(sessionID);
     const info = (res as { data?: InboxInfo } | undefined)?.data ?? (res as unknown as InboxInfo | undefined);
     if (info?.id) {
       patchPendingSend(sessionID, key, (p) => ({
@@ -4604,6 +4682,7 @@ export function startDraftSession(directory?: string | null) {
     dirOf(state.currentSessionID) ?? (current?.parentID ? dirOf(current.parentID) : undefined);
   const workspace = directory ?? state.pendingWorkspace ?? state.draftWorkspace ?? inherited ?? null;
   const retarget = isDraftSession(state.currentSessionID);
+  const leaving = state.currentSessionID;
   log("session", `draft ${retarget ? "retarget" : "open"} (workspace=${workspace ?? "default"})`);
   const nextPanes = withMainPaneSession(DRAFT_SESSION_ID);
   setState({
@@ -4615,8 +4694,15 @@ export function startDraftSession(directory?: string | null) {
     // The previous main session just unmounted — keep only still-mounted streams.
     live: pruneLiveForPanes(nextPanes),
     // A fresh surface must not inherit uncommitted picks from the previous
-    // session — they were never sent anywhere.
-    ...(retarget ? {} : { pendingAgent: null, pendingModel: null }),
+    // session — they were never sent anywhere. Model picks are keyed per
+    // session, so drop the LEFT session's slot and any stale draft slot (a
+    // re-targeted draft keeps its own pick).
+    ...(retarget
+      ? {}
+      : {
+          pendingAgent: null,
+          pendingModels: withoutSession(withoutSession(state.pendingModels, leaving), DRAFT_SESSION_ID),
+        }),
   });
   if (typeof window !== "undefined") updateSessionHistory(DRAFT_SESSION_ID, "push");
 }
@@ -4689,6 +4775,12 @@ export async function materializeDraft(text: string): Promise<string> {
     const draftMessages = state.messages[DRAFT_SESSION_ID] ?? [];
     seenEventIDs.clear();
     const nextPanes = withMainPaneSession(sid);
+    // Carry a draft-era model pick over to the real session key so
+    // `ensureSessionModel(sid)` commits it on this very send; drop the draft
+    // slot regardless (it no longer exists after this).
+    const draftPick = state.pendingModels[DRAFT_SESSION_ID];
+    let pendingModels = withoutSession(state.pendingModels, DRAFT_SESSION_ID);
+    if (draftPick && !pendingModels[sid]) pendingModels = { ...pendingModels, [sid]: draftPick };
     setState({
       currentSessionID: sid,
       panes: nextPanes,
@@ -4696,6 +4788,7 @@ export async function materializeDraft(text: string): Promise<string> {
       draftWorkspace: null,
       live: pruneLiveForPanes(nextPanes),
       messages: { ...state.messages, [sid]: draftMessages, [DRAFT_SESSION_ID]: [] },
+      pendingModels,
     });
     rememberLastSession(sid);
     // /new-session replaces itself with the canonical URL — no extra history entry.
@@ -4722,10 +4815,10 @@ export async function switchAgent(sessionID: string, agent: string) {
 }
 
 export async function switchModel(sessionID: string, model: ModelRef) {
-  // Same dirty-detector contract as switchAgent: local until the next send.
-  // The pickers read the pending override first, then the session detail.
-  setState({ pendingModel: model });
-  void sessionID;
+  // Same dirty-detector contract as switchAgent: local until the next send,
+  // but keyed per session so a pick in one split pane can neither show up in
+  // nor commit to another.
+  setState({ pendingModels: { ...state.pendingModels, [sessionID]: model } });
 }
 
 export async function renameSession(sessionID: string, title: string) {

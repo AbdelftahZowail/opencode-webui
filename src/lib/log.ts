@@ -56,17 +56,34 @@ function push(line: string) {
   }
 }
 
+let flushInFlight = false;
+
 async function flush() {
-  if (lines.length === 0) return;
+  // Single-flight: when the socket pool is starved a POST can hang, and
+  // without this guard every 400ms batch queued another doomed request — a
+  // starved tab accumulated an unbounded pending /api/debug backlog
+  // (observed live: ~30 stacked POSTs). One attempt at a time, dropped on
+  // timeout; the debug sink must never compete for sockets it can't get.
+  if (flushInFlight || lines.length === 0) return;
+  flushInFlight = true;
   const payload = lines.splice(0);
   try {
     await fetch("/api/debug", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10_000),
     });
   } catch {
-    /* server restarting/offline — drop rather than retry-loop */
+    /* server restarting/offline/starved — drop rather than retry-loop */
+  } finally {
+    flushInFlight = false;
+    if (lines.length > 0 && !flushTimer) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        void flush();
+      }, 400);
+    }
   }
 }
 

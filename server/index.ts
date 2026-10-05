@@ -56,7 +56,8 @@ import {
   validatePatch,
   type ConfigPatch,
 } from "./config";
-import { createEngineResolver } from "./engineResolver";
+import { createEngineResolver, type EngineEndpoint } from "./engineResolver";
+import { handleShelfRequest } from "./shelf";
 import {
   clearPidFile,
   ensureSetup,
@@ -173,8 +174,81 @@ async function writeDebug(lines: unknown[]) {
 // chosen engine and skips discovery/ensure entirely — no spawn from a stale
 // service.json pid (the rogue-serve incident), no version-kill of the chosen
 // engine. Same resolution as ctx.engine (see server/ext/engine.ts).
+//
+// Registration fallback (why discovery is not just Service.discover()):
+// `Service.discover()` validates a candidate through the engine's /api/health
+// plus its version handshake. When the engine's HTTP surface has drifted from
+// this client — e.g. a newer engine that no longer serves /api/health — that
+// validation fails and the ENTIRE proxy answers 502 while the engine sits
+// healthy in the registration file. The user sees a webui that never connects
+// (dead status dot, empty panels, endless spinner), not a version warning. We
+// therefore fall back to the registration record (url + password, pid verified
+// alive): version drift degrades feature-by-feature instead of bricking the
+// app. Strictly spawn-free, and only reached when Service.discover() found
+// nothing — a compatible engine is adopted by the call above.
+
+/** Spawn-free fallback: the registration file, if its pid is still alive. */
+function registrationEndpoint(): EngineEndpoint | undefined {
+  try {
+    const stateDir = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
+    const raw = readFileSync(join(stateDir, "opencode", "service.json"), "utf8");
+    const info = JSON.parse(raw) as { url?: unknown; password?: unknown; pid?: unknown };
+    if (typeof info.url !== "string" || info.url.length === 0) return undefined;
+    if (typeof info.pid === "number") {
+      try {
+        process.kill(info.pid, 0); // alive?
+      } catch {
+        return undefined; // stale registration — never adopt a dead record
+      }
+    }
+    const url = info.url.replace(/\/+$/, "");
+    // A registration record is written by a LOCAL engine. Refuse a non-local URL
+    // rather than let the proxy forward every authenticated request — and the
+    // engine password — to wherever a tampered record points (SSRF / credential
+    // leak). Loopback + unspecified addresses are the only valid targets here.
+    if (!isLocalEngineUrl(url)) {
+      dbg("engine discovery: registration file points at a non-local URL — refusing", url);
+      return undefined;
+    }
+    const password = typeof info.password === "string" && info.password.length > 0 ? info.password : undefined;
+    return password ? { url, auth: { type: "basic", username: "opencode", password } } : { url };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Loopback / unspecified engine host? The registration file is machine-local. */
+function isLocalEngineUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "::1" ||
+      host === "::" ||
+      host === "0.0.0.0" ||
+      // Exact IPv4 loopback only — a bare `^127\.` prefix would accept a
+      // hostname like `127.0.0.1.attacker.tld` (which resolves remotely).
+      /^127(\.\d{1,3}){3}$/.test(host) ||
+      // WHATWG canonicalizes an IPv4-mapped IPv6 host to hex, so
+      // `[::ffff:127.0.0.1]` arrives as `::ffff:7f00:1`.
+      host === "::ffff:7f00:1"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function discoverEngine(): Promise<EngineEndpoint | undefined> {
+  const found = await Service.discover().catch(() => undefined);
+  if (found) return found;
+  const fallback = registrationEndpoint();
+  if (fallback) dbg("engine discovery: Service.discover() found nothing; using registration file", fallback.url);
+  return fallback;
+}
+
 const engineResolver = createEngineResolver({
-  discover: () => Service.discover(),
+  discover: () => discoverEngine(),
   ensure: () => Service.ensure(),
   resolveOverride: resolveEngineOverride,
   onConnected: (url, suffix) =>
@@ -283,6 +357,116 @@ type RecordedEvent = { id: string; created: number; type: string; data: unknown;
 const replayBuffers = new Map<string, { events: RecordedEvent[]; bytes: number; lastAt: number }>();
 const recorderSeenIds = new Set<string>();
 
+// ---- Browser SSE fan-out ---------------------------------------------------
+//
+// Every browser tab used to open its OWN engine `/api/event` passthrough, so
+// N tabs meant N engine subscriptions (plus this recorder) — each a full copy
+// of the same token stream, N× the engine's fan-out cost, and N long-lived
+// sockets that could each stall a request pool. The recorder below already
+// holds ONE always-on engine subscription; the browser route now serves from
+// that same reader. The engine therefore sees exactly one event subscriber no
+// matter how many tabs are open, and every tab still receives the identical
+// `data: <json>` frames — the browser's parser, watchdog, replay catch-up and
+// extension contracts are untouched.
+//
+// Liveness: if the upstream recorder drops, the browser's own socket stays
+// open (the proxy keeps heartbeating), so the client's stall fuse would never
+// fire and it would sit on a silent stream. On every recorder RECONNECT we
+// release all attached clients; each reconnects at once, gets its `onOpen`,
+// and pulls `/api/webui/replay` for the gap. Replay is id-deduped downstream,
+// so an unnecessary release is harmless.
+
+type EventClient = { enqueue: (chunk: string) => void; close: () => void };
+const eventClients = new Set<EventClient>();
+
+/** Push one engine `data:` payload to every attached browser. */
+function broadcastEngineLine(payload: string) {
+  if (eventClients.size === 0) return;
+  const chunk = `data: ${payload}\n\n`;
+  for (const client of eventClients) client.enqueue(chunk);
+}
+
+/** Release every attached browser so each reconnects (and pulls replay). */
+function resetEventClients() {
+  for (const client of [...eventClients]) {
+    eventClients.delete(client);
+    client.close();
+  }
+}
+
+/**
+ * Serve `/api/event` from the shared recorder subscription. The response is a
+ * long-lived SSE stream: the connect banner, then engine frames as the
+ * recorder receives them, with a comment heartbeat so the client's byte-age
+ * fuse sees a live channel through idle stretches.
+ */
+function serveEventStream(req: Request): Response {
+  const encoder = new TextEncoder();
+  let client: EventClient | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  const cleanup = () => {
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+    if (client) {
+      eventClients.delete(client);
+      client = null;
+    }
+  };
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enqueue = (chunk: string) => {
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          /* client gone — cancel()/abort cleans up */
+        }
+      };
+      client = {
+        enqueue,
+        // Release through cleanup() so the heartbeat interval is cleared and
+        // the client leaves the fan-out set even when the close is driven by
+        // the recorder's reconnect reset (which calls close() directly, not
+        // through the stream's cancel()). Without this, every recorder
+        // reconnect leaked one 15s setInterval per attached tab.
+        close: () => {
+          cleanup();
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        },
+      };
+      eventClients.add(client);
+      // Mirror the engine's connect banner and warm the client's byte-age
+      // clock immediately. The manifest hello rides the same stream, so every
+      // (re)connect re-syncs extension state without a second EventSource.
+      enqueue(`data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\n`);
+      enqueue(`data: ${JSON.stringify({ type: "webui.extensions", version: extManifestVersion })}\n\n`);
+      heartbeat = setInterval(() => enqueue(": ping\n\n"), 15_000);
+    },
+    cancel() {
+      cleanup();
+    },
+  });
+
+  // Bun calls cancel() on client disconnect in most paths; the request signal
+  // is the belt-and-suspenders. `once` so a late abort after cleanup is cheap.
+  req.signal.addEventListener("abort", cleanup, { once: true });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
 function recordEvent(evt: RecordedEvent) {
   const sessionID = (evt.data as { sessionID?: string } | undefined)?.sessionID;
   if (!sessionID) return;
@@ -338,6 +522,10 @@ const RECORDER_BACKOFF_MAX_MS = 30_000;
 
 let recorderRunning = false;
 let recorderBackoffMs = RECORDER_BACKOFF_BASE_MS;
+// First connect is not a reconnect: no browser can have attached before the
+// recorder was ever up (there was nothing to serve), so there is nothing to
+// reset. Only a DROP needs the release-and-replay nudge.
+let recorderConnectedOnce = false;
 
 async function startEventRecorder() {
   if (recorderRunning) return;
@@ -350,9 +538,40 @@ async function startEventRecorder() {
         if (!res.ok || !res.body) throw new Error(`recorder: ${res.status}`);
         console.log("[webui] event recorder connected");
         recorderBackoffMs = RECORDER_BACKOFF_BASE_MS;
+        // A reconnected upstream may have missed events while it was down.
+        // Release attached browsers so each reconnects immediately and pulls
+        // the replay gap; id-dedupe makes any overlap harmless.
+        if (recorderConnectedOnce) resetEventClients();
+        recorderConnectedOnce = true;
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        // One SSE frame may carry a payload split across several `data:` lines
+        // (SSE permits it). Accumulate the frame's data lines and forward them
+        // as ONE frame — rejoining with "" the same way the browser parser
+        // does (the payload is JSON, so whitespace-insensitive; a mid-token
+        // newline would corrupt string contents). The engine's verified wire
+        // format is one line per frame, so this is a plain pass-through in
+        // practice; the join is the fidelity backstop that keeps the recorder
+        // invisible to the client's parser.
+        let frameData: string[] = [];
+        const flushFrame = () => {
+          if (frameData.length === 0) return;
+          const payload = frameData.join("");
+          frameData = [];
+          // Fan the frame out to every attached browser FIRST, so
+          // non-session events (heartbeats/banners) keep clients' byte-age
+          // clocks warm exactly as the engine's own stream did.
+          broadcastEngineLine(payload);
+          try {
+            const parsed = JSON.parse(payload) as RecordedEvent;
+            if (typeof parsed.type === "string" && parsed.type.startsWith("session.")) {
+              recordEvent(parsed);
+            }
+          } catch {
+            /* malformed frame — skip */
+          }
+        };
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -361,15 +580,13 @@ async function startEventRecorder() {
           buffer = lines.pop() ?? "";
           for (const line of lines) {
             const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith("data:")) continue;
-            try {
-              const parsed = JSON.parse(trimmed.slice("data:".length).trim()) as RecordedEvent;
-              if (typeof parsed.type === "string" && parsed.type.startsWith("session.")) {
-                recordEvent(parsed);
-              }
-            } catch {
-              /* malformed line — skip */
+            if (trimmed === "") {
+              // Blank line terminates the current frame.
+              flushFrame();
+              continue;
             }
+            if (!trimmed.startsWith("data:")) continue;
+            frameData.push(trimmed.slice("data:".length).trim());
           }
         }
       } catch (err) {
@@ -707,6 +924,11 @@ const extManifestListeners = new Set<(msg: string) => void>();
 function broadcastExtensionManifest() {
   const msg = JSON.stringify({ type: "webui.extensions", version: extManifestVersion });
   for (const send of extManifestListeners) send(msg);
+  // One SSE per tab: the manifest push also rides the main event stream, so
+  // a tab never needs a second live connection for extension hot-reload. The
+  // legacy /api/webui/extensions/events route stays for external consumers
+  // (documented channel), but core does not connect to it.
+  broadcastEngineLine(msg);
 }
 
 /**
@@ -1275,6 +1497,15 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       });
     }
 
+    // Core file shelf (`/api/shelf/...`). Security-critical placement: AFTER
+    // the auth gate above, BEFORE the generic /api passthrough. The handler
+    // serves untrusted files on this origin — read server/shelf.ts before
+    // touching the order, and return early for non-shelf paths.
+    {
+      const shelfRes = handleShelfRequest(req, url);
+      if (shelfRes) return shelfRes;
+    }
+
     if (path.startsWith("/api")) {
       const isUpgrade = (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
       if (isUpgrade) {
@@ -1299,6 +1530,15 @@ const server: Server<Record<string, unknown>> = Bun.serve({
         const extRewrite = await runExtRequestMiddleware(req);
         if (extRewrite instanceof Response) return extRewrite;
         if (extRewrite instanceof Request) activeReq = extRewrite;
+        // Event stream: serve from the shared recorder subscription instead of
+        // opening a per-client engine passthrough (see the fan-out block at the
+        // recorder). Still runs through response middleware so the proxy-stratum
+        // contract holds — an extension may rewrite the SSE response as it
+        // could before. `activeReq.method` mirrors the passthrough's use of the
+        // (possibly rewritten) request.
+        if (activeReq.method === "GET" && path === "/api/event") {
+          return await applyExtResponseMiddleware(serveEventStream(activeReq), req);
+        }
         const upMethod = activeReq.method;
         const ep = await serviceEndpoint();
         const headers = Service.headers(ep);

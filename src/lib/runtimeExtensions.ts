@@ -11,6 +11,7 @@ import {
   mountDomExtension,
   type DomExtensionModule,
 } from "./domKit";
+import { subscribeEvents } from "./eventBus";
 
 /**
  * Runtime extension loader — folder extensions (user > project > shipped,
@@ -28,11 +29,13 @@ import {
  *     Vite glob (webui-extensions/index.ts) owns them, and importing them
  *     here too would run module side effects twice (Bug 2). Shipped `domUrl`
  *     still serves (the glob never loads `dom.ts`).
- *  2. The proxy pushes manifest changes over SSE
- *     (GET /api/webui/extensions/events, one `{ type: "webui.extensions",
- *     version }` event per change — the SAME channel carries both strata:
- *     any `dom.ts` edit moves its `?v=`, which changes the manifest JSON and
- *     fires the push). Each event re-fetches the manifest and, per entry:
+ *  2. The proxy pushes manifest changes over the MAIN event stream
+ *     (`/api/event` carries a `{ type: "webui.extensions", version }` frame:
+ *     a hello on connect plus one per change; the legacy
+ *     GET /api/webui/extensions/events route remains for external consumers).
+ *     The SAME frame covers both strata: any `dom.ts` edit moves its `?v=`,
+ *     which changes the manifest JSON and fires the push. Each event
+ *     re-fetches the manifest and, per entry:
  *       - unregisters `disabled: true` ids outright (gating is owned by the
  *         folder's manifest.json, not the browser) — including glob-owned
  *         shipped copies the runtime never imported, or pausing a shipped
@@ -52,7 +55,7 @@ import {
  *         ghosts).
  *     Delete/move the folder and the id vanishes from the manifest = instant
  *     uninstall. No polling: a `visibilitychange` refetch covers streams that
- *     died while the tab was hidden (EventSource itself auto-reconnects).
+ *     died while the tab was hidden (the main stream reconnects on its own).
  *  3. After each sync, ids still in `loaded`/`loadedDom` but missing from the
  *     sync's enabled set (removed server-side OR newly paused) get torn down:
  *     `dispose` (activation teardown), then the exact ids the folder owned
@@ -309,21 +312,17 @@ async function syncDomEntry(id: string, domUrl: string): Promise<void> {
   await mountDomExtension(id, module);
 }
 
-/** Subscribe to the proxy's manifest push channel; EventSource reconnects. */
+/**
+ * Manifest pushes ride the MAIN event stream (`/api/event` → store → event
+ * bus) — one SSE per tab, never a second EventSource (the browser's
+ * per-origin HTTP/1.1 pool is small; two streams per tab starved sends and
+ * new tabs at 2-3 tabs). The proxy re-sends the hello frame on every
+ * (re)connect, so a dropped stream re-syncs as soon as it comes back.
+ */
 function subscribeManifestPush(): void {
-  let source: EventSource | null = null;
-  try {
-    source = new EventSource("/api/webui/extensions/events");
-  } catch {
-    return;
-  }
-  source.onmessage = () => {
+  subscribeEvents("webui.extensions", () => {
     void syncOnce({ force: true });
-  };
-  source.onerror = () => {
-    // EventSource backs off and reconnects on its own; if the stream is
-    // down for good the visibility refetch below still catches up.
-  };
+  });
   // A stream that died while the tab was hidden replays nothing — refetch
   // explicitly when the tab becomes visible again.
   document.addEventListener("visibilitychange", () => {
