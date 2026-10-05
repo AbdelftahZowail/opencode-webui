@@ -10,6 +10,7 @@ import { CommandKeybinds } from "./components/CommandKeybinds";
 import { Toasts } from "./components/Toasts";
 import { ImageViewer } from "./components/ImageViewer";
 import { ConnectDialog } from "./components/ConnectDialog";
+import { ShelfPage } from "./components/shelf/ShelfPage";
 import { Target, getContributions, subscribeRegistry, type PageContribution } from "./extensions/registry";
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { OPEN_SEARCH_EVENT } from "./lib/uiEvents";
@@ -106,11 +107,17 @@ export default function App() {
     ? getContributions<PageContribution>("pages").find((c) => c.id === extPageID)
     : undefined;
   const extPageTitle = extPage?.item.title;
+  // Native core page: the file shelf browser. Purely additional, like /ext/{id}.
+  const shelfRoute = pathname === "/shelf";
 
   // Browser tab mirrors the conversation: the session's title, prefixed
   // with a live dot while that session OR any of its subagents is working
   // or waiting on a send. Extension pages take over the title for their stay.
   useEffect(() => {
+    if (shelfRoute) {
+      document.title = "File shelf";
+      return;
+    }
     if (extPageTitle !== undefined) {
       document.title = extPageTitle;
       return;
@@ -122,7 +129,7 @@ export default function App() {
             ? "New session"
             : (session?.title ?? "Untitled session")
         }`;
-  }, [sessionID, session?.title, live, extPageTitle]);
+  }, [sessionID, session?.title, live, extPageTitle, shelfRoute]);
 
   // TUI session-level arrow bindings — active only OUTSIDE inputs (in the
   // composer, up/down walk prompt history and left/right move the caret):
@@ -270,7 +277,11 @@ export default function App() {
             onPointerDownCapture={focusThis(MAIN_PANE)}
             onFocusCapture={focusThis(MAIN_PANE)}
           >
-            {extPageID ? (
+            {shelfRoute ? (
+              // Native file-shelf page: full-page surface replacing the
+              // conversation pane; the shell around it stays exactly as-is.
+              <ShelfPage />
+            ) : extPageID ? (
               // Extension page: full-page surface replacing the conversation
               // pane; the shell around it stays exactly as-is.
               <ExtensionPageSurface id={extPageID} />

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseE
 import {
   ChevronDown,
   FolderTree,
+  Library,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -497,6 +498,9 @@ export function Sidebar() {
           <button type="button" onClick={() => setFilesOpen(true)} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Files">
             <FolderTree className="size-4" />
           </button>
+          <a href="/shelf" onClick={handleShelfNavClick} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="File shelf">
+            <Library className="size-4" />
+          </a>
           <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer rounded-md p-1.5 text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-foreground" title="Settings">
             <SettingsIcon className="size-4" />
           </button>
@@ -685,6 +689,15 @@ function SidebarFooter({
           <FolderTree className="size-3" />
           Files
         </button>
+        <a
+          href="/shelf"
+          onClick={handleShelfNavClick}
+          title="File shelf — browse shared files"
+          className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground"
+        >
+          <Library className="size-3" />
+          Shelf
+        </a>
         <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
           <SettingsIcon className="size-3" />
           Settings
@@ -775,6 +788,18 @@ function handleSessionLinkClick(event: MouseEvent<HTMLAnchorElement>, onSelect: 
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   event.preventDefault();
   void onSelect();
+}
+
+/**
+ * In-app navigation to the native file-shelf page (`/shelf`). Mirrors the
+ * extension-page links: an unmodified left click pushStates and pings App's
+ * pathname listener; modified/middle clicks stay native.
+ */
+function handleShelfNavClick(event: MouseEvent<HTMLAnchorElement>) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  window.history.pushState({}, "", "/shelf");
+  window.dispatchEvent(new Event(EXT_NAVIGATE_EVENT));
 }
 
 export interface SessionRowProps {
