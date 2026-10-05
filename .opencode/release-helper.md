@@ -84,6 +84,18 @@ From the repo root, on `master`, with a clean release scope:
   acceptable.
 - **Do not commit in-progress design docs** (e.g. `docs/extension-roadmap-2.md`
   at 3.2.0) — leave them untracked.
+- **`npm publish` returns HTTP 202 "being processed"** in this environment, and
+  the packument can lag a couple of minutes. Do not conclude failure from a
+  quick re-read.
+- **The publisher's own `~/.npmrc` sets `min-release-age=5`**, so `npm view` /
+  `npm install` on this machine HIDE versions younger than 5 days — a
+  just-published version looks like a 404/old `latest` even though it landed.
+  Verify against the registry API directly (cache-bust the packument):
+  `curl -s "https://registry.npmjs.org/opencode-webui?t=<nano>"` → check
+  `dist-tags.latest` and `time[<version>]`; the version doc
+  `https://registry.npmjs.org/opencode-webui/<version>` should be 200; the
+  `dist.tarball` should download. The npm poller's "latest" is NOT evidence
+  here.
 - Scratch lives in `/tmp/opencode/`. Do not touch
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
 
@@ -100,4 +112,9 @@ From the repo root, on `master`, with a clean release scope:
 - **Gate evidence:** typecheck ✅, build ✅, batteries 34/10/17/15 = 76/0,
   `check:setup` 51/0, prod-shaped tarball smoke ✅, pack contents verified.
 - **Notes:** batteries had been run with a concurrent verifier and flaked
-  (proxy test 8) — re-run alone is green; recorded above.
+  (proxy test 8) — re-run alone is green; recorded above. `npm publish`
+  returned HTTP 202 ("being processed"); the registry showed
+  `dist-tags.latest = 3.2.0` a few minutes later, version doc 200, tarball
+  2,026,841 B / shasum `1217067154eecae025faaf293e7e6e77df018504` containing
+  `server/shelf.ts` + `server/shelfEnginePlugin.ts` + `dist/` + the skill.
+  Tag `v3.2.0` = `f3326de`; pinned raw links all 200.
