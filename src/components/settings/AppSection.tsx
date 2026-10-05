@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { Bell } from "lucide-react";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
 import { SectionHeader } from "./shared";
+import {
+  isMarkdownRenderingEnabled,
+  setMarkdownRendering,
+  subscribeMarkdownRendering,
+} from "../markdown";
 import {
   consumeInstallPrompt,
   getInstallPrompt,
@@ -30,6 +36,9 @@ export function AppSection() {
   const [streamMode, setStreamMode] = useState<StreamMode>(() => getPrefs().streamMode);
 
   useEffect(() => subscribePrefs(() => setStreamMode(getPrefs().streamMode)), []);
+
+  const [previewsOn, setPreviewsOn] = useState(() => isMarkdownRenderingEnabled());
+  useEffect(() => subscribeMarkdownRendering(() => setPreviewsOn(isMarkdownRenderingEnabled())), []);
 
   useEffect(() => {
     setInstallable(getInstallPrompt() !== null);
@@ -113,6 +122,25 @@ export function AppSection() {
               </Button>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div>
+        <SectionHeader
+          title="Inline previews"
+          note="Live rendering for ~~~html / ~~~svg / ~~~pdf / ~~~image fences"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-[var(--text-weaker)]">
+            {previewsOn
+              ? "On — tilde fences render as sandboxed live previews; backtick fences stay code."
+              : "Off — tilde fences show their source instead of a live preview."}
+          </p>
+          <Switch
+            checked={previewsOn}
+            title={previewsOn ? "Pause inline previews" : "Enable inline previews"}
+            onCheckedChange={(checked) => setMarkdownRendering(checked)}
+          />
         </div>
       </div>
 

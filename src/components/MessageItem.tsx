@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState, Fragment, memo, type ReactNode, useSyncExternalStore } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Brain, Check, ChevronRight, Copy, GitBranch, Pencil, Paperclip, User } from "lucide-react";
 import type {
   AssistantMessage,
@@ -16,6 +14,7 @@ import { editAtMessage, forkAtMessage, useStore } from "../store";
 import { notify } from "../lib/notify";
 import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachments";
 import { openImage } from "./ImageViewer";
+import { Markdown } from "./markdown";
 import { formatModelRef } from "../lib/modelLabel";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
@@ -936,41 +935,10 @@ function ReasoningBlock({ text, stateKey }: { text: string; stateKey?: string })
 }
 
 /**
- * Allow image data URIs through react-markdown's sanitizer (the engine and
- * tools emit `![Image](data:image/png;base64,…)` for screenshots); everything
- * else keeps the default safe-protocol rules (http/https/relative).
+ * Tool content renderer. (The markdown body itself now lives in
+ * `./markdown/Markdown` — tables, live tilde-fence previews and shelf chips
+ * are part of that pipeline; this component stays about tool output.)
  */
-function markdownUrlTransform(url: string): string {
-  const trimmed = url.trim();
-  if (/^data:image\/[a-z0-9.+-]+;/i.test(trimmed)) return trimmed;
-  return defaultUrlTransform(url);
-}
-
-/**
- * Memoized on `text`: react-markdown + remark-gfm re-parse the whole document
- * on every render, so a streaming parent commit must not re-parse unchanged
- * historical messages.
- */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
-  return (
-    <div
-      onClick={(e) => {
-        // Markdown images (`![..](..)`, incl. engine-emitted data: URIs) open
-        // in the same viewer as attachments instead of navigating away.
-        const t = e.target as HTMLElement | null;
-        if (t instanceof HTMLImageElement && t.src) {
-          e.preventDefault();
-          openImage(t.src, t.alt);
-        }
-      }}
-      className="min-w-0 text-sm leading-relaxed break-words text-[var(--text-base)] [&_h1]:text-[var(--text-strong)] [&_h2]:text-[var(--text-strong)] [&_h3]:text-[var(--text-strong)] [&_strong]:text-[var(--text-strong)] [&_a]:text-[var(--text-interactive-base)] [&_a]:underline [&_a]:underline-offset-2 [&_a]:break-all [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-weak-base)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-weak)] [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--border-weak-base)] [&_pre]:bg-[var(--surface-inset-base)] [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:text-[var(--text-base)] [&_code]:rounded [&_code]:bg-[var(--surface-base)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:break-all [&_code]:text-[var(--text-base)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-normal [&_pre_code]:text-inherit [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-h-96 [&_img]:max-w-full [&_img]:rounded-md [&_img]:border [&_img]:border-[color:var(--border-weak-base)]">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform}>
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-});
-
 export function ToolContentView({ content }: { content?: ToolContent[] }) {
   if (!content || content.length === 0) return null;
   return (
