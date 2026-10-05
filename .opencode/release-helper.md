@@ -126,7 +126,15 @@ From the repo root, on `master`, with a clean release scope:
 - **Gate evidence:** typecheck ✅, build ✅, batteries 34/10/17/15 = 76/0,
   `check:setup` 51/0, `npm pack --dry-run` 36 files (dist, server incl.
   shelf*.ts, skills, webui-extensions/README.md; no src/).
-- **Publish:** _pending — filled in by the follow-up docs commit._
+- **Publish:** `npm publish` exited 0 with HTTP-202 "being processed" (expected
+  here); the cache-busted packument showed `dist-tags.latest = 3.2.1` ~2.5 min
+  later (`time["3.2.1"] = 2026-10-05T09:06:46.261Z`). Version doc 200; tarball
+  `https://registry.npmjs.org/opencode-webui/-/opencode-webui-3.2.1.tgz`
+  downloaded, 2,026,932 B, sha1 `cfb69b2852e8fed3d938b9488348c172d6ec4d74`
+  (matches the packument). Tag `v3.2.1` = `c85744f`; GitHub tag HTML + API 200;
+  the skill's `v3.2.1` raw links return 200
+  (`webui-extensions/README.md`, `src/api/client.ts`, `src/components/Sidebar.tsx`,
+  `docs/extension-system-spec.md`, `skills/webui/SKILL.md`).
 
 ### 3.2.0 — 2026-10-05
 - **Type:** minor (features; no extension-contract break).
