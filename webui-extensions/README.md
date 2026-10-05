@@ -108,7 +108,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | Target id | Props (meaningful subset) |
 |---|---|
 | `sidebar` | — (the shell) |
-| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `onSelect` |
+| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `unseen` (finished while unopened), `onSelect` |
 | `conversation` | full `ConversationProps` |
 | `conversation.header` | full `HeaderProps` |
 | `conversation.empty` | — |

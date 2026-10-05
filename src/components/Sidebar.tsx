@@ -375,22 +375,45 @@ export function Sidebar() {
               {groups.map((group) => {
                 const isCollapsed = !!collapsedWorkspaces[group.name];
                 const extra = extraShown[group.name] ?? 0;
-                // Default slice: the newest SECTION_LIMIT rows, widened to
-                // cover every live or "was active, not opened" session so
-                // neither is ever buried behind "Show more". "Show more"
-                // reveals SECTION_STEP rows per press; "Show less" returns.
+                // Rows that are never buried behind "Show more": live sessions,
+                // the open/selected session, and finished-but-unopened sticky
+                // ones. The newest-N slice is NOT widened to the furthest such
+                // index — that dragged in every row between the top and it.
+                // Instead the slice stays a plain prefix and these rows render
+                // at their own sorted spot, with the hidden rows in between
+                // left behind "Show more".
                 const stickyIdx = group.list
-                  .map((s, i) => (isLive(s.id) || isSessionSticky(s.id) ? i : -1))
+                  .map((s, i) => (isLive(s.id) || s.id === current || isSessionSticky(s.id) ? i : -1))
                   .filter((i) => i >= 0);
-                const defaultCount = isCollapsed
+                // Newest-N prefix: SECTION_LIMIT, plus SECTION_STEP per press.
+                const prefixCount = isCollapsed
                   ? 0
-                  : Math.min(
-                      group.list.length,
-                      Math.max(SECTION_LIMIT, stickyIdx.length ? Math.max(...stickyIdx) + 1 : 0),
-                    );
-                const count = isCollapsed ? 0 : Math.min(group.list.length, defaultCount + extra);
-                const visible = isCollapsed ? [] : group.list.slice(0, count);
-                const moreCount = group.list.length - count;
+                  : Math.min(group.list.length, SECTION_LIMIT + extra);
+                const prefixRows = isCollapsed ? [] : group.list.slice(0, prefixCount);
+                const stickyRows = isCollapsed
+                  ? []
+                  : stickyIdx.filter((i) => i >= prefixCount).map((i) => group.list[i]!);
+                const moreCount = isCollapsed
+                  ? 0
+                  : group.list.length - prefixCount - stickyRows.length;
+                const renderRow = (s: SessionInfo) => (
+                  <div key={s.id} className="mb-0.5">
+                    <Target
+                      id="sidebar.sessionRow"
+                      sessionID={s.id}
+                      title={s.title ?? "Untitled session"}
+                      updated={s.time.updated}
+                      active={activeIDs.includes(s.id)}
+                      selected={s.id === current}
+                      subagentsActive={subagentActiveParents.has(s.id)}
+                      // Finished while unopened: keep it visible AND flag it so
+                      // the user notices new output they haven't looked at. The
+                      // focused session never flags (opening clears it).
+                      unseen={!isLive(s.id) && s.id !== current && isSessionSticky(s.id)}
+                      onSelect={() => void selectSession(s.id)}
+                    />
+                  </div>
+                );
                 // The highlight keys off the real directory, not its display
                 // name ("~/code" vs "/home/z/code"); "Other" (no directory)
                 // can never be a pending target.
@@ -439,23 +462,7 @@ export function Sidebar() {
                       )}
                       <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{group.list.length}</span>
                     </div>
-                    {visible.map((s) => {
-                      const active = activeIDs.includes(s.id);
-                      return (
-                        <div key={s.id} className="mb-0.5">
-                          <Target
-                            id="sidebar.sessionRow"
-                            sessionID={s.id}
-                            title={s.title ?? "Untitled session"}
-                            updated={s.time.updated}
-                            active={active}
-                            selected={s.id === current}
-                            subagentsActive={subagentActiveParents.has(s.id)}
-                            onSelect={() => void selectSession(s.id)}
-                          />
-                        </div>
-                      );
-                    })}
+                    {prefixRows.map(renderRow)}
                     {!isCollapsed && moreCount > 0 && (
                       <button
                         type="button"
@@ -465,6 +472,9 @@ export function Sidebar() {
                         Show {Math.min(SECTION_STEP, moreCount)} more…
                       </button>
                     )}
+                    {/* Sticky rows beyond the prefix sit after the "Show more"
+                        step, at their true sorted position. */}
+                    {stickyRows.map(renderRow)}
                     {!isCollapsed && moreCount === 0 && extra > 0 && (
                       <button
                         type="button"
@@ -810,6 +820,8 @@ export interface SessionRowProps {
   selected: boolean;
   /** A subagent child of this session is currently running/queued. */
   subagentsActive: boolean;
+  /** Finished while unopened — new output the user hasn't looked at yet. */
+  unseen?: boolean;
   onSelect: () => void;
 }
 
@@ -820,6 +832,7 @@ function SessionRow({
   active,
   selected,
   subagentsActive,
+  unseen,
   onSelect,
 }: SessionRowProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -848,6 +861,14 @@ function SessionRow({
             />
           )}
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
+          {unseen && (
+            <Badge
+              title="Finished — not opened yet"
+              className="shrink-0 border-transparent bg-[var(--surface-warning-weak)] text-[var(--surface-warning-strong)]"
+            >
+              new
+            </Badge>
+          )}
           {active && (
             <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">
               run
@@ -913,6 +934,7 @@ autoRegister({
       active={p.active as boolean}
       selected={p.selected as boolean}
       subagentsActive={p.subagentsActive as boolean}
+      unseen={p.unseen as boolean}
       onSelect={p.onSelect as () => void}
     />
   ),
