@@ -1,5 +1,5 @@
 /**
- * First-run setup — a fast global command and an OpenCode lifecycle plugin.
+ * First-run setup — a fast global command and the webui's OpenCode plugins.
  *
  * The webui is a foreground process; `bunx opencode-webui` re-resolves the
  * package each time (slow) and nothing restarts it after a reboot. This module
@@ -10,10 +10,12 @@
  *      a bunx install lives in a temp dir the OS can wipe, so it is first
  *      mirrored to `<state>/entry/<version>/` (hardlinks — no disk, no
  *      network) and the shim + plugin launch from the mirror;
- *   2. the built-in OpenCode lifecycle plugin in
- *      `<config>/opencode/plugins/opencode-webui/`, which the engine
- *      auto-discovers globally and activates on use: it starts the webui
- *      detached, so the webui comes up whenever you use OpenCode;
+ *   2. the built-in OpenCode plugins in
+ *      `<config>/opencode/plugins/opencode-webui{,-shelf}/`: the lifecycle
+ *      plugin (engine auto-discovers it and activates on use: it starts the
+ *      webui detached, so the webui comes up whenever you use OpenCode) and
+ *      the shelf tools plugin (`shelf_share` / `shelf_list` / `shelf_remove`
+ *      + the shelf system hint);
  *   3. `launch.json` in the state dir — the stable handoff the plugin reads;
  *   4. a pidfile so `stop` / `restart` / `update` can find the running server.
  *
@@ -26,8 +28,9 @@
  *
  * This is a deliberate, documented exception to the "webui never installs
  * engine plugins" rule in docs/engine-payload-convention.md: the webui installs
- * *its own* lifecycle plugin, opt-out, because the user asked for the webui to
- * follow OpenCode's lifecycle.
+ * *its own* plugins (lifecycle + shelf tools), opt-out — the lifecycle one
+ * because the user asked the webui to follow OpenCode's lifecycle, the shelf
+ * one because the shelf's agent tools are a core webui feature.
  */
 
 import {
@@ -53,6 +56,11 @@ import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
   LIFECYCLE_PLUGIN_SOURCE,
 } from "./lifecyclePlugin";
+import {
+  SHELF_ENGINE_PLUGIN_ID,
+  SHELF_ENGINE_PLUGIN_PACKAGE_JSON,
+  SHELF_ENGINE_PLUGIN_SOURCE,
+} from "./shelfEnginePlugin";
 import { runConfigCli } from "./config";
 
 export const SERVICE_NAME = "opencode-webui";
@@ -447,8 +455,17 @@ function pluginDir(): string {
   return join(configDir(), "plugins", SERVICE_NAME);
 }
 
-function installPlugin(version: string): InstallResult {
-  const dir = pluginDir();
+function shelfPluginDir(): string {
+  return join(configDir(), "plugins", SHELF_ENGINE_PLUGIN_ID);
+}
+
+/** Install one marker-gated managed engine-plugin dir (contents compared byte-for-byte). */
+function installManagedPluginDir(
+  dir: string,
+  indexSource: string,
+  pkgSource: string,
+  version: string,
+): InstallResult {
   const marker = join(dir, PLUGIN_MARKER);
   try {
     if (existsSync(dir) && !existsSync(marker)) {
@@ -459,20 +476,46 @@ function installPlugin(version: string): InstallResult {
     const markerContent = JSON.stringify({ managed: true, version }, null, 2) + "\n";
     const unchanged =
       existsSync(index) &&
-      readFileSync(index, "utf8") === LIFECYCLE_PLUGIN_SOURCE &&
+      readFileSync(index, "utf8") === indexSource &&
       existsSync(pkg) &&
-      readFileSync(pkg, "utf8") === LIFECYCLE_PLUGIN_PACKAGE_JSON &&
+      readFileSync(pkg, "utf8") === pkgSource &&
       existsSync(marker) &&
       readFileSync(marker, "utf8") === markerContent;
     if (unchanged) return { path: dir, changed: false };
     mkdirSync(dir, { recursive: true });
-    writeFileSync(index, LIFECYCLE_PLUGIN_SOURCE);
-    writeFileSync(pkg, LIFECYCLE_PLUGIN_PACKAGE_JSON);
+    writeFileSync(index, indexSource);
+    writeFileSync(pkg, pkgSource);
     writeFileSync(marker, markerContent);
     return { path: dir, changed: true };
   } catch (err) {
     return { path: dir, changed: false, detail: `could not write ${dir}: ${errorText(err)}` };
   }
+}
+
+/**
+ * Install the webui's OWN managed engine plugins: the lifecycle plugin
+ * (starts the proxy) and the shelf plugin (shelf_* tools + system hint).
+ * Separate marker-gated dirs, engine-discovered at boot; never touches a
+ * dir we don't own.
+ */
+function installPlugin(version: string): InstallResult {
+  const lifecycle = installManagedPluginDir(
+    pluginDir(),
+    LIFECYCLE_PLUGIN_SOURCE,
+    LIFECYCLE_PLUGIN_PACKAGE_JSON,
+    version,
+  );
+  const shelf = installManagedPluginDir(
+    shelfPluginDir(),
+    SHELF_ENGINE_PLUGIN_SOURCE,
+    SHELF_ENGINE_PLUGIN_PACKAGE_JSON,
+    version,
+  );
+  return {
+    path: lifecycle.path,
+    changed: lifecycle.changed || shelf.changed,
+    detail: [lifecycle.detail, shelf.detail].filter(Boolean).join("; ") || undefined,
+  };
 }
 
 function errorText(err: unknown): string {
@@ -629,8 +672,8 @@ function setupMessage(result: {
   const at = result.wrapper.path ? ` at ${result.wrapper.path}` : "";
   lines.push(
     result.first
-      ? `[webui] setup: installed the \`${SERVICE_NAME}\` command${at} and the OpenCode lifecycle plugin.`
-      : `[webui] setup: refreshed the \`${SERVICE_NAME}\` command and lifecycle plugin.`,
+      ? `[webui] setup: installed the \`${SERVICE_NAME}\` command${at} and the OpenCode plugins (lifecycle + shelf tools).`
+      : `[webui] setup: refreshed the \`${SERVICE_NAME}\` command and OpenCode plugins.`,
   );
   lines.push(`[webui]   the webui now starts with OpenCode · undo: ${SERVICE_NAME} uninstall`);
   const dir = result.wrapper.path ? dirname(result.wrapper.path) : null;
@@ -642,7 +685,7 @@ function setupMessage(result: {
 }
 
 /**
- * Ensure the global command + lifecycle plugin exist and match this build.
+ * Ensure the global command + OpenCode plugins exist and match this build.
  * Called after the server binds; a matching install is a no-op. Never throws.
  */
 export function ensureSetup(opts: SetupOptions): SetupResult {
@@ -710,13 +753,14 @@ export function uninstallSetup(): UninstallResult {
       problems.push(errorText(err));
     }
   }
-  const dir = pluginDir();
-  if (existsSync(join(dir, PLUGIN_MARKER))) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      removed.push(dir);
-    } catch (err) {
-      problems.push(errorText(err));
+  for (const dir of [pluginDir(), shelfPluginDir()]) {
+    if (existsSync(join(dir, PLUGIN_MARKER))) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(dir);
+      } catch (err) {
+        problems.push(errorText(err));
+      }
     }
   }
   try {
@@ -764,17 +808,17 @@ const USAGE = `${SERVICE_NAME} [command]
 
   (none)      start the webui (starting the OpenCode service first if needed)
   update      update to the latest published version and restart
-  status      show the command, lifecycle plugin, launch command, and pid
+  status      show the command, OpenCode plugins, launch command, and pid
   config      show/edit serve + security settings (host, port, auth, hosts, …)
   stop        stop the running webui
   restart     restart the running webui
-  uninstall   remove the global command + lifecycle plugin (remembered; no auto-reinstall)
+  uninstall   remove the global command + OpenCode plugins (remembered; no auto-reinstall)
   sandbox     start an isolated second instance (loopback, no password, port 4099)
   --install-skill   copy the agent skill and exit
 
 Environment:
   WEBUI_NO_SETUP=1    skip first-run setup for one run (CI, one-offs)
-  WEBUI_NO_PLUGIN=1   install the command but not the OpenCode lifecycle plugin
+  WEBUI_NO_PLUGIN=1   install the command but not the OpenCode plugins
   WEBUI_SETUP=1       force setup even in a dev checkout (testing)`;
 
 function printStatus(): number {
@@ -855,7 +899,13 @@ function runUpdate(entryUrl: string): number {
 function runInternalSetup(entryUrl: string): number {
   const version = readOwnVersion();
   const port = Number(process.env.WEBUI_PROXY_PORT ?? 4097);
-  const launch = resolveLaunchCommand(entryUrl);
+  // Stabilize FIRST. This runs from the newly resolved `bunx` install, so
+  // `entryUrl` is an ephemeral /tmp path — and this launch command is what
+  // `update` respawns the server with (and what `installArtifacts` writes into
+  // launch.json + the global command). Resolving it from the raw URL left the
+  // running server living in a temp dir the OS wipes, while the mirror sat
+  // there telling every later boot to use the stable copy.
+  const launch = resolveLaunchCommand(stabilizeEntryUrl(entryUrl, version).url);
   installArtifacts(launch, port, version);
   writeMarker({ declined: false, installedAt: readMarker().installedAt ?? Date.now(), version });
   console.log(

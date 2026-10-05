@@ -247,6 +247,35 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
         ensureSetup({ entryUrl: pathToFileURL(bunxEntry).href, port: 4097, version: "9.9.9", force: true, quiet: true });
         const mirrorEntry = join(state, "opencode-webui", "entry", "9.9.9", "node_modules", "opencode-webui", "server", "index.ts");
         check("bunx: setup launches the stable mirror, not the temp path", readLaunchConfig()?.cmd[1] === mirrorEntry && readFileSync(wrapper, "utf8").includes(mirrorEntry), readLaunchConfig()?.cmd.join(" ") ?? "(none)");
+
+        // The hidden `internal:setup` — the payload `opencode-webui update`
+        // respawns the server from — resolves its launch command from its OWN
+        // (bunx) entry URL, so it has to stabilize too. Resolving the raw URL
+        // left the live server running out of the temp dir while the mirror sat
+        // there telling every later boot to use the stable copy.
+        {
+          const captured: string[] = [];
+          const original = console.log;
+          console.log = (...args: unknown[]) => {
+            const text = args.map(String).join(" ");
+            if (text.startsWith("WEBUI_LAUNCH_JSON=")) captured.push(text);
+            else original(...args);
+          };
+          let code = -1;
+          try {
+            code = await runSetupCli("internal:setup", pathToFileURL(bunxEntry).href);
+          } finally {
+            console.log = original;
+          }
+          const payload = captured[0]?.slice("WEBUI_LAUNCH_JSON=".length);
+          const emitted = payload ? ((JSON.parse(payload) as { cmd: string[] }).cmd[1] ?? "") : "";
+          check(
+            "internal:setup: emits the stable mirror for update to respawn",
+            code === 0 && !emitted.startsWith(bunx) && emitted.startsWith(join(state, "opencode-webui", "entry")) && existsSync(emitted),
+            emitted || "(no payload)",
+          );
+        }
+
         rmSync(bunx, { recursive: true, force: true });
         check("bunx: mirror survives the temp dir being wiped", existsSync(mirrorEntry));
 
