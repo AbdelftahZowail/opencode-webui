@@ -4,3 +4,8 @@ release/
 scripts/generated/
 *.log
 .DS_Store
+
+# Scratch dirs the uitest scripts create for Bun.build fixtures. They must
+# live inside the repo (Bun resolves `react` by walking up from the entry, and
+# a /tmp fixture has no node_modules above it), so they must be ignored here.
+.uitest-*/

@@ -108,7 +108,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | Target id | Props (meaningful subset) |
 |---|---|
 | `sidebar` | — (the shell) |
-| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `unseen` (finished while unopened), `onSelect` |
+| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `unseen` (optional force/deny of the unread marker — omit it and the row derives state from `updated`), `onSelect` |
 | `conversation` | full `ConversationProps` |
 | `conversation.header` | full `HeaderProps` |
 | `conversation.empty` | — |
@@ -474,6 +474,7 @@ extensions break silently on every redesign.
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
 | `data-oc-sidebar` | Sidebar root |
+| `data-oc-session-unseen` | The unread marker on one session row — the `new` pill in the full sidebar, the dot on the collapsed-rail avatar. At most one per row, and only in the layout that is actually rendered |
 | `data-oc-queue-strip` | QueueStrip (steer/queue rows) |
 | `data-oc-subagent-strip` | SubagentStrip |
 | `data-oc-runs-panel` | RunsPanel |

@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { TooltipProvider } from "./components/ui/tooltip";
 import "./styles.css";
 import { startStore } from "./store";
 import "../webui-extensions";
@@ -48,7 +49,11 @@ log("boot", `app render (console mirror: ${DEBUG_CONSOLE ? "on" : "off"})`);
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
+      {/* One provider for the whole tree: session rows render in the sidebar
+          AND in the search overlay, so the provider cannot live in either. */}
+      <TooltipProvider>
+        <App />
+      </TooltipProvider>
     </ErrorBoundary>
   </StrictMode>,
 );

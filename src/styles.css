@@ -321,6 +321,31 @@ pre {
   }
 }
 
+/* Unread ("new") session rows: a one-shot ring flash the moment the badge
+   appears, so a finished-while-unopened run reads as an ARRIVAL instead of a
+   silent pop-in. Exactly one shot — a permanently pulsing sidebar is noise,
+   which is what made the old marker feel like it was "coming and going".
+   GPU-only props (box-shadow), so it never blocks paint. */
+.session-unseen {
+  animation: session-unseen-in 1.1s ease-out 1;
+}
+@keyframes session-unseen-in {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--surface-warning-strong) 50%, transparent);
+  }
+  45% {
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--surface-warning-strong) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--surface-warning-strong) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-unseen {
+    animation: none;
+  }
+}
+
 /* Mobile: horizontal chip/picker rails scroll without a visible scrollbar. */
 .no-scrollbar {
   scrollbar-width: none;

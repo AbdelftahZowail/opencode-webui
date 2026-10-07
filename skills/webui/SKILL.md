@@ -215,6 +215,7 @@ own the fragility").
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
 | `data-oc-sidebar` | Sidebar root |
+| `data-oc-session-unseen` | The unread marker on one session row — the `new` pill in the full sidebar, the dot on the collapsed-rail avatar. At most one per row, and only in the layout that is actually rendered |
 | `data-oc-queue-strip` | QueueStrip (steer/queue rows) |
 | `data-oc-subagent-strip` | SubagentStrip |
 | `data-oc-runs-panel` | RunsPanel |

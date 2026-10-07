@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import {
   ChevronDown,
   FolderTree,
@@ -29,7 +29,13 @@ import { api } from "../api/client";
 import { registerPoller } from "../lib/scheduler";
 import type { SessionInfo } from "../api/types";
 import { findHome, sameDirectory, workspaceName } from "../lib/workspaces";
-import { isSessionSticky, markSessionActive, markSessionOpened } from "../lib/sessionActivity";
+import {
+  baselineOpened,
+  isSessionUnseen,
+  markSessionOpened,
+  useActivityVersion,
+  useSessionUnseen,
+} from "../lib/sessionActivity";
 import { OPEN_SEARCH_EVENT } from "../lib/uiEvents";
 import { Target, autoRegister, getContributions, subscribeRegistry, type ContextMenuContribution, type PageContribution } from "../extensions/registry";
 import { Slot } from "../extensions/slots";
@@ -44,6 +50,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileExplorer } from "./FileExplorer";
+import { SessionUnseenBadge } from "./SessionUnseenBadge";
 import { SettingsDialog, openSettings } from "./settings/SettingsDialog";
 
 const SECTION_LIMIT = 3;
@@ -190,19 +197,34 @@ export function Sidebar() {
   /** Running or queued both read as live here — visibility and markers. */
   const isLive = (id: string) => !!running[id] || !!queued[id];
 
-  // Visibility memory: sessions currently running/queued are remembered as
-  // "was active"; the focused session, once idle, is remembered as viewed. A
-  // finished run the user never looked at therefore stays in the default
-  // slice until they open it (see isSessionSticky).
-  useEffect(() => {
-    for (const s of sessions) if (isLive(s.id)) markSessionActive(s.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, running, queued]);
+  // Cross-tab read state. One subscription here drives grouping and sorting;
+  // each row subscribes for its own badge. Both derive from the same module
+  // state, so a session opened in another tab re-sorts and clears in this one
+  // on the same tick — no refresh, no polling.
+  const activityVersion = useActivityVersion();
+
+  /**
+   * Viewing IS reading. Stamp the focused session the moment it gains focus
+   * AND the moment a run we were watching goes idle, so a run watched start to
+   * finish never badges afterwards. The idle check is what keeps a session
+   * that is still producing from being marked read mid-flight.
+   */
   useEffect(() => {
     if (!current || isDraftSession(current)) return;
     if (!isLive(current)) markSessionOpened(current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, running, queued]);
+
+  /**
+   * First-run baseline: adopt the list we are seeing as already read, so
+   * upgrading doesn't mark every existing session unread. A LAYOUT effect so
+   * it lands before the first paint of a populated list — with a plain effect
+   * the sidebar would flash a wall of "new" badges for one frame.
+   */
+  useLayoutEffect(() => {
+    if (sessions.length === 0) return;
+    baselineOpened(sessions.map((s) => s.id));
+  }, [sessions]);
 
   // Parents with a currently running/queued subagent child, for the row
   // marker. Children aren't listed top-level but stay present in `sessions`.
@@ -238,12 +260,28 @@ export function Sidebar() {
       buckets.set(key, list);
     }
     const isRunningId = (id: string) => !!(running[id] || activeIDs.includes(id));
+    /**
+     * Row rank inside a workspace group. Unread sessions are HOISTED to the
+     * top of their group (just under anything live) instead of being rendered
+     * wherever their `time.updated` happened to land. That is the fix for the
+     * badge appearing "outside" a workspace: the old code kept unopened rows
+     * pinned by rendering them AFTER the "Show more" divider, so a badged row
+     * floated at the bottom of the block, detached from the sessions above it.
+     * Hoisting also means the newest-N slice always contains them, so the row
+     * never needs the escape hatch at all.
+     */
+    const rank = (s: SessionInfo) => {
+      if (isLive(s.id)) return 0;
+      if (s.id === current) return 1;
+      if (isSessionUnseen(s.id, s.time.updated)) return 2;
+      return 3;
+    };
     const sorted = [...buckets.entries()].map(([name, list]) => ({
       name,
       list: [...list].sort((a, b) => {
-        const ar = isRunningId(a.id);
-        const br = isRunningId(b.id);
-        if (ar !== br) return Number(br) - Number(ar);
+        const ar = rank(a);
+        const br = rank(b);
+        if (ar !== br) return ar - br;
         return b.time.updated - a.time.updated;
       }),
     }));
@@ -255,7 +293,7 @@ export function Sidebar() {
       return 0;
     });
     return sorted;
-  }, [sessions, home, running, activeIDs]);
+  }, [sessions, home, running, queued, activeIDs, current, activityVersion]);
 
   const hasMore = sessionsCursor != null;
 
@@ -375,27 +413,22 @@ export function Sidebar() {
               {groups.map((group) => {
                 const isCollapsed = !!collapsedWorkspaces[group.name];
                 const extra = extraShown[group.name] ?? 0;
-                // Rows that are never buried behind "Show more": live sessions,
-                // the open/selected session, and finished-but-unopened sticky
-                // ones. The newest-N slice is NOT widened to the furthest such
-                // index — that dragged in every row between the top and it.
-                // Instead the slice stays a plain prefix and these rows render
-                // at their own sorted spot, with the hidden rows in between
-                // left behind "Show more".
-                const stickyIdx = group.list
-                  .map((s, i) => (isLive(s.id) || s.id === current || isSessionSticky(s.id) ? i : -1))
-                  .filter((i) => i >= 0);
                 // Newest-N prefix: SECTION_LIMIT, plus SECTION_STEP per press.
                 const prefixCount = isCollapsed
                   ? 0
                   : Math.min(group.list.length, SECTION_LIMIT + extra);
                 const prefixRows = isCollapsed ? [] : group.list.slice(0, prefixCount);
-                const stickyRows = isCollapsed
+                // Escape hatch, now normally empty: live/open/unread rows are
+                // all hoisted into the prefix by `rank` above. If one still
+                // lands past it (a very long group), render it inline with the
+                // rest of the block — NOT after the "Show more" divider, which
+                // is what used to strand a badged row below the fold line.
+                const keptRows = isCollapsed
                   ? []
-                  : stickyIdx.filter((i) => i >= prefixCount).map((i) => group.list[i]!);
-                const moreCount = isCollapsed
-                  ? 0
-                  : group.list.length - prefixCount - stickyRows.length;
+                  : group.list
+                      .slice(prefixCount)
+                      .filter((s) => isLive(s.id) || s.id === current || isSessionUnseen(s.id, s.time.updated));
+                const moreCount = group.list.length - prefixRows.length - keptRows.length;
                 const renderRow = (s: SessionInfo) => (
                   <div key={s.id} className="mb-0.5">
                     <Target
@@ -406,10 +439,6 @@ export function Sidebar() {
                       active={activeIDs.includes(s.id)}
                       selected={s.id === current}
                       subagentsActive={subagentActiveParents.has(s.id)}
-                      // Finished while unopened: keep it visible AND flag it so
-                      // the user notices new output they haven't looked at. The
-                      // focused session never flags (opening clears it).
-                      unseen={!isLive(s.id) && s.id !== current && isSessionSticky(s.id)}
                       onSelect={() => void selectSession(s.id)}
                     />
                   </div>
@@ -463,6 +492,10 @@ export function Sidebar() {
                       <span className="shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">{group.list.length}</span>
                     </div>
                     {prefixRows.map(renderRow)}
+                    {/* Hoisted live/open/unread rows keep the block contiguous —
+                        the "Show more" control always closes the group, so a
+                        badged row is never stranded under it. */}
+                    {keptRows.map(renderRow)}
                     {!isCollapsed && moreCount > 0 && (
                       <button
                         type="button"
@@ -472,10 +505,7 @@ export function Sidebar() {
                         Show {Math.min(SECTION_STEP, moreCount)} more…
                       </button>
                     )}
-                    {/* Sticky rows beyond the prefix sit after the "Show more"
-                        step, at their true sorted position. */}
-                    {stickyRows.map(renderRow)}
-                    {!isCollapsed && moreCount === 0 && extra > 0 && (
+                    {!isCollapsed && extra > 0 && (
                       <button
                         type="button"
                         onClick={() => showFewerRows(group.name)}
@@ -665,6 +695,7 @@ function CollapsedSidebar({
                 key={session.id}
                 id={session.id}
                 title={session.title ?? "Untitled session"}
+                updated={session.time.updated}
                 selected={session.id === current}
                 active={activeIDs.includes(session.id)}
                 onSelect={() => void selectSession(session.id)}
@@ -765,21 +796,27 @@ function ExtensionPagesNav() {
 function CollapsedSessionLink({
   id,
   title,
+  updated,
   selected,
   active,
   onSelect,
 }: {
   id: string;
   title: string;
+  updated: number;
   selected: boolean;
   active: boolean;
   onSelect: () => void;
 }) {
+  // Parity with the expanded row: collapsing the sidebar must not make unread
+  // sessions silently disappear. Same rule, same cross-tab repaint.
+  const live = useStore((s) => !!s.running[id] || !!s.queued[id]);
+  const unseen = useSessionUnseen(id, updated) && !selected && !live;
   return (
     <a
       href={sessionHref(id)}
-      title={title}
-      aria-label={title}
+      title={unseen ? `${title} — unread output` : title}
+      aria-label={unseen ? `${title} (unread output)` : title}
       aria-current={selected ? "page" : undefined}
       onClick={(event) => handleSessionLinkClick(event, onSelect)}
       onMouseEnter={() => prefetchSession(id)}
@@ -789,6 +826,12 @@ function CollapsedSessionLink({
       }`}
     >
       {(title.trim()[0] ?? "S").toUpperCase()}
+      {unseen && (
+        <span
+          data-oc-session-unseen="true"
+          className="session-unseen absolute -top-0.5 -right-0.5 size-2 rounded-full bg-[var(--surface-warning-strong)] ring-2 ring-[var(--surface-base)]"
+        />
+      )}
       {active && <span className="absolute right-0.5 bottom-0.5 size-1.5 rounded-full bg-[var(--surface-success-strong)]" />}
     </a>
   );
@@ -820,7 +863,12 @@ export interface SessionRowProps {
   selected: boolean;
   /** A subagent child of this session is currently running/queued. */
   subagentsActive: boolean;
-  /** Finished while unopened — new output the user hasn't looked at yet. */
+  /**
+   * Force the unread marker on/off. Leave undefined to derive it from the
+   * session's last engine write (`updated`) — that is the normal path, and it
+   * keeps the sidebar list, the collapsed rail and the search panel in
+   * agreement without threading a prop through every call site.
+   */
   unseen?: boolean;
   onSelect: () => void;
 }
@@ -832,10 +880,21 @@ function SessionRow({
   active,
   selected,
   subagentsActive,
-  unseen,
+  unseen: unseenOverride,
   onSelect,
 }: SessionRowProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Liveness is read from the store rather than taken from the `active` prop:
+  // `active` is the engine's active-session map, which is laggy and can stay
+  // true for a run that already ended — gating the badge on it would hide
+  // unread state. `running`/`queued` are the authoritative "producing now".
+  const live = useStore((s) => !!s.running[id] || !!s.queued[id]);
+  // Derived per row, so a session opened in ANY tab clears here on the same
+  // tick (the module broadcasts; `useSessionUnseen` repaints). The focused
+  // session never badges — you are looking straight at it — and neither does
+  // one that is still running, because it is already flagged as running.
+  const derivedUnseen = useSessionUnseen(id, updated);
+  const unseen = unseenOverride ?? (!selected && !live && derivedUnseen);
 
   return (
     <SessionContextMenu sessionID={id}>
@@ -861,14 +920,7 @@ function SessionRow({
             />
           )}
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
-          {unseen && (
-            <Badge
-              title="Finished — not opened yet"
-              className="shrink-0 border-transparent bg-[var(--surface-warning-weak)] text-[var(--surface-warning-strong)]"
-            >
-              new
-            </Badge>
-          )}
+          {unseen && <SessionUnseenBadge updated={updated} />}
           {active && (
             <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">
               run
@@ -934,7 +986,10 @@ autoRegister({
       active={p.active as boolean}
       selected={p.selected as boolean}
       subagentsActive={p.subagentsActive as boolean}
-      unseen={p.unseen as boolean}
+      // Left undefined by our own call sites: the row derives unread state
+      // from `updated` so the list, the search panel and other tabs agree.
+      // An extension can still pass it to force the marker.
+      unseen={p.unseen as boolean | undefined}
       onSelect={p.onSelect as () => void}
     />
   ),
