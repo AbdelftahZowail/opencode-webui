@@ -81,3 +81,25 @@ server {
 
 If you must expose the port directly (LAN, no proxy), set `WEBUI_PASSWORD` —
 a passwordless wildcard bind is refused at startup.
+
+## Serve/security config (Settings › Security)
+
+`server/config.ts` owns `~/.config/opencode/webui/config.json` (0600): host,
+port, auth (`password` | `none`), passwordHash, allowedHosts, trustProxy,
+autostart, publicUrl. Precedence per key: explicit env > file > default, so
+existing env deployments are untouched. `opencode-webui config get|set|unset`
+and Settings › Security edit the same file; `resolveConfig()` returns per-key
+`source` provenance, and the UI locks env-pinned fields.
+
+- **Apply = restart**: Bun binds once and the auth digest is in memory, so a
+  change never hot-applies; the API returns `restartRequired` and the UI offers
+  "Restart now" (the same detached restart the CLI uses).
+- **Password optional**: `auth: "none"` is allowed because a user may front the
+  proxy with Tailscale/a private network. `analyzeExposure()` drives warnings;
+  a *reachable unauthenticated* change (wildcard/non-loopback + no password)
+  needs an explicit `confirm: true` (HTTP 409 otherwise). Env and CLI can still
+  do it deliberately.
+- **Never leak secrets**: the API returns `passwordSet: boolean` only; the file
+  holds a SHA-256 `passwordHash`; `WEBUI_PASSWORD` stays plaintext env and wins.
+- Proxy-owned routes: `GET/PUT /api/webui/settings` and
+  `POST /api/webui/settings/restart` (behind the normal auth gate).

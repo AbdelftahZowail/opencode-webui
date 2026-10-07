@@ -224,7 +224,7 @@ Removed outright, no aliases, no deprecation period:
   module is `advanced.store`], `events`, `settings`, `collections`, `bus`,
   `prefs`, `notify`, `services`, `dom` kit, `kv`) used identically by external
   extensions and our shipped ones. (The later roadmap program —
-  `docs/extension-roadmap.md` — widened this surface to `EXT_API_VERSION` 2;
+  `docs/plans/extensions.md` — widened this surface to `EXT_API_VERSION` 2;
   the activation context adds `poll`/`after`/`on`/`subscribe`/`settings`/
   `collections`/`bus`/`onDispose`.)
 - Repo folder `ui-extensions/` renamed to `webui-extensions/` (naming parity with the
@@ -299,7 +299,7 @@ guide lives. Reinstall/copy so both locations match.
 
 ### 12.4 Other docs
 
-- `docs/coverage.md` — new proxy endpoints (`/api/webui/ext/*`, manifest SSE), loader
+- `docs/reference/coverage.md` — new proxy endpoints (`/api/webui/ext/*`, manifest SSE), loader
   behavior; remove references to regions/config gating.
 - `src/extensions/registry.tsx` header comment — the v2 contract summary (kinds, ids,
   versioning) pointing at the authoring guide.

@@ -455,7 +455,7 @@ export interface State {
    * window aborts, and the flag self-clears on timeout.
    */
   interruptArmed: boolean;
-  // ---- TUI-parity surfaces (docs/parity-execution-plan.md §4) --------------
+  // ---- TUI-parity surfaces (docs/plans/parity.md §3.4) --------------------
   // Shared state for the parity units. The units are presentational; every
   // side effect lives in the actions at the bottom of this file (AGENTS rule 2).
   /** P2 — turn-scoped diff viewer state per session (see SessionDiffState). */

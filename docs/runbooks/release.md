@@ -2,8 +2,12 @@
 
 **Read this before every release; update it after every release.** Always
 cross-check against the actual repo state (`git log`, `package.json`, the
-`AGENTS.md` "Release checklist") before executing anything here — evidence from
+`AGENTS.md` Release pointer) before executing anything here — evidence from
 the repo beats this file.
+
+> Moved here from `.opencode/release-helper.md` when the docs tree was
+> reorganized; the doc paths in the dated **Entries** below refer to the layout
+> at the time of that release.
 
 - **Last released version:** `3.3.0` (tag `v3.3.0`)
 - **Version source of truth:** `package.json` `"version"` (the server reads it
@@ -83,7 +87,7 @@ From the repo root, on `master`, with a clean release scope:
   clean and safe; otherwise one detailed commit that enumerates everything is
   acceptable.
 - **Design docs CAN be committed when they carry no private data.** A roadmap /
-  proposal doc (e.g. `docs/extension-roadmap-2.md`) is fine to push once the
+  proposal doc (e.g. `docs/plans/extensions.md`) is fine to push once the
   owner confirms it has nothing private or machine-specific — it is the
   "what's next" map. This reversed the earlier "leave roadmap-2 untracked" rule
   at 3.3.0; decide per-doc, do not blanket-untrack.
@@ -119,8 +123,8 @@ From the repo root, on `master`, with a clean release scope:
   `TypeError: body is not an Object` inside `Service.ensure()` when a
   previously-spawned engine has died; retrying does not always clear it.
   Regenerating the snapshot is its own workstream, not a drive-by: it would
-  desync `src/api/types.ts` and every row of `docs/coverage.md`. Prefer the
-  narrow fix plus a dated scope note in `docs/coverage.md` (what 3.2.1+
+  desync `src/api/types.ts` and every row of `docs/reference/coverage.md`. Prefer the
+  narrow fix plus a dated scope note in `docs/reference/coverage.md` (what 3.2.1+
   `caaf5ad` did).
 - **Verify a gate actually fails before trusting it.** `check:unseen`'s
   stamp-throttle regression was written with a 1.2s gap and passed with the

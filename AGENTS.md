@@ -1,10 +1,13 @@
 # opencode-webui
 
-A web frontend for the OpenCode v2 engine. The engine is the **opencode
-background service** (a separate process); this project is only a client of
-its HTTP API. Deliberately dependency-free on the UI side: no plugin
-framework — just a clean React app that is easy to edit, with hot reload
-everywhere.
+A web frontend for the **OpenCode v2 engine**. The engine is a separate
+background service; this project is only a client of its HTTP API. The UI side
+is deliberately dependency-light (React + Vite, no plugin *framework* — but our
+own 4-stratum **extension system**, below). Hot reload everywhere.
+
+**Docs tree:** `docs/README.md` is the index. This file is the law and the
+router — architecture, the rules you must not break, and *where to look*. Deep
+explanation lives in `docs/`; see "Where to look" at the bottom.
 
 ## Architecture
 
@@ -15,36 +18,35 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 ```
 
 - **The browser never holds service credentials.** The proxy discovers the
-  service with `Service.ensure()` from `@opencode/client/service` and
-  attaches auth headers. Do not bypass the proxy.
-- **Dev**: `bun run dev` starts the dev proxy on its own port (default 4098,
-  `WEBUI_PROXY_PORT`) and Vite (5173, `WEBUI_VITE_PORT`) together; Vite proxies
-  `/api` to the dev proxy. The dev proxy deliberately avoids the configured
-  serve `port` (default 4097, owned by the production server + lifecycle
-  plugin) so `bun run dev` and `bun start` never collide — dev and prod can run
-  side by side and Tailscale points at Vite :5173 for dev, :4097 for prod. Vite
-  binds the config `host` and honors the config `allowedHosts`, so a
-  phone/Tailscale client reaches the dev UI on Vite's port — Settings ›
-  Security drives both servers. Sandbox always forces its Vite child back to
-  loopback. HMR applies to every UI edit instantly — no refresh, no restart,
-  and the opencode service is never restarted.
-- **Sandbox**: `bun run sandbox` (or `bunx opencode-webui sandbox` / the
-  binary's `sandbox` arg) starts a SECOND instance on `127.0.0.1:4099` —
-  loopback-only, passwordless (refused on a non-loopback bind), attaches to
-  the already-running engine, and loads extensions from an ISOLATED scratch
-  dir (`WEBUI_EXTENSION_DIR`, default
-  `~/.local/state/opencode-webui/sandbox-extensions/`). In a repo checkout it
-  also runs Vite (5175) with HMR — it replaced `bun run preview` as the one
-  second-instance mechanism. Iterate extensions there; "shipping" = copying
-  the folder into the real extension dir.
-- **Prod**: `bun run build && bun start`; the proxy serves `dist/` and the
-  API on port 4097.
+  service and attaches auth. Do not bypass the proxy.
+- **Dev**: `bun run dev` starts the dev proxy (4098, `WEBUI_PROXY_PORT`) + Vite
+  (5173, `WEBUI_VITE_PORT`); Vite proxies `/api` to the dev proxy. The dev proxy
+  avoids the configured serve `port` (4097, owned by the production server +
+  lifecycle plugin) so `bun run dev` and `bun start` never collide. Vite binds
+  the config `host` and honors `allowedHosts`; sandbox always forces its Vite
+  child back to loopback. HMR applies instantly — no refresh, no restart, and
+  the opencode service is never restarted.
+- **Sandbox**: `bun run sandbox` starts a SECOND instance on `127.0.0.1:4099` —
+  loopback-only, passwordless, attaches to the running engine, loads extensions
+  from an isolated scratch dir (`WEBUI_EXTENSION_DIR`). In a repo checkout it
+  also runs Vite (5175). Iterate extensions there; shipping = copying the folder
+  into the real extension dir.
+- **Prod**: `bun run build && bun start`; the proxy serves `dist/` + the API on
+  4097.
+
+Engine endpoint resolution is **discovery-first, single-flight, breakered**
+(`server/engineResolver.ts`) with a spawn-free **registration fallback**
+(`server/engineDiscovery.ts`) so a drifted engine degrades feature-by-feature
+instead of bricking the proxy. The API-sync scripts share that module. Explicit
+`WEBUI_ENGINE_URL` wins and skips discovery/ensure entirely.
 
 ## Where things live
 
 | Path | Purpose |
 | --- | --- |
-| `server/index.ts` | Bun proxy: service discovery (+ registration fallback on drifted engines), auth, `/api/*` passthrough, static serving, event recorder + browser SSE fan-out |
+| `server/index.ts` | Bun proxy: auth, `/api/*` passthrough, static serving, event recorder + browser SSE fan-out |
+| `server/engineResolver.ts` | Discovery-first, single-flight, breakered engine resolver |
+| `server/engineDiscovery.ts` | Spawn-free discovery + the registration fallback (shared by the proxy and the API-sync scripts) |
 | `server/shelf.ts` | Core file shelf: read-only, auth-gated, traversal-proof serving + listing (`/api/shelf/*`) |
 | `server/shelfEnginePlugin.ts` | Embedded engine payload installing the `shelf_share`/`shelf_list`/`shelf_remove` tools + system hint |
 | `src/api/types.ts` | All API schemas — copy from the service's `/openapi.json` (the contract) |
@@ -53,7 +55,7 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/lib/scheduler.ts` | The one fetch/tick scheduler — tiers (live/idle/hidden), registered pollers, no component-owned `setInterval` |
 | `src/store.ts` | Central state: sessions, messages, live streaming, permission/form queues, event reducer |
 | `src/components/` | UI: `Sidebar`, `Conversation`, `MessageItem`, `ToolCard`, `Composer`, `Pickers`, `RunsPanel`, `QueueStrip`, `PendingRequestsPanel`, `ui` (primitives) |
-| `src/components/markdown/` | Core markdown pipeline: single memoized ReactMarkdown mapping — `Table.tsx` (from-scratch table rendering), `PreviewBlock.tsx` (tilde-fence live previews html/svg/pdf/image), `ShelfChip.tsx` (`/api/shelf/file/…` link chips) |
+| `src/components/markdown/` | Core markdown pipeline: single memoized ReactMarkdown mapping — `Table.tsx`, `PreviewBlock.tsx` (tilde-fence live previews), `ShelfChip.tsx` |
 | `src/components/shelf/` | Shelf browse page + inline media preview components |
 | `src/extensions/registry.tsx` | The extension registry (v2 contract: kinds, target chains, collections, services, hooks — do not change lightly) |
 | `src/extensions/context.ts` | Activation lifecycle: `activate(ctx)` entry + disposal; the `ctx` surface (poll/after/on/subscribe/store/settings/collections/bus) |
@@ -68,110 +70,54 @@ browser ──/api──> Bun proxy server (server/index.ts) ──auth──> o
 | `src/lib/extensionApi.ts` | The ONE extension API surface (bridge): `window.__opencodeUI` / `getExtensionApi()` + `EXT_API_VERSION` |
 | `src/lib/runtimeExtensions.ts` | Browser loader client: manifest fetch + SSE push, bundle import, same-id swap |
 | `src/lib/modelCatalog.ts` | Shared prefetched model catalog (one fetch, subscribers, loading/error states) |
-| `src/lib/modelMemory.ts` | New-session model memory: pinned default, last-used, recents + resolution cascade (pin → last-used → engine default → first enabled) |
+| `src/lib/modelMemory.ts` | New-session model memory: pinned default, last-used, recents + resolution cascade |
 | `server/ext/` | Proxy-stratum loader + mount points (`routes`, `middleware`, `onEvent`, `pollers`, KV) |
 | `server/userExtensions.ts` | Browser-stratum folder discovery: one loader, three sources, manifest gating |
-| `server/setup.ts` | First-run setup: global `opencode-webui` command, managed engine-plugin install (lifecycle + shelf tools), launch handoff, pidfile; `update`/`stop`/`restart`/`uninstall` CLI |
-| `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source (embedded string) — starts the proxy when the engine loads |
-| `server/config.ts` | Serve/security config: `~/.config/opencode/webui/config.json`, env-override resolution, validation, exposure analysis; `config` CLI |
-| `src/components/settings/AccessSection.tsx` | Settings › Security — the UI for those settings (source badges, restart-to-apply). Settings has four tabs: Extensions, Plugins, Security, and App (phone-only) |
+| `server/setup.ts` | First-run setup: global command, managed engine plugins, launch handoff, pidfile; CLI (`update`/`stop`/`restart`/`uninstall`) |
+| `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source — starts the proxy when the engine loads |
+| `server/config.ts` | Serve/security config + `config` CLI |
+| `src/components/settings/AccessSection.tsx` | Settings › Security UI. Settings has four tabs: Extensions, Plugins, Security, App (phone-only) |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
-| `docs/reference/openapi.json` | Versioned OpenAPI snapshot — "last covered" contract (see `docs/coverage.md` + `scripts/diff-openapi.ts`) |
-| `docs/coverage.md` | Have / don't-have / why matrix — so intentional skips don't read as missing work |
-
-## How the chat UI works
-
-- History comes from `GET /api/session/{id}/message` (desc, reversed).
-- Live output comes from the SSE stream (`/api/event`). The store's
-  `handleEvent` reducer builds a "live assistant message" from
-  `session.text.*`, `session.reasoning.*`, `session.tool.*`,
-  `session.step.*` and `session.execution.*` events, keyed by
-  `assistantMessageID`. Tool input arrives as streaming JSON
-  (`session.tool.input.delta`) until `input.ended` parses it.
-- Permission requests arrive as `permission.asked` events and are answered
-  via `POST /api/session/{id}/permission/{requestID}/reply`
-  (`once` | `always` | `reject`).
-- **Pending requests** (`PendingRequestsPanel` + corner chip): permissions,
-  questions and forms share ONE FIFO queue in the store. The focused
-  session's head request REPLACES the composer slot (RunsPanel idiom, not a
-  dialog) until answered; requests from other sessions pop the amber corner
-  chip. Queues re-fetch on the poll cadence so a missed SSE event can never
-  leave an agent blocked. Mid-task questions arrive as `form.created`
-  events with `metadata.kind === "question"`; reply/reject route through
-  the form endpoints (multi-select answers as arrays, singles as strings).
-- Forms arrive via `/api/form/request` and are answered with
-  `POST /api/session/{id}/form/{formID}/reply`.
-- **Sending while busy**: prompts are fire-and-forget; the events drive
-  everything rendered. While the session is BUSY a send becomes a durable
-  engine inbox entry rendered by `QueueStrip` — ⚡ steer (next LLM-call
-  boundary, Enter) vs ⏳ queue (parked until turn end, Ctrl/Cmd+Enter).
-  Rows can be flipped, deleted, or sent now.
-- **Model pinning**: `resolveDefaultModel()` resolves a new session's model
-  through the model-memory cascade: a user **pin** → **last used** → the
-  engine's own default (`GET /api/model/default` — configured `model` when
-  available, else newest supported) → the first enabled catalog model. New
-  sessions are created WITH that model (`POST /session`); legacy unpinned
-  sessions get pinned on first send (`ensureSessionModel`). A committed send
-  records the model as last-used/recents, and the pickers expose the pin footer
-  + a Recent section (`Pickers.tsx`, `src/lib/modelMemory.ts`). The pickers read
-  the authoritative `GET /api/session/{id}` from the `sessionDetails` slice.
-- **Esc** interrupts the active run site-wide in TWO steps
-  (`requestInterrupt`): first press arms (yellow hint, self-reverts after
-  2.5s), second press aborts. Esc yields to the focused composer and to
-  open overlays.
-- **Composer drafts** (`src/lib/drafts.ts`): unsent input is silently saved
-  per session (localStorage) and restored when the session returns.
-- **Split view** (`panes` in the store): the routed main surface plus up to
-  3 pinned sessions, each a fully interactive Conversation+Composer.
-  Exactly ONE pane is focused and owns the global single-session machinery;
-  focusing a pane repoints `currentSessionID` without touching
-  history/drafts. Open via `ctrl+\` (`SplitPicker`); layout persists in
-  localStorage. Subagents are excluded from the agent picker and
-  SplitPicker.
-- **Session navigation**: session rows are native `/session/{id}` anchors
-  (in-place `pushState` switches, `popstate` back/forward, modified clicks
-  stay native). The New session route creates a session and replaces
-  itself with the new session's canonical URL; new sessions inherit the
-  open session's workspace (`startDraftSession`).
-- **Sidebar**: workspaces grouped by directory, three newest sessions
-  shown, collapsible per header; sidebar collapses to a 56px rail and
-  resizes 240–480px. Subagent sessions (parentID set) are managed inside
-  their parent conversation (SubagentStrip).
+| `docs/` | The docs tree — index in `docs/README.md` |
 
 ## Rules for editing
 
-1. **Never change the contract layer without the OpenAPI doc.** Before
-   touching `src/api/types.ts` or `client.ts`, diff against the running
-   service: `bun run scripts/fetch-openapi.ts` writes the live spec to
-   `docs/reference/openapi.json`. Check drift with
-   `bun run scripts/diff-openapi.ts` and update `docs/coverage.md`.
+1. **Never change the contract layer without the OpenAPI doc.** Before touching
+   `src/api/types.ts` or `client.ts`, diff against the running service with
+   `bun run scripts/diff-openapi.ts`; refresh with `bun run scripts/fetch-openapi.ts`
+   (writes `docs/reference/openapi.json`). The full procedure is
+   **`docs/runbooks/engine-update.md`**, and the route map is
+   `docs/reference/coverage.md`.
 2. **Keep the store as the only place state lives.** Components read via
-   `useStore((s) => ...)` and call actions; they never fetch directly
-   except for one-shot catalog data (`models`, `agents`, `commands`,
-   `skills`).
-3. **Hot reload contract**: editing any file under `src/` applies
-   immediately via Vite HMR. Full-page reloads are coalesced by
-   `coalesceFullReload()` in `vite.config.ts` (~1s of filesystem quiet);
-   root-level non-module files (`.md`, `docs/**`) aren't watched. Component
-   files must export COMPONENTS ONLY — any runtime non-component export
-   disables React Fast Refresh for the whole file. Editing `server/index.ts`
-   restarts the proxy automatically (`bun run --watch`), which drops the
-   SSE stream; it reconnects by itself. Never restart the opencode service
-   for UI work.
+   `useStore((s) => ...)` and call actions; they never fetch directly except for
+   one-shot catalog data (`models`, `agents`, `commands`, `skills`). Recurring
+   work goes through `src/lib/scheduler.ts` — no component-owned `setInterval`.
+3. **Hot reload contract**: editing any file under `src/` applies immediately via
+   Vite HMR. Full-page reloads are coalesced by `coalesceFullReload()` in
+   `vite.config.ts` (~1s of filesystem quiet); root-level non-module files
+   (`.md`, `docs/**`) aren't watched. Component files must export COMPONENTS ONLY
+   — any runtime non-component export disables React Fast Refresh for the whole
+   file. Editing `server/index.ts` restarts the proxy automatically
+   (`bun run --watch`), which drops the SSE stream; it reconnects by itself.
+   **Never restart the opencode service for UI work.**
 4. **Styling** is Tailwind v4 utility classes, dark-first, consuming design
    tokens from `src/styles.css` as `var(--...)` — never hardcode hex. New
    components should not introduce new CSS.
-5. **Keep it dependency-light.** React, react-markdown, shadcn/ui
-   (vendored), Radix (vendored), lucide-react, and the Tailwind stack are
-   the intended surface. Approved exceptions: `@shadcn/react` (headless
-   MessageScroller) and `@xterm/xterm` + addon-fit (PTY terminal
-   emulator). A new dependency needs justification.
+5. **Keep it dependency-light.** React, react-markdown, shadcn/ui (vendored),
+   Radix (vendored), lucide-react, and the Tailwind stack are the intended
+   surface. Approved exceptions: `@shadcn/react` (headless MessageScroller) and
+   `@xterm/xterm` + addon-fit (PTY terminal emulator). A new dependency needs
+   justification.
+6. **Adding a component or target?** Follow **`docs/runbooks/add-ui-surface.md`** —
+   every new component self-registers and renders through its `<Target>`.
+7. **Touching the extension system?** Follow **`docs/runbooks/add-extension.md`** —
+   ids are contract, and the docs + version bump + skill move in the same commit.
 
 ## Extensions (one folder, four strata — read this before adding UI features)
 
 One extension = **one folder** in one format, loaded by one loader, gated by
 one rule. A folder may provide code in up to four *strata*
-(full contract: `docs/extension-system-spec.md` §4; authoring guide:
+(full contract: `docs/reference/extension-system-spec.md` §4; authoring guide:
 `webui-extensions/README.md`; agent skill: `skills/webui/SKILL.md`):
 
 ```
@@ -188,7 +134,7 @@ my-extension/
 | Browser (registry) | the page | React tree, store, api calls, logic modules | wrap / replace / contribute / hook / service |
 | DOM | the page, post-render | any node incl. portals, canvas, iframes | `dom.ts` + the DOM kit (`src/lib/domKit.ts`) |
 | Proxy | the proxy process | fs, spawn, engine creds, always-on event stream, all clients | `server.ts` + mount points (`server/ext/`) |
-| Engine | the engine process | tools the model calls, system prompt | opencode plugin rules (out of scope — we carry the payload, see `docs/engine-payload-convention.md`) |
+| Engine | the engine process | tools the model calls, system prompt | opencode plugin rules (out of scope — see `docs/reference/engine-payload-convention.md`) |
 
 **Gating — one state, owned by the folder itself:** presence = installed;
 manifest `disabled: true` = paused; delete/move the folder to uninstall. No
@@ -226,9 +172,7 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - **Hot reload**: external browser bundles rebuild on edit, bump `?v=`, push
   the manifest over SSE, and the page same-id-swaps with a live repaint
   (sub-second, no refresh). The fingerprint is **folder-wide** — the max mtime
-  across the extension's source files, not the entry file's alone, because an
-  entry imports its siblings and editing a sibling module must invalidate the
-  bundle built from `index.tsx`. Repo dev uses Vite HMR. Proxy `server.ts`
+  across the extension's source files. Repo dev uses Vite HMR. Proxy `server.ts`
   modules reload with no proxy restart.
 
 > **How to change the webui without breaking extensibility**
@@ -256,7 +200,7 @@ trust (same model as host plugins) — no sandboxing of extension code.
 > 8. **Stable markup anchors.** Meaningful markup boundaries carry `data-oc-*`
 >    attributes; restyles must not remove them without a contract bump.
 > 9. **Docs move with the code.** Every contract-relevant change updates the authoring
->    guide, this rule set, and the skill in the same commit. Code that outruns its docs
+>    guide, the spec, and the skill in the same commit. Code that outruns its docs
 >    is a bug.
 > 10. **The engine is out of scope.** We carry engine payloads and adapt client-side;
 >     we do not reach into engine internals from the webui.
@@ -267,209 +211,40 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - `bun run sandbox` — isolated second instance: loopback-only, passwordless,
   scratch extension dir; dev mode adds Vite on 5175. Replaced `bun run preview`.
 - `bun run typecheck` — `tsc --noEmit`
+- `bun run build && bun start` — production build, served on 4097
 - `bun run check:setup` — global-wrapper + lifecycle-plugin + CLI contract, and a
-  real plugin `setup()` spawn, in an isolated HOME/XDG tree (never touches the
-  real command, plugin dir, or state)
+  real plugin `setup()` spawn, in an isolated HOME/XDG tree
 - `bun run check:config` — serve/security config: resolution precedence,
   validation, password hashing/redaction, exposure, and the `config` CLI
-  (isolated XDG_CONFIG_HOME)
-- `bun run build && bun start` — production build, served on 4097
-- `scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
-  event-capture, catch-up proof, extension contract check).
+- `bun run check:engine-guard` — the engine resolver's guards (spawn-free)
+- `bun run check:swap` — is the engine's durable per-session log ready to replace
+  the proxy recorder?
+- `bun run check:unseen` / `check:unseen:dom` — the unseen/settle-slop checks
+- `bun run scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
+  event-capture, catch-up proof, extension contract check)
 - `bun run scripts/uitest/ext-battery-browser.ts` (+ `-dom`, `-proxy`,
   `-acceptance`) — the extension-system E2E battery, 76 checks total; the
-  release gate for anything touching extensions (see Release checklist).
+  release gate for anything touching extensions
 
-## Release checklist (push + publish — do every step, in order)
+## Release
 
-Version flows from ONE source: `package.json` (`server` reads it at boot
-for `/api/webui/status|config`, `gen:skill` pins the skill to it). Bumping
-means editing that one line, then:
+The release runbook is **`docs/runbooks/release.md`** (push + publish, every step
+in order, plus the hard-won gotchas). Follow it exactly — never publish without
+the tag.
 
-1. **Bump** `package.json` version (semver; breaking contract change → major).
-2. **Regen** `bun run scripts/gen-skill.ts` — the skill embeds the version +
-   `v{version}` tag links; verify the new version appears in
-   `skills/webui/SKILL.md`.
-3. **Gate** — all green, no exceptions:
-   - `bun run typecheck`
-   - `bun run build`
-   - all four battery files (`ext-battery-browser|dom|proxy|acceptance`)
-4. **Commit** with a message describing the contract impact (what breaks,
-   what the migration is); keep extension-system + unrelated work in
-   separate commits.
-5. **Tag** `v{version}` on the release commit (`git tag v2.0.0`).
-6. **Push** commit + tag (`git push origin master --tags`). Pushing the tag
-   is what makes the skill's pinned `v{version}` raw links resolve.
-7. **Publish** `npm publish` (runs `prepublishOnly`: typecheck + gen:skill
-   + build). Requires `npm whoami` authed.
-8. **Verify** the tag page + npm version + skill links resolve; never publish
-   without the tag (skill links would 404).
+## Where to look (router — read before you act)
 
-## Live streaming (robustness model)
-
-The service emits one assistant message per step and often no
-`session.execution.*` events, so the store treats step events as the run
-lifecycle and keeps an ordered live projection:
-
-- **Proxy-side event recorder** (`server/index.ts`): the proxy keeps one
-  always-on service-side subscription and a bounded per-session ring
-  buffer. The engine serves no mid-stream text over REST and does not
-  replay a fresh `/api/event` subscription — a browser that attaches,
-  reloads or reconnects mid-run pulls the gap from
-  `GET /api/webui/replay?sessionID=X` (`fetchReplay`, on session adopt +
-  SSE reconnect) and feeds it through the normal event path, with id-based
-  dedupe and overlap-safe delta appends. `bun run check:swap` tracks
-  whether the engine's durable per-session log can replace the recorder.
-  Browsers never open their own engine `/api/event` passthrough: every tab
-  attaches to the recorder's single engine subscription (N tabs → 1 engine
-  subscriber), served with 15s comment heartbeats; when the recorder
-  reconnects, attached clients are released so each reconnects and pulls
-  replay (id-deduped) for the gap.
-- **`store.queued`**: set optimistically on send and
-  `session.inbox.enqueued`; cleared on the first live event. Covers the
-  provider cold-start gap and messages queued behind an active run.
-- **Ordered live parts**: each live assistant keeps text/reasoning parts by
-  event ordinal and tools by call ID, in event order.
-- **Frame-batched events**: SSE events are reduced in 16ms batches so a
-  token burst produces one React update.
-- **SSE watchdog** (`events.ts`): no bytes for 20s → reconnect; byte-age
-  (`sseStale()`) feeds the scheduler's tier decision. Proxy sockets set
-  `idleTimeout: 0` in `Bun.serve` — liveness is owned by heartbeats
-  (~15s), the browser fuse, and `req.signal` aborts.
-- **Fetch scheduler** (`src/lib/scheduler.ts`): the ONLY owner of recurring
-  timers. One 1s loop picks a tier — LIVE ~2s, IDLE ~12s, HIDDEN ~60s —
-  and runs registered pollers with jitter and in-flight guards.
-  Components never own `setInterval`.
-- **Poll fallback** (`store.pollOnce`): on the LIVE tier, WATCHED sessions'
-  messages (mounted panes + focused session) are fetched and reconciled;
-  background sessions rebuild on adopt (`loadMessages` + `fetchReplay`) so a
-  tab never polls another tab's work; optimistic
-  `msg_local_` copies are dropped once the real message exists; sessions
-  whose fetches keep failing are retired so a deleted session can't 404
-  forever.
-- **`session.wait` long-poll** (`ensureSessionWait`): one loop per running
-  session THIS tab shows (`isWatched`); 204 with a still-set running flag means the terminal event was
-  missed (dead SSE) — clear the flag, settle history.
-- **`settleLiveMessages` / `adoptPendingAssistant`**: on run end, reload
-  history (retry once if not yet persisted); `step.started` re-keys the
-  "pending" placeholder to the real assistant id.
-
-## Rendering (live vs history)
-
-- `Conversation` renders all live assistants in ONE growing block, ALWAYS
-  below the entire persisted transcript.
-- **Ghost live GC**: a live assistant that never persisted and whose
-  session is idle is retired after ~30s.
-- Consecutive assistant messages render compact (header only on the first
-  of a group); empty text parts are skipped.
-- **`liveToolPart`** builds the exact `ToolPart`/`ToolState` shape so
-  `ToolCard` never crashes on a missing state.
-- **Staged-revert view**: with `session.revert.messageID` set, the
-  transcript is cut at that message (`applyRevertView`); `/redo` steps
-  forward or clears.
-
-## Tool cards (v2 TUI style)
-
-Tools render as ONE inline row (icon + label, muted when done, spinner
-while running, red + expandable on failure). Rich results get a titled
-block: `edit` shows per-file diffs via DiffView, `write` shows the file
-with line numbers, `shell` shows command + output (collapsed past 10
-lines), `subagent` links to the child session, `execute` lists its tool
-calls. With tool details OFF, completed tools hide entirely (TUI parity).
-Extension renderers win via `getToolRenderer`.
-
-## Arrow keys & prompt history (v2 TUI bindings)
-
-- Composer focused: ↑/↓ walk prompt history only from buffer start/end
-  (`src/lib/promptHistory.ts`); ↓ at the end (or on empty input) opens the
-  RunsPanel. Left/right always move the caret.
-- Composer unfocused: ↑ parent session, ←/→ cycle subagent siblings (wrap),
-  ↓ opens the RunsPanel.
-- **RunsPanel** (`src/components/RunsPanel.tsx`): the bottom
-  subagents/shells strip that REPLACES the composer while open
-  (`store.runsPanelOpen`; not a modal). Tabs switch Subagents ↔ Shell,
-  ↓/↑ move the selection, Enter opens, ↑ at the top or Esc closes and
-  returns focus to the composer.
-- **Subagent pages open read-only** (`store.subagentComposerOpen`): the
-  composer is replaced by a sibling-chip strip; Enter reveals the composer,
-  Backspace (empty buffer) returns to the parent.
-- **Type-anywhere → composer** (`src/lib/composerHandoff.ts`): a printable
-  key pressed on a non-editable surface focuses the composer and lands the
-  character. Skipped while overlays are up and for ctrl/meta/alt combos.
-- Modifier-free combos never fire while typing (`useHotkeys` skips
-  editable targets). The tab title mirrors the open session with a `●`
-  prefix while it runs.
-
-## First-run setup (command + lifecycle plugin)
-
-`server/setup.ts` makes the webui self-install once, so users don't pay for
-`bunx` on every start and the webui comes up with OpenCode. `server/index.ts`
-calls `ensureSetup()` after the port binds:
-
-- **Global command**: a `~/.local/bin/opencode-webui` wrapper (overridable via
-  `WEBUI_BIN_DIR`, falling back to `~/.bun/bin`) that execs the installed entry
-  with bun directly — no bunx resolution, no network. Re-rendered when the
-  resolved argv changes, so an upgrade self-heals. A bunx entry lives in a temp
-  dir the OS wipes, so it is mirrored first into `<state>/entry/<version>/`
-  (hardlinks — no disk, no network) and the wrapper + `launch.json` point at the
-  mirror; that is what keeps `bunx opencode-webui` and the lifecycle plugin
-  working across reboots.
-- **Managed engine plugins (two)**: first-run setup writes BOTH built-in engine
-  plugins, each in its own marker-gated directory under
-  `<config>/opencode/plugins/`, which the engine auto-discovers globally:
-  - `opencode-webui/` — the lifecycle plugin (`server/lifecyclePlugin.ts`,
-    embedded CommonJS `{ id, setup }`). Activation is LAZY on the engine's side
-    (verified with `check:setup:engine`): the first `/api/plugin` read — i.e.
-    first use — loads the location's plugins, and `setup()` then starts the
-    proxy detached (fire-and-forget) if the port isn't already answering.
-  - `opencode-webui-shelf/` — the shelf tools plugin
-    (`server/shelfEnginePlugin.ts`): the `shelf_share` / `shelf_list` /
-    `shelf_remove` tools + the shelf system hint.
-  This is the documented exception to "the webui never installs engine plugins"
-  (see `docs/engine-payload-convention.md` §2).
-- **Handoff**: each boot writes `launch.json` in the state dir (argv + port +
-  version) — the stable thing the plugin and `restart` read; plus `webui.pid`
-  so `stop`/`restart`/`update` can find the server (verified pid before signal).
-- **One gate, user-owned**: `uninstall` removes the wrapper + BOTH managed plugin
-  dirs + handoff and writes a declined marker so the next boot won't resurrect
-  it; `opencode-webui setup` re-enables. `WEBUI_NO_SETUP=1` skips a run,
-  `WEBUI_NO_PLUGIN=1` installs the command but neither plugin, `WEBUI_SETUP=1`
-  forces a dev checkout. Sandbox never installs.
-- **Foreign files are never clobbered**: the wrapper and each plugin dir are only
-  overwritten when they carry our marker.
-- **Update**: `opencode-webui update` runs `bun x opencode-webui@latest
-  internal:setup` (which installs the NEW version's artifacts), then stops and
-  respawns the server. Compiled binaries print the releases URL instead.
-- The engine is ensured **eagerly** at boot with a 6s bound (a cold spawn can't
-  hold the banner); a manual run on an occupied port probes `/login` for the
-  webui fingerprint and exits 0 instead of dying on EADDRINUSE.
-
-## Serve/security config (Settings › Security)
-
-`server/config.ts` owns `~/.config/opencode/webui/config.json` (0600): host,
-port, auth (`password` | `none`), passwordHash, allowedHosts, trustProxy,
-autostart, publicUrl. Precedence per key: explicit env > file > default, so
-existing env deployments are untouched. `opencode-webui config get|set|unset`
-and Settings › Security edit the same file; `resolveConfig()` returns per-key
-`source` provenance, and the UI locks env-pinned fields.
-
-- **Apply = restart**: Bun binds once and the auth digest is in memory, so a
-  change never hot-applies; the API returns `restartRequired` and the UI offers
-  "Restart now" (the same detached restart the CLI uses).
-- **Password optional**: `auth: "none"` is allowed because a user may front the
-  proxy with Tailscale/a private network. `analyzeExposure()` drives warnings;
-  a *reachable unauthenticated* change (wildcard/non-loopback + no password)
-  needs an explicit `confirm: true` (HTTP 409 otherwise). Env and CLI can still
-  do it deliberately.
-- **Never leak secrets**: the API returns `passwordSet: boolean` only; the file
-  holds a SHA-256 `passwordHash`; `WEBUI_PASSWORD` stays plaintext env and wins.
-- Proxy-owned routes: `GET/PUT /api/webui/settings` and
-  `POST /api/webui/settings/restart` (behind the normal auth gate).
-
-## Debug logging
-
-The frontend logs (`[boot] [sse] [evt] [run] [session] [send] [poll]`)
-POST to the proxy's `/api/debug` sink, which appends to `$WEBUI_DEBUG_LOG`
-(default `/tmp/webui-debug.log`). Server/proxy logs go to stdout when
-`WEBUI_DEBUG=1`. Console mirror: set `localStorage.webui.debug = "1"` and
-reload.
+| If you are about to… | Read first |
+| --- | --- |
+| change the API contract, or the engine/API moved | `docs/runbooks/engine-update.md` |
+| add or change a component / target / slot | `docs/runbooks/add-ui-surface.md` |
+| touch the extension system (kind/id/service/hook/slot) | `docs/runbooks/add-extension.md` + `docs/reference/extension-system-spec.md` |
+| plan or implement parity work | `docs/plans/parity.md` |
+| work on extension seams | `docs/plans/extensions.md` |
+| check a route's status (have / client-only / gap) | `docs/reference/coverage.md` |
+| understand the chat UI / streaming / rendering | `docs/reference/frontend.md` |
+| work on first-run setup / the managed plugins | `docs/reference/setup.md` |
+| deploy, reverse-proxy, auth/env, serve config | `docs/operations.md` |
+| ask "did we decide to skip X, or defer it?" | `docs/when.md` |
+| cut a release | `docs/runbooks/release.md` |
+| orient in the docs at all | `docs/README.md` |

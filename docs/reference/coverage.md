@@ -1,10 +1,14 @@
 # API coverage — have / don't have / why
 
-Source of truth for the HTTP contract: `docs/reference/openapi.json`
-(snapshot of the running service's `/openapi.json`, 123 paths as of this doc).
-Refresh: `bun run scripts/fetch-openapi.ts` (via `Service.ensure()` like the proxy).
+Source of truth for the HTTP contract: `reference/openapi.json`
+(snapshot of the running service's `/openapi.json`, 123 paths — **stale**, see the
+2026-10-07 scope note below). Refresh: `bun run scripts/fetch-openapi.ts`.
 Diff against live: `bun run scripts/diff-openapi.ts` (also `--json`, `--check` for CI).
-Raw diff: `git diff docs/reference/openapi.json`.
+The scripts resolve the engine through `server/engineDiscovery.ts` (spawn-free
+discovery + the registration fallback), so they work against a drifted engine.
+Raw diff: `git diff reference/openapi.json`.
+
+The re-sync procedure is `docs/runbooks/engine-update.md`.
 
 `src/api/client.ts` holds one typed function per resource group (plus its own
 wire-shape interfaces); `src/api/types.ts` holds the session/message/permission
@@ -27,7 +31,7 @@ so new routes work without a proxy change. Keep the store as sole state
 > surface, which exists for the **v1** TUI. `server/index.ts` forwarding only
 > `/api/*` is therefore correct, no proxy bridge is wanted, and the legacy-only
 > features the v1 TUI had (todos, LSP/formatter status, session share, console
-> orgs) are **not** v2 capabilities. See `docs/tui-parity-roadmap.md`.
+> orgs) are **not** v2 capabilities. See `docs/plans/parity.md`.
 >
 > **Scope note (2026-10-07) — the snapshot is stale, do not trust it alone.**
 > The live engine has moved a block of routes under `/api/experimental/` and
@@ -69,9 +73,8 @@ so new routes work without a proxy change. Keep the store as sole state
 > **This doc is a route map, not a backlog.** Its "genuine gap" and "client-only"
 > rows record *why* a route has no UI — they are an inventory, not a to-do list.
 > The remaining work for full v2-TUI port parity (feature-level, not route-level)
-> lives in **`docs/parity-port-plan.md`**, which is the document to hand a fresh
-> agent. What shipped in the P0–P7 program is verified in
-> `docs/parity-verification.md`.
+> lives in **`docs/plans/parity.md`**, which is the document to hand a fresh
+> agent.
 
 ## Have — wired in the webapp
 
@@ -82,13 +85,13 @@ so new routes work without a proxy change. Keep the store as sole state
 | prompt/command/skill/synthetic/shell | `POST /api/session/{id}/prompt`, `POST command`, `POST skill`, `POST synthetic`, `POST shell`, `POST generate` (session-scoped), `GET context`, `GET/PUT/DELETE instructions/entries`, `GET message`, `GET message/{id}` | `prompt`, `promptWithFiles`, `runCommand`, `activateSkill`, `sessionShell`, `sessionGenerate`, `messages`, `inbox*` | Composer, slash menu, `@` file refs, `!` bash, skill picker, shell panel |
 | events (SSE) | `GET /api/event` | `src/api/events.ts` | `store.handleEvent` live streaming (queued→running→ordered parts, poll fallback) |
 | permissions/forms/questions | `GET /api/permission/request`, `GET/DELETE /api/permission/saved[/{id}]`, `GET/POST /api/session/{id}/permission*`, `GET /api/form/request`, `GET/POST /api/session/{id}/form*`, legacy `question` routes | `pendingPermissions`, `replyPermission`, `permissionSavedList/Delete`, `pendingForms`, `sessionForms` (per-session backfill), `formState/replyForm/cancelForm`, `question*` | `PendingRequestsPanel` (composer-slot FIFO panel per focused session + corner chip for others), queue in store. Ground truth (2026-08-26, `scripts/uitest/probe-*.ts`): GLOBAL form listing can omit a pending question-form indefinitely under load — mounted sessions are polled per-session and unioned by id; `GET .../form/{id}` carries the form's own `state` (the old `.../state` route is gone), and a 404 is only trusted after a 60s newborn grace; question multiplicity = field type (`multiselect` ⇒ array answers, `string` ⇒ one string); no native question REST routes on this engine (events only). Permission listing semantics unverified live (deployment auto-allows) — refresh unions by id. **Removal is now evidence-backed as well as event-driven:** a permission missing from the (location-scoped, laggy) global listing is treated as a *claim* and confirmed against `api.sessionPermissions(sessionID)` before it is dropped. Without that, any request settled without this tab seeing `permission.replied` — another client answered it, a plugin settled it over HTTP, or the tab was asleep — stayed in the queue forever, which is what made the cross-session chip un-clearable. A verification FAILURE keeps the request pending on purpose: a chip that lags is recoverable, a chip that hides a blocked agent is not. `SessionInfo.permissions` now typed (the engine already returned it). **P4 UI:** session menu → "Permission rules…" edits the session ruleset (target `permission.rulesEditor`) and lists the project's saved ("always allow") rules with per-row removal (`permissionSavedList/Delete`) |
-| inbox/steering | `GET /api/session/{id}/inbox`, `DELETE inbox/{id}`, `POST steer/queue` | `inboxList/Queue/Steer/Delete`, `inboxPrompt`, `prompt/promptWithFiles` (optional `delivery`) | Explicit STEER vs QUEUE system: busy sends become tracked inbox rows in `QueueStrip` (toggle/send-now/cancel), reconciled by `session.inbox.*` events + poll; queue-drain failsafe on turn end. **`InboxPanel.tsx` is dead code** — it is defined but never imported/mounted (the live surface is `QueueStrip`); tracked as `docs/parity-port-plan.md` R0.5 |
+| inbox/steering | `GET /api/session/{id}/inbox`, `DELETE inbox/{id}`, `POST steer/queue` | `inboxList/Queue/Steer/Delete`, `inboxPrompt`, `prompt/promptWithFiles` (optional `delivery`) | Explicit STEER vs QUEUE system: busy sends become tracked inbox rows in `QueueStrip` (toggle/send-now/cancel), reconciled by `session.inbox.*` events + poll; queue-drain failsafe on turn end. **`InboxPanel.tsx` is dead code** — it is defined but never imported/mounted (the live surface is `QueueStrip`); tracked as `docs/plans/parity.md` R0.5 |
 | revert | `POST revert/stage`, `POST revert/clear`, `POST revert/commit` | `revertStage/Clear/Commit` | `/undo` `/redo`, `applyRevertView` cut of transcript |
 | agent/model/command/skill catalog | `GET /api/agent`, `GET /api/agent/{id}`, `GET /api/model`, `GET /api/model/default`, `GET /api/command`, `GET /api/skill` | `agents`, `models`, `modelDefault`, `commands`, `skills` | Pickers (`Pickers.tsx`), command palette, skill picker, variants; `resolveDefaultModel` runs the model-memory cascade (pin → last used → `modelDefault` → first enabled), so new sessions match the engine/TUI default unless the user has pinned/last-used a model |
 | provider/integration/credential | `GET /api/provider`, `GET /api/provider/{id}`, `GET /api/integration`, `POST connect/key|oauth|command`, `PATCH/DELETE/POST-activate /api/credential/{id}` | `providerList/Get`, `integration*`, `credentialPatch/Delete/Activate` | `ConnectDialog` (`/connect`, via `/connect` or the palette): integrations catalog, API-key/OAuth/CLI-command connect, stored credentials + **activate / relabel / remove** (P4). **Not a Settings tab** — Settings is Extensions / Plugins / Security / App(phone) |
 | mcp | `GET/PUT/DELETE /api/mcp*`, `POST connect/disconnect`, `GET resource` | `mcpList/Put/Delete/Connect/Disconnect/Resource` — every wrapper **accepts** `location` (the deployment is single-project, so the indicator deliberately uses the ambient scope) | `McpIndicator` header popover: per-server status, connect/disconnect, **add** (local command / remote url) and **remove** with a two-step confirm (P4). Deliberately ADD-only — there is no single-server read route, so an "edit" would silently clobber the existing config (PUT replaces). `mcpResource` stays client-only. **Wave 0 fix:** `mcpPut` sent **PATCH** where the route is **PUT** (and the wrappers now thread `location`), both corrected against the snapshot |
 | filesystem/location/project | `GET /api/fs/read/*`, `GET /api/fs/list`, `GET /api/fs/find`, `GET /api/location`, `GET /api/project`, `GET /api/project/current`, `PATCH /api/project/{id}` | `fsRead/ReadBytes/List/Find`, `location`, `project*`, `projectUpdate` | FileExplorer, workspace picker, path chips (`projectUpdate` is client-only) |
-| vcs | `GET /api/vcs`, `GET /api/vcs/status`, `GET /api/vcs/diff` (+ `base` param), `GET /api/vcs/branches`, `GET /api/vcs/base` | `vcsStatus/Diff/Base`, `vcsQuery` helper | FileExplorer diff (infers the review base via `vcsBase` and passes its `ref` to `vcsDiff`, so ambiguous Git history doesn't need an explicit base), VCS status badge, the turn-diff viewer's working/branch sources. `vcsBranches` is wrapped but unused (v2's diff viewer has a base-branch picker), and **`Vcs.Mode` also allows `committed` (merge-base → HEAD) while our `VcsMode` type omits it** — both are `docs/parity-port-plan.md` **R7** |
+| vcs | `GET /api/vcs`, `GET /api/vcs/status`, `GET /api/vcs/diff` (+ `base` param), `GET /api/vcs/branches`, `GET /api/vcs/base` | `vcsStatus/Diff/Base`, `vcsQuery` helper | FileExplorer diff (infers the review base via `vcsBase` and passes its `ref` to `vcsDiff`, so ambiguous Git history doesn't need an explicit base), VCS status badge, the turn-diff viewer's working/branch sources. `vcsBranches` is wrapped but unused (v2's diff viewer has a base-branch picker), and **`Vcs.Mode` also allows `committed` (merge-base → HEAD) while our `VcsMode` type omits it** — both are `docs/plans/parity.md` **R7** |
 | pty/shell | `GET/POST /api/pty`, `GET/PUT/DELETE /api/pty/{id}`, `POST connect-token`, `GET connect`, `GET/POST /api/shell*` | `pty*`, `shell*` | Shell panel, `TerminalView.tsx` (xterm) via websocket proxy |
 | permissions (session rules) | `PUT /api/session/{id}/permission/rules`, `permissions` on `POST /api/session` | `sessionPermissionRules`, `createSession({permissions})` | **DONE (P4).** Session menu → "Permission rules…" opens an order-aware editor (add/remove/reorder, all three effects, `*` globs). The engine evaluates session rules AFTER the agent's and the LAST match wins, which the editor states and makes legible; save is one PUT (replace semantics) followed by a session re-read |
 | session diff (turn-scoped) | `GET /api/session/{id}/diff?from&to&context` | `sessionDiff` | **DONE (P2).** `DiffViewer` (FileExplorer → "Review", target `diff.viewer`): three sources — last turn / working tree / branch base — with a changed-file tree, per-file (n/p) and per-hunk (j/k) navigation, split vs unified, and local-only review markers. Distinct from `vcs` diff: this is "what did ONE TURN change". A turn runs idle marker to idle marker, so steered prompts fold into one turn — verified live on this session. `context` is requested (12) because the engine's default is a full-file patch (192 KB for a 4.5k-line file) |
@@ -102,7 +105,7 @@ so new routes work without a proxy change. Keep the store as sole state
 
 These routes are served by the proxy itself (`server/index.ts`, `server/ext/`,
 `server/userExtensions.ts`) for the extension system
-(`docs/extension-system-spec.md` §6/`§8`, authoring guide
+(`docs/reference/extension-system-spec.md` §6/`§8`, authoring guide
 `webui-extensions/README.md`). They never appear in `docs/reference/openapi.json`
 and are intentionally excluded from `scripts/diff-openapi.ts`.
 
@@ -144,8 +147,8 @@ malformed schema shapes surface as visible diagnostics
 | `GET /api/experimental/migration/v1` | `v2.experimental.migration.v1.status` | proxied only | V1 migration status. |
 | `POST /api/experimental/integration/wellknown` | `v2.experimental.integration.wellknown.add` | integration well-known | Experimental integration discovery. |
 | `POST /api/session/{id}/view` | `v2.session.view {idle}` | (add on next client pass) | Marks viewer's idle transition as viewed — spike-verified accepted (204) but with no observable effect on this build, and the §4.4 active-map lag it would address did NOT reproduce (session left `/session/active` within one poll of `wait` resolving). Wire if we add viewed/idle badges or the lag returns. |
-| `GET /api/session/stats` | `v2.session.stats ?from&to&project&timezone&tools` | (add on next client pass) | Aggregate activity/usage/tool reliability. **Now a parity target**: v2's `/stats` route renders it (YTD tokens, activity calendar, streaks) — see `docs/parity-port-plan.md` **R6**. |
-| `POST /api/workspace`, `DELETE /api/workspace/{id}` | `v2.workspace.create/destroy` | (add on next client pass) | Logical workspace lifecycle (idempotent create/destroy `{id?, provider}`) — we use `project` today; v2's worktree/workspace dialogs are the parity reference (`docs/parity-port-plan.md` R11). |
+| `GET /api/session/stats` | `v2.session.stats ?from&to&project&timezone&tools` | (add on next client pass) | Aggregate activity/usage/tool reliability. **Now a parity target**: v2's `/stats` route renders it (YTD tokens, activity calendar, streaks) — see `docs/plans/parity.md` **R6**. |
+| `POST /api/workspace`, `DELETE /api/workspace/{id}` | `v2.workspace.create/destroy` | (add on next client pass) | Logical workspace lifecycle (idempotent create/destroy `{id?, provider}`) — we use `project` today; v2's worktree/workspace dialogs are the parity reference (`docs/plans/parity.md` R11). |
 
 ### Wrapped but not surfaced — audit 2026-09-15
 
@@ -276,15 +279,14 @@ or embedding via SDK would pick one style; webapp contributors ignore it. Doc re
 `opencode.ai/v2/docs/build` (Build overview) · `/build/plugins` + `/build/plugins/cli` ·
 `/build/client` (`@opencode/client@beta`) · `/build/sdk` (`@opencode-ai/sdk@dev`).
 
-## Extending checklist — when the diff grows
+## Keeping this map honest — when the diff grows
 
-1. `bun run scripts/fetch-openapi.ts` → review `git diff docs/reference/openapi.json`.
-2. Add missing client methods + types in `src/api/client.ts` / `src/api/types.ts` (one per endpoint, additive-only).
-3. Decide UI: add a component/extension, or mark here as **client-only with reason** (don't leave a gap without a reason row).
-4. Update this file if the feature is user-visible.
-5. `bun run typecheck` must stay green. No new deps without justification (`AGENTS.md`, "Rules for editing").
-
-## How to run the check
+The full procedure (diagnose → regenerate → resync → re-verify → rewrite these
+rows) is **`docs/runbooks/engine-update.md`**. In short: `bun run
+scripts/fetch-openapi.ts`, review `git diff docs/reference/openapi.json`, add the
+client methods/types, decide UI (a component/extension, or a **client-only with
+reason** row here), and keep `bun run typecheck` green. No new deps without
+justification (`AGENTS.md`, "Rules for editing").
 
 ```
 bun run scripts/fetch-openapi.ts      # refresh snapshot from live service

@@ -204,7 +204,7 @@ A *reachable* instance with no password needs an explicit confirmation — delib
 - Wildcard bind is refused unless a password is set.
 - Remote access in one line: `WEBUI_HOST=<this-machine's-LAN-IP> WEBUI_PASSWORD='<you-pick>' bunx opencode-webui`, then open `http://<that-IP>:4097` on the other device.
 
-Behind a reverse proxy (Caddy / nginx samples, including websocket + SSE timeouts): [docs/reverse-proxy.md](docs/reverse-proxy.md).
+Behind a reverse proxy (Caddy / nginx samples, including websocket + SSE timeouts): [docs/operations.md](docs/operations.md).
 
 ## FAQ
 

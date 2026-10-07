@@ -3,7 +3,7 @@ import type { MessageInfo, ToolPart } from "../api/types";
 
 /**
  * Extension registry v2 — the stable contract between the app and extensions.
- * See docs/extension-system-spec.md §5.
+ * See docs/reference/extension-system-spec.md §5.
  *
  * Five kinds, one job each:
  *  - "wrap"       — flow-through tweak of any registered unit. Receives

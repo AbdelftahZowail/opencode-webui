@@ -128,7 +128,7 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 | ${RAW("src/lib/extSettings.ts")} | Per-extension declared settings — schema, resolve, persist, subscribe |
 | ${RAW("src/lib/extBus.ts")} | Extension-to-extension peer bus (publish/subscribe) |
 | ${RAW("server/ext/types.ts")} | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| ${RAW("docs/extension-system-spec.md")} | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| ${RAW("docs/reference/extension-system-spec.md")} | The v2 decision record — strata, precedence, deletions, acceptance checks |
 | ${RAW("src/store.ts")} | The raw store module (reachable as \`advanced.store\`; prefer the facade) |
 
 ## Environment

@@ -61,8 +61,8 @@ extension code is not sandboxed (same model as host plugins).
 > Implementation status: the registry (five kinds), hook instrumentation,
 > browser loader + manifest SSE, proxy-stratum mounts, `dom.ts` loader wiring
 > + `data-oc-*` stamping, core self-registration, and the `ui-extensions/` →
-> `webui-extensions/` rename are landed (`docs/extension-system-spec.md` §11).
-> The **roadmap seams are landed too** (`docs/extension-roadmap.md` items 1–9,
+> `webui-extensions/` rename are landed (`docs/reference/extension-system-spec.md` §11).
+> The **roadmap seams are landed too** (`docs/plans/extensions.md` items 1–9,
 > `EXT_API_VERSION` 2): prop-transforming wraps, the activation context +
 > disposal, scheduler access, the event bus, the curated store facade,
 > declared settings, thin slots, manifest `requires` diagnostics, and peer
@@ -556,7 +556,7 @@ The webui neither loads nor hot-reloads it; the engine's rules apply
 (boot-time load, restart on edit unless the plugin implements its own shell
 pattern — a stable `index.js` that require-cache-busts a `definitions.cjs`
 on mtime works and is the recommended shape). Convention + worked example (one folder, three strata):
-`docs/engine-payload-convention.md`. Hard-won facts, stated once so no one
+`docs/reference/engine-payload-convention.md`. Hard-won facts, stated once so no one
 re-discovers them by trial:
 
 - **Export shape:** `module.exports = { id, setup }` (v2 — the v1 `{server}`
@@ -663,7 +663,7 @@ External (user/project-dir) extensions use the one extension API surface
 > User tweaks only the timestamp format. Maintainer later redesigns the
 > token counter and adds a finish badge in the same header. **The user gets
 > both, visibly** — parent and siblings are still core's; the user's wrap
-> delegates by default. (`docs/extension-system-spec.md` §5.4.)
+> delegates by default. (`docs/reference/extension-system-spec.md` §5.4.)
 
 ```tsx
 // ✅ RIGHT — wrap (stale-proof): the header redesign flows through

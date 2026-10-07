@@ -2,7 +2,7 @@
 //
 // ONE tools.* tool returning {output}, ONE {type:"text"} system hint, nothing
 // else. This is the smallest payload that exercises the full engine seam the
-// guide documents (docs/engine-payload-convention.md + webui-extensions
+// guide documents (docs/reference/engine-payload-convention.md + webui-extensions
 // README engine section):
 //
 //   - v2 export shape: module.exports = { id, setup } (the v1 {server} /

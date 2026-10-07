@@ -27,7 +27,7 @@
  * is left alone and reported.
  *
  * This is a deliberate, documented exception to the "webui never installs
- * engine plugins" rule in docs/engine-payload-convention.md: the webui installs
+ * engine plugins" rule in docs/reference/engine-payload-convention.md: the webui installs
  * *its own* plugins (lifecycle + shelf tools), opt-out — the lifecycle one
  * because the user asked the webui to follow OpenCode's lifecycle, the shelf
  * one because the shelf's agent tools are a core webui feature.
