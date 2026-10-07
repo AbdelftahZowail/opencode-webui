@@ -93,10 +93,28 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : Stri
 /** TUI /copy — transcript markdown to the clipboard. */
 async function copyTranscript(sessionID: string) {
   try {
+    // Guard before fetching: on the `auth: "none"` + non-loopback deployments
+    // this webui supports over HTTP/Tailscale, `navigator.clipboard` is
+    // simply undefined — without this the user read a raw TypeError instead
+    // of a reason, after waiting on a request that could not have worked.
+    if (!navigator.clipboard) {
+      notify({
+        title: "Copy unavailable",
+        description: "This browser blocks clipboard access over plain HTTP. Use HTTPS, or “Export” to download instead.",
+        variant: "destructive",
+      });
+      return;
+    }
     const data = await exportSession(sessionID);
     await navigator.clipboard.writeText(formatTranscript(data));
-  } catch {
-    /* clipboard unavailable (permissions/insecure context) */
+  } catch (err) {
+    // Covers BOTH failure modes the old empty catch hid: the clipboard being
+    // unavailable (permissions/insecure context) and the fetch failing.
+    notify({
+      title: "Copy failed",
+      description: err instanceof Error ? err.message : String(err),
+      variant: "destructive",
+    });
   }
 }
 

@@ -14,6 +14,7 @@ import {
 } from "../store";
 import type { SessionExportData } from "../api/client";
 import type { PermissionSavedInfo } from "../api/types";
+import { notify } from "../lib/notify";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -283,7 +284,14 @@ export async function downloadTranscript(sessionID: string) {
     a.click();
     URL.revokeObjectURL(url);
   } catch (err) {
+    // Never fail silently: a swallowed error here looks exactly like a button
+    // that does nothing.
     console.warn("session export failed:", err);
+    notify({
+      title: "Export failed",
+      description: err instanceof Error ? err.message : String(err),
+      variant: "destructive",
+    });
   }
 }
 

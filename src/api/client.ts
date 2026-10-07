@@ -142,18 +142,21 @@ function vcsQuery(
   return params.toString();
 }
 
+/** Best human-readable error for a failed response (engine JSON or plain). */
+async function responseError(res: Response): Promise<string> {
+  let message = `${res.status} ${res.statusText}`;
+  try {
+    const body = (await res.json()) as { message?: string };
+    if (body.message) message = body.message;
+  } catch {
+    /* non-JSON error body */
+  }
+  return message;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
-  if (!res.ok) {
-    let message = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { message?: string };
-      if (body.message) message = body.message;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(message);
-  }
+  if (!res.ok) throw new Error(await responseError(res));
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -653,10 +656,23 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ boundary }),
     }),
-  exportSession: (sessionID: string, sanitize = false) =>
-    request<{ data: SessionExportData }>(
-      `/api/session/${sessionID}/export?sanitize=${sanitize}`,
-    ),
+  /**
+   * The whole transcript in one request.
+   *
+   * The engine moved this route under `/api/experimental/` — verified live:
+   * `/api/session/{id}/export` 404s while `/api/experimental/session/{id}/export`
+   * answers 200 with the same `SessionTransfer.Data` payload. Older engines
+   * only serve the legacy path, so try the current one first and fall back on
+   * 404 ONLY (a 401/500 is a real failure and must not be masked by a probe).
+   */
+  exportSession: async (sessionID: string, sanitize = false) => {
+    const id = encodeURIComponent(sessionID);
+    const query = `?sanitize=${sanitize}`;
+    const res = await fetch(`/api/experimental/session/${id}/export${query}`);
+    if (res.ok) return (await res.json()) as { data: SessionExportData };
+    if (res.status !== 404) throw new Error(await responseError(res));
+    return request<{ data: SessionExportData }>(`/api/session/${id}/export${query}`);
+  },
   compactSession: (sessionID: string, delivery: CompactDelivery = "steer") =>
     request<{ data: unknown }>(`/api/session/${sessionID}/compact`, {
       method: "POST",

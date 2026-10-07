@@ -29,6 +29,23 @@ so new routes work without a proxy change. Keep the store as sole state
 > features the v1 TUI had (todos, LSP/formatter status, session share, console
 > orgs) are **not** v2 capabilities. See `docs/tui-parity-roadmap.md`.
 >
+> **Scope note (2026-10-07) — the snapshot is stale, do not trust it alone.**
+> The live engine has moved a block of routes under `/api/experimental/` and
+> renamed others, and `docs/reference/openapi.json` has NOT been regenerated
+> for it: `bun run scripts/diff-openapi.ts` reports 28 paths documented here
+> that the live service no longer serves (`/api/health`, `/api/server`,
+> `/api/generate`, `/api/project/current`, `/api/config/preferences`,
+> `/api/session/{id}/rename`, `/api/session/{id}/wait`, `/api/session/stats`,
+> `/api/form/request`, `/api/mcp/*`, …) and 21 live paths it does not
+> document. The export route is the case that bit: `exportSession` called
+> `/api/session/{id}/export`, which **404s** — the engine serves
+> `/api/experimental/session/{id}/export`. That is now fixed in `client.ts`
+> (current route first, legacy path as a 404-only fallback), but the rows in
+> the tables below are written from the snapshot, so read them as "what the
+> client calls", not "what the engine currently serves". Regenerating the
+> snapshot is its own workstream: it would desync `src/api/types.ts` and every
+> row of this map, so it is deliberately NOT bundled with a bug fix.
+>
 > **This doc is a route map, not a backlog.** Its "genuine gap" and "client-only"
 > rows record *why* a route has no UI — they are an inventory, not a to-do list.
 > The remaining work for full v2-TUI port parity (feature-level, not route-level)
