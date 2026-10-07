@@ -740,12 +740,26 @@ const apiRaw = {
       return post<unknown>(`/api/session/${sessionID}/rename`, { title });
     }
   },
-  forkSession: (sessionID: string, boundary: ForkBoundary) =>
-    request<{ data: SessionInfo }>(`/api/session/${sessionID}/fork`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ boundary }),
-    }),
+  /**
+   * Fork a session. The boundary body was RENAMED upstream: the live engine
+   * takes `{ before: messageID | null }` (`null` forks the whole session),
+   * where the old contract took `{ boundary: ForkBoundary }`. The engine
+   * ignores an unknown key, so the old shape did not error — it silently
+   * forked the wrong boundary. Send the current shape first and fall back to
+   * the legacy body on 400/422 (`empty_session` is a 400 on both shapes, so
+   * the fallback surfaces the same message — it does not mask real errors).
+   */
+  forkSession: async (sessionID: string, boundary: ForkBoundary) => {
+    const id = encodeURIComponent(sessionID);
+    const before = boundary.type === "before" ? boundary.messageID : null;
+    try {
+      return await post<{ data: SessionInfo }>(`/api/session/${id}/fork`, { before });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 400 && status !== 422) throw err;
+      return post<{ data: SessionInfo }>(`/api/session/${id}/fork`, { boundary });
+    }
+  },
   /**
    * The whole transcript in one request.
    *
@@ -1148,9 +1162,30 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     }),
-  /** Rediscover worktrees and reconcile the shared project inventory (204). */
-  worktreeRefresh: (location?: VcsLocation) =>
-    request<unknown>(`/api/worktree/refresh?${vcsQuery(location)}`, { method: "POST" }),
+  /**
+   * Rediscover worktrees and reconcile the shared project inventory (204).
+   * The live route requires the owning project's id in the body
+   * (`{ projectID }`) — resolve it from the location (the ambient project when
+   * no directory is given). Older engines took no body at all, so fall back on
+   * a 400/422.
+   */
+  worktreeRefresh: async (location?: VcsLocation) => {
+    const query = vcsQuery(location);
+    const loc = await request<LocationInfo>(`/api/location?${query}`);
+    const projectID = loc.project?.id;
+    if (!projectID) throw new Error("No project for this location — cannot refresh worktrees");
+    try {
+      return await request<unknown>(`/api/worktree/refresh?${query}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectID }),
+      });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 400 && status !== 422) throw err;
+      return request<unknown>(`/api/worktree/refresh?${query}`, { method: "POST" });
+    }
+  },
   fsFind: (query: string, opts?: { location?: string; type?: "file" | "directory"; limit?: number }) => {
     const params = new URLSearchParams({ query });
     if (opts?.location) params.set("location[directory]", opts.location);

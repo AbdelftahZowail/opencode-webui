@@ -84,8 +84,10 @@ permission *rules* PUT → `PATCH /api/session/{id}`, inbox steer/queue →
 `PATCH …/inbox/{id} {delivery}`, rename → `PATCH /api/session/{id}`, form
 state/cancel → `GET`/`DELETE …/form/{id}`, skill activation →
 `POST /api/experimental/session/{id}/skill {id}`, export/wait under
-`/api/experimental/*`, `projectCurrent` derived from `/api/location`, and
-`serverInfo` → `GET /api/info`. Removed with no replacement:
+`/api/experimental/*`, `projectCurrent` derived from `/api/location`, `serverInfo` → `GET /api/info`,
+and two body changes caught by verification — `forkSession` `{boundary}` →
+`{before: messageID | null}` and `worktreeRefresh` now requires `{projectID}`.
+Removed with no replacement:
 `/api/health`, `/api/server`, `POST /api/service/stop`,
 `/api/plugin/await-activation`, `PATCH /api/shell/{id}/timeout`. The exact
 per-route mapping and the live smoke results are in
