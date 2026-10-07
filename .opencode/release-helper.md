@@ -5,9 +5,9 @@ cross-check against the actual repo state (`git log`, `package.json`, the
 `AGENTS.md` Release pointer) before executing anything here — evidence from
 the repo beats this file.
 
-> Moved here from `.opencode/release-helper.md` when the docs tree was
-> reorganized; the doc paths in the dated **Entries** below refer to the layout
-> at the time of that release.
+> Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
+> skill looks for exactly this path. The dated **Entries** below refer to the
+> docs layout at the time of that release.
 
 - **Last released version:** `3.3.0` (tag `v3.3.0`)
 - **Version source of truth:** `package.json` `"version"` (the server reads it

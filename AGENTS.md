@@ -228,9 +228,9 @@ trust (same model as host plugins) — no sandboxing of extension code.
 
 ## Release
 
-The release runbook is **`docs/runbooks/release.md`** (push + publish, every step
-in order, plus the hard-won gotchas). Follow it exactly — never publish without
-the tag.
+The release runbook is **`.opencode/release-helper.md`** (push + publish, every
+step in order, plus the hard-won gotchas) — the **super-vibe** ship skill reads
+that exact path. Follow it exactly — never publish without the tag.
 
 ## Where to look (router — read before you act)
 
@@ -246,5 +246,5 @@ the tag.
 | work on first-run setup / the managed plugins | `docs/reference/setup.md` |
 | deploy, reverse-proxy, auth/env, serve config | `docs/operations.md` |
 | ask "did we decide to skip X, or defer it?" | `docs/when.md` |
-| cut a release | `docs/runbooks/release.md` |
+| cut a release | `.opencode/release-helper.md` |
 | orient in the docs at all | `docs/README.md` |

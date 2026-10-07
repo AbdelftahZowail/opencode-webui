@@ -33,7 +33,6 @@ it. `skills/webui/SKILL.md` is generated from `scripts/gen-skill.ts`.
 | `runbooks/engine-update.md` | **When the engine/API changes.** Diagnose → regenerate → resync → re-verify → rewrite coverage. |
 | `runbooks/add-extension.md` | **When you touch the extension system.** Contract ids, version bump, docs/skill/battery sweep in one commit. |
 | `runbooks/add-ui-surface.md` | **When you add a core component.** Self-register, `<Target>` call site, anchors, slots, tokens, store-only-state. |
-| `runbooks/release.md` | **When you cut a release.** Push + publish steps, gates, gotchas. The single release runbook. |
 | `reference/coverage.md` | The route map: have / client-only (with reason) / genuine gap / experimental. |
 | `reference/extension-system-spec.md` | The extension-system contract (strata, kinds, precedence, deletions, acceptance). |
 | `reference/engine-payload-convention.md` | The `engine/` stratum convention + the verified minimal fixture + the agent-testing runbook. |
@@ -45,5 +44,7 @@ it. `skills/webui/SKILL.md` is generated from `scripts/gen-skill.ts`.
 
 ## Not in this tree
 
+- **Release runbook** — `.opencode/release-helper.md` (kept at that exact path
+  because the super-vibe ship skill reads it; it is the live, per-release record).
 - **Authoring guide** — `webui-extensions/README.md` (ships with the extensions).
 - **The law/router** — `AGENTS.md`.
