@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { ArrowUp, Menu, X } from "lucide-react";
 import {
   applyRevertView,
@@ -30,8 +30,10 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
   useMessageScroller,
+  useMessageScrollerVisibility,
 } from "./ui/message-scroller";
 import { Badge } from "./ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { useKeyboardOpen } from "../hooks/useKeyboardOpen";
 import { McpIndicator } from "./McpIndicator";
 import { MessageItem, MessagePart } from "./MessageItem";
@@ -46,6 +48,66 @@ import { WorkspacePicker } from "./WorkspacePicker";
 
 /** In-pane navigation: goes through the focused pane's surface. */
 type NavigateFn = (sessionID: string | null) => void;
+
+/**
+ * Scroll `viewport` until `element` sits at the requested alignment.
+ *
+ * A single `scrollTo`/`scrollIntoView` is unreliable in this transcript: the
+ * items are `content-visibility:auto`, so a far element's measured offset is
+ * only an ESTIMATE (skipped items report their intrinsic placeholder size), and
+ * the target drifts as the neighbourhood renders — the "click once, wait, click
+ * again" miss. Nudging by the measured delta forces the neighbourhood to
+ * render, which makes the next measurement exact, so it lands within a frame or
+ * two. Returns a cancel function; a real user scroll (wheel/touch) cancels it.
+ */
+function convergeScroll(
+  viewport: HTMLElement,
+  element: HTMLElement,
+  {
+    align = "start",
+    margin = 0,
+    deadlineMs = 2500,
+  }: { align?: "start" | "center"; margin?: number; deadlineMs?: number } = {},
+): () => void {
+  const deadline = performance.now() + deadlineMs;
+  let raf = 0;
+  let stable = 0;
+  const cancel = () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    viewport.removeEventListener("wheel", cancel);
+    viewport.removeEventListener("touchstart", cancel);
+  };
+  const tick = () => {
+    raf = 0;
+    if (!element.isConnected) return cancel();
+    const vr = viewport.getBoundingClientRect();
+    const er = element.getBoundingClientRect();
+    const delta =
+      align === "center"
+        ? er.top - (vr.top + (vr.height - er.height) / 2)
+        : er.top - vr.top - margin;
+    if (Math.abs(delta) <= 2) {
+      // A single zero is not enough: aligning to a content-visibility ESTIMATE
+      // can read as aligned, then shift by thousands of px when the buffer
+      // renders the items above. Only finish once the position HOLDS.
+      if (++stable >= 15) return cancel();
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+    stable = 0;
+    if (performance.now() > deadline) return cancel();
+    const before = viewport.scrollTop;
+    viewport.scrollTop = before + delta;
+    // Clamped (top of transcript / end of spacer) and can't get closer.
+    if (Math.abs(viewport.scrollTop - before) < 1) return cancel();
+    raf = requestAnimationFrame(tick);
+  };
+  viewport.addEventListener("wheel", cancel, { passive: true });
+  viewport.addEventListener("touchstart", cancel, { passive: true });
+  raf = requestAnimationFrame(tick);
+  return cancel;
+}
 
 export interface ConversationProps {
   sessionID: string;
@@ -69,6 +131,11 @@ export function Conversation({
   // Every in-pane navigation routes through onNavigate when provided so a
   // split pane swaps ITS content instead of yanking the whole app.
   const go: NavigateFn = (sid) => (onNavigate ? onNavigate(sid) : void selectSession(sid));
+  // Pane root: scopes DOM lookups so split panes (which can hold the same
+  // session) never resolve each other's elements.
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Cancels the in-flight highlight scroll convergence.
+  const cancelHighlight = useRef<() => void>(() => {});
   const session = useStore((s) => s.sessions.find((x) => x.id === sessionID) ?? s.sessionDetails[sessionID]);
   const allMessages = useStore((s) => s.messages[sessionID] ?? []);
   // Per-pane isolation: this pane renders ONLY its own session's live
@@ -112,7 +179,8 @@ export function Conversation({
     let cancelled = false;
 
     const clearPrevious = () => {
-      document.querySelectorAll('[data-search-highlight="true"]').forEach((el) => {
+      const scope: ParentNode = rootRef.current ?? document;
+      scope.querySelectorAll('[data-search-highlight="true"]').forEach((el) => {
         const parent = el.parentNode;
         if (!parent) return;
         // Unwrap: replace the highlight span with its text content.
@@ -157,15 +225,25 @@ export function Conversation({
     };
 
     const tryScroll = (): boolean => {
-      const container = document.getElementById(`msg-${highlightID}`);
+      const pane = rootRef.current;
+      if (!pane) return false;
+      // Scoped to THIS pane (split panes can show the same session, so a
+      // document-wide id lookup could grab the other pane's node).
+      const container =
+        pane.querySelector<HTMLElement>(`#${CSS.escape(`msg-${highlightID}`)}`) ??
+        pane.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(highlightID)}"]`);
       if (!container) return false;
+      const viewport = container.closest<HTMLElement>('[data-slot="message-scroller-viewport"]');
       clearPrevious();
+      cancelHighlight.current();
       // If we have a query, highlight the matched substring and scroll to it;
-      // otherwise fall back to scrolling the message block itself.
+      // otherwise fall back to scrolling the message block itself. Either way we
+      // CONVERGE (see convergeScroll) so a content-visibility estimate can't
+      // leave the hit off screen — the search-click twin of the rail's jump.
       if (highlightQuery) {
         const mark = highlightIn(container, highlightQuery);
         if (mark) {
-          mark.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+          if (viewport) cancelHighlight.current = convergeScroll(viewport, mark, { align: "center" });
           // Fade out then unwrap so the DOM returns to its original state.
           setTimeout(() => {
             const parent = mark.parentNode;
@@ -182,9 +260,9 @@ export function Conversation({
           return true;
         }
       }
-      // Fallback: smooth scroll to the message and apply a subtle whole-message ring
+      // Fallback: scroll to the message and apply a subtle whole-message ring
       // as a secondary cue when text-level match was not found.
-      container.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (viewport) cancelHighlight.current = convergeScroll(viewport, container, { align: "center" });
       container.classList.add("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg");
       setTimeout(() => container.classList.remove("ring-1", "ring-[var(--surface-warning-strong)]", "rounded-lg"), 1800);
       // Same consume-once rule as the text-match branch above.
@@ -216,8 +294,13 @@ export function Conversation({
     // tick ensures re-click on the same hit (same ID, same query) re-fires.
   }, [sessionID, highlightID, highlightSID, highlightQuery, highlightTick, messages]);
 
+  // Cancel an in-flight highlight scroll only on unmount — the effect above
+  // re-runs on every poll, and cancelling there would abort the convergence
+  // the moment `clearHighlightMessage()` cleared the id.
+  useEffect(() => () => cancelHighlight.current(), []);
+
   return (
-    <div className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
+    <div ref={rootRef} className="pane-surface flex min-h-0 min-w-0 flex-1 flex-col">
       <Target
         id="conversation.header"
         title={session?.title}
@@ -249,7 +332,7 @@ export function Conversation({
             <MessageScrollerButton direction="end" />
             <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
           </MessageScroller>
-          <UserMessageRail messages={allMessages} />
+          <UserMessageRail messages={messages} />
         </div>
       </MessageScrollerProvider>
 
@@ -264,6 +347,17 @@ export function Conversation({
       <div className={kbOpen ? "hidden sm:block" : ""}>
         <QueueStrip sessionID={sessionID} />
       </div>
+      {/* Extension contributions above the composer. Deliberately OUTSIDE the
+          composer swap below: the Composer is REPLACED by the pending-request
+          panel, RunsPanel and the StashPanel, so a contribution rendered
+          inside it (where this slot used to live) disappears precisely when it
+          is needed — a permission countdown unmounting the instant a
+          permission arrives. Placement is the slot id's whole meaning. */}
+      {focused && (
+        <div className={kbOpen ? "hidden sm:block" : ""}>
+          <Slot id="composer.above" sessionID={sessionID} />
+        </div>
+      )}
       {!focused ? (
         // Unfocused panes stream their own live projection but carry none of
         // the focused pane's global chrome — always the plain composer,
@@ -536,10 +630,14 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
     <MessageScrollerContent className="mx-auto w-full max-w-3xl px-3 py-4 sm:px-4 sm:py-6" data-oc-transcript>
       {messages.length === 0 && live.length === 0 && !running && (
         <>
+          {/* The empty state IS the `conversation.empty` target's core default
+              (registered at the bottom of this file) — render it through the
+              Target so wraps/replaces apply, and once only. The Slot of the
+              same id below is the placement point for extensions that add
+              content alongside it. */}
           <MessageScrollerItem>
-            <EmptyHint />
+            <Target id="conversation.empty" sessionID={sessionID} />
           </MessageScrollerItem>
-          <Target id="conversation.empty" sessionID={sessionID} />
           <Slot id="conversation.empty" sessionID={sessionID} />
         </>
       )}
@@ -772,64 +870,213 @@ function LiveAssistantView({
   );
 }
 
+/**
+ * Vertical message rail — one dot per user turn, pinned to the right edge of
+ * the transcript.
+ *
+ * ARCHITECTURE (why it stays fast AND reliable):
+ * - It is a pure projection of the message MODEL (`messages`), never of the
+ *   DOM. `loadMessages` fetches the whole history up front precisely so the
+ *   rail and search see every user turn — so the rail knows about turns the
+ *   browser has not painted, and it can't be broken by ids that don't exist
+ *   yet or by duplicate `msg-` ids across split panes.
+ * - "Which turn am I on" comes from the scroller's own visibility store (one
+ *   IntersectionObserver rooted at the viewport → O(visible)), mapped back
+ *   through the model. No per-message measurement, no scroll listeners.
+ * - Render cost is decoupled by `content-visibility:auto` on each item: every
+ *   item exists, but off-screen ones cost ~nothing to lay out or paint, so
+ *   nothing here needs the transcript to be virtualized.
+ * - Navigation uses `scrollToMessage`, which owns the target's geometry (and
+ *   the end spacer, so even the last turn can reach the top). A target that is
+ *   not mounted still navigates via a proportional fallback, and the exact
+ *   placement is re-asserted once the layout settles.
+ */
 function UserMessageRail({ messages }: { messages: MessageInfo[] }) {
   const userMsgs = useMemo(() => messages.filter((m) => m.type === "user"), [messages]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  useEffect(() => {
-    if (userMsgs.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-        if (visible[0]?.target) {
-          const id = (visible[0].target as HTMLElement).id.replace(/^msg-/, "");
-          setActiveId(id);
-        }
-      },
-      { root: null, rootMargin: "-30% 0px -60% 0px", threshold: [0, 0.25, 0.5, 1] },
-    );
-    const els: Element[] = [];
-    for (const m of userMsgs) {
-      const el = document.getElementById(`msg-${m.id}`);
-      if (el) { observer.observe(el); els.push(el); }
-    }
-    return () => { for (const el of els) observer.unobserve(el); observer.disconnect(); };
-  }, [userMsgs]);
-  if (userMsgs.length < 3) return null;
-  const scrollTo = (id: string) => {
-    const el = document.getElementById(`msg-${id}`);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-    else {
-      try {
-        const sel = `[data-message-id="${CSS.escape(id)}"]`;
-        document.querySelector(sel)?.scrollIntoView({ behavior: "smooth", block: "start" });
-      } catch {}
-    }
-  };
+  // A single turn is not navigation — one dot is noise. Two or more is where
+  // the rail starts earning its space.
+  if (userMsgs.length < 2) return null;
+  return <MessageRail messages={messages} userMsgs={userMsgs} />;
+}
+
+interface RailDotProps {
+  id: string;
+  index: number;
+  total: number;
+  active: boolean;
+  text: string;
+  onJump: (id: string) => void;
+}
+
+/**
+ * One dot. Memoized so a poll (the store swaps the message array every ~2s
+ * even when identical) or a visibility tick only renders the dots whose props
+ * actually moved — never the whole rail. Its preview is a portal'd tooltip, so
+ * a long message can't be clipped by the transcript's `overflow-hidden` and
+ * Radix keeps it inside the viewport.
+ */
+const RailDot = React.memo(function RailDot({ id, index, total, active, text, onJump }: RailDotProps) {
+  // Collapse whitespace for a tidy preview. Done here (inside the memoized
+  // dot) rather than in the rail, so the store's ~2s array swaps only re-run it
+  // for the dots whose text actually changed.
+  const preview = text.replace(/\s+/g, " ").trim();
   return (
-    <div className="pointer-events-none absolute top-1/2 right-3 hidden -translate-y-1/2 flex-col items-center justify-center md:flex" style={{ maxHeight: "min(70vh, 560px)" }}>
-      <div className="pointer-events-auto flex flex-col items-center gap-2 rounded-full border border-[var(--border-weak-base)] bg-[var(--background-base)]/95 px-2 py-3 shadow-md backdrop-blur">
-        <div className="absolute inset-y-3 w-px bg-[var(--border-weak-base)]" />
-        {userMsgs.map((m) => {
-          const snippet = (m as { text?: string }).text ?? "";
-          const short = snippet.replace(/\s+/g, " ").slice(0, 400) || m.id.slice(0, 8);
-          const isActive = m.id === activeId;
-          return (
-            <button
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() => onJump(id)}
+          aria-label={`Go to your message ${index + 1} of ${total}`}
+          aria-current={active ? "true" : undefined}
+          className="group flex size-4 shrink-0 cursor-pointer items-center justify-center"
+        >
+          <span
+            className={`rounded-full ring-1 transition-all ${
+              active
+                ? "size-3 bg-[var(--surface-brand-base)] ring-[var(--surface-brand-base)] shadow-sm"
+                : "size-2 bg-[var(--text-weaker)] ring-[var(--border-weak-base)] group-hover:size-2.5 group-hover:bg-[var(--text-strong)]"
+            }`}
+          />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        side="left"
+        sideOffset={12}
+        className="block max-w-[26rem] rounded-xl border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] px-4 py-3 text-left text-sm leading-relaxed text-[var(--text-weak)] shadow-xl [&>svg]:hidden"
+      >
+        <div className="mb-1 text-[10px] font-medium tracking-wide text-[var(--text-weaker)] uppercase">
+          Your message {index + 1} of {total}
+        </div>
+        <div className="line-clamp-[8] break-words whitespace-pre-wrap">{preview || "(empty message)"}</div>
+      </TooltipContent>
+    </Tooltip>
+  );
+});
+
+function MessageRail({
+  messages,
+  userMsgs,
+}: {
+  messages: MessageInfo[];
+  userMsgs: MessageInfo[];
+}) {
+  const { scrollToMessage } = useMessageScroller();
+  const { visibleMessageIds } = useMessageScrollerVisibility();
+  const railRef = useRef<HTMLDivElement>(null);
+  const cancelJump = useRef<() => void>(() => {});
+
+  // Model lookup: a message id → its index in the transcript.
+  const order = useMemo(() => {
+    const map = new Map<string, number>();
+    messages.forEach((m, i) => map.set(m.id, i));
+    return map;
+  }, [messages]);
+
+  // Latest values for the stable click handler (below), so dot props stay
+  // referentially stable and memoization holds.
+  const latest = useRef({ messages, order, scrollToMessage });
+  latest.current = { messages, order, scrollToMessage };
+
+  // Active = the last user turn at or above the topmost visible message.
+  // Deriving it from viewport visibility (not `getElementById`) keeps it
+  // correct across session switches, reverts and split panes.
+  const activeId = useMemo(() => {
+    let pivot = Number.POSITIVE_INFINITY;
+    for (const id of visibleMessageIds) {
+      const idx = order.get(id);
+      if (idx != null && idx < pivot) pivot = idx;
+    }
+    if (!Number.isFinite(pivot)) return null;
+    let active: string | null = null;
+    for (const m of userMsgs) {
+      const idx = order.get(m.id);
+      if (idx == null) continue;
+      if (idx > pivot) break;
+      active = m.id;
+    }
+    return active;
+  }, [visibleMessageIds, order, userMsgs]);
+
+  const activeIndex = useMemo(
+    () => (activeId == null ? -1 : userMsgs.findIndex((m) => m.id === activeId)),
+    [userMsgs, activeId],
+  );
+
+  // Keep the active dot inside the rail's own scroll window as you read. The
+  // effect keys on the INDEX (a primitive), so a poll that recomputes `dots`
+  // with the same active turn does not re-scroll.
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || activeIndex < 0) return;
+    const dot = rail.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!dot) return;
+    const railBox = rail.getBoundingClientRect();
+    const dotBox = dot.getBoundingClientRect();
+    if (dotBox.top < railBox.top) rail.scrollBy({ top: dotBox.top - railBox.top, behavior: "smooth" });
+    else if (dotBox.bottom > railBox.bottom)
+      rail.scrollBy({ top: dotBox.bottom - railBox.bottom, behavior: "smooth" });
+  }, [activeIndex]);
+
+  useEffect(() => () => cancelJump.current(), []);
+
+  const jumpTo = useCallback((id: string) => {
+    cancelJump.current();
+    const { messages: list, order: idxOf, scrollToMessage: scroll } = latest.current;
+    const pane = railRef.current?.closest(".pane-surface") as HTMLElement | null;
+    const viewport =
+      pane?.querySelector<HTMLElement>('[data-slot="message-scroller-viewport"]') ?? null;
+    const selector = `[data-message-id="${CSS.escape(id)}"]`;
+
+    if (pane?.querySelector(selector)) {
+      // Mounted (always today): let the scroller own the landing — it also
+      // grows the end spacer so even the last turn can reach the top.
+      scroll(id, { align: "start", behavior: "smooth" });
+    } else {
+      // Not mounted (a future virtualized transcript): land proportionally so
+      // the click still moves, then converge below once the item mounts.
+      const idx = idxOf.get(id);
+      if (viewport && idx != null && list.length > 1) {
+        const max = viewport.scrollHeight - viewport.clientHeight;
+        if (max > 0) viewport.scrollTo({ top: (idx / (list.length - 1)) * max, behavior: "smooth" });
+      }
+    }
+
+    // Converge onto the exact position: a far target's measured offset is only
+    // a content-visibility estimate, so one jump can miss (the "click once,
+    // wait, click again" bug). Starting immediately takes over from the
+    // scroller's smooth animation and holds the target through the buffer
+    // settling.
+    if (!viewport) return;
+    const el = pane?.querySelector<HTMLElement>(selector) ?? null;
+    const cancelConverge = el ? convergeScroll(viewport, el, { align: "start" }) : null;
+    cancelJump.current = () => cancelConverge?.();
+  }, []);
+
+  return (
+    // `inset-y-3` (not top-1/2/translate) gives this box a DEFINITE height —
+    // the transcript area minus its margins — so `max-h-full` on the pill can
+    // resolve against it. That keeps the whole rail inside the pane even when
+    // the bottom activity strip squeezes the transcript short; a 70vh cap did
+    // not, and let the top dots clip under the header.
+    <div className="pointer-events-none absolute inset-y-3 right-3 hidden flex-col items-center justify-center md:flex">
+      <div className="pointer-events-auto relative flex max-h-full min-h-0 flex-col items-center rounded-full border border-[var(--border-weak-base)] bg-[var(--background-base)]/95 px-2 py-3 shadow-md backdrop-blur">
+        <div aria-hidden className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-[var(--border-weak-base)]" />
+        <div
+          ref={railRef}
+          className="flex min-h-0 flex-col items-center gap-2 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {userMsgs.map((m, i) => (
+            <RailDot
               key={m.id}
-              type="button"
-              onClick={() => scrollTo(m.id)}
-              title={short}
-              className="group relative flex size-4 items-center justify-center"
-            >
-              <span className={`rounded-full ring-1 transition-all ${isActive ? "size-3 bg-[var(--surface-brand-base)] ring-[var(--surface-brand-base)] shadow-sm" : "size-2 bg-[var(--text-weaker)] ring-[var(--border-weak-base)] group-hover:size-2.5 group-hover:bg-[var(--text-strong)]"}`} />
-              <span className="pointer-events-none absolute right-full mr-4 hidden max-w-[560px] whitespace-pre-wrap rounded-xl border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] px-4 py-3 text-sm leading-relaxed text-[var(--text-weak)] shadow-xl group-hover:block">
-                {short}
-              </span>
-            </button>
-          );
-        })}
+              id={m.id}
+              index={i}
+              total={userMsgs.length}
+              active={m.id === activeId}
+              text={(m as { text?: string }).text ?? ""}
+              onJump={jumpTo}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );

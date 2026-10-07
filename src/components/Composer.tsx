@@ -1093,7 +1093,12 @@ export function Composer({
             </div>
           )}
         </div>
-        <Slot id="composer.above" sessionID={sessionID} />
+        {/* `composer.above` used to render HERE, inside the Composer — but this
+            component is what PendingRequestsPanel / RunsPanel / StashPanel
+            REPLACE, so any contribution vanished at exactly the moment it
+            mattered (a permission countdown disappearing when a permission
+            arrives). It now renders one level up, in Conversation, above the
+            swap. Do not move it back. */}
         <Popover open={isSlash}>
           <PopoverAnchor asChild>
             <div
