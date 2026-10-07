@@ -24,7 +24,7 @@
  * (no index/main entry) still lists with only `domUrl`.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,6 +166,54 @@ function mtimeOf(path: string): number | null {
     return null; // vanished mid-scan
   }
 }
+
+/** Source files whose mtime can change a bundle. */
+const SOURCE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"]);
+/** Directories that can never contribute to a bundle. */
+const IGNORED_DIR = new Set(["node_modules", ".git", "dist", "build", ".cache"]);
+
+/**
+ * Max mtime across an extension folder's SOURCE files.
+ *
+ * Keying a bundle on the ENTRY file alone is wrong: an extension's entry
+ * imports its siblings, so editing a sibling data-layer or helper module
+ * changes the bundle while `index.tsx` stays byte-identical. The old
+ * entry-only key served
+ * a stale bundle until the entry happened to be touched, which reads as "hot
+ * reload is broken" and — worse — as "my edit did nothing".
+ *
+ * Folder-wide, not dependency-graph-accurate: a walk of a handful of small
+ * files is far cheaper than a build, and over-invalidation only ever costs one
+ * rebuild. The fingerprint is the max mtime, so it is monotonic and cheap to
+ * compare.
+ */
+export function folderSourceMtime(dir: string): number {
+  let newest = 0;
+  const walk = (current: string, depth: number): void => {
+    if (depth > 3) return; // extension folders are shallow; engine payloads nest one or two
+    let items: Dirent[];
+    try {
+      items = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const item of items) {
+      const full = join(current, item.name);
+      if (item.isDirectory()) {
+        if (IGNORED_DIR.has(item.name)) continue;
+        walk(full, depth + 1);
+        continue;
+      }
+      const dot = item.name.lastIndexOf(".");
+      if (dot < 0 || !SOURCE_EXT.has(item.name.slice(dot))) continue;
+      const mtime = mtimeOf(full);
+      if (mtime !== null && mtime > newest) newest = mtime;
+    }
+  };
+  walk(dir, 0);
+  return newest;
+}
+
 /** Preferred-first browser entry candidates for one extension folder. */
 function folderEntry(dir: string): string | null {
   for (const name of ["index.tsx", "index.ts", "main.tsx", "main.ts"]) {
@@ -242,7 +290,10 @@ function scanRoot(root: string, origin: UIEntry["origin"], entries: UIEntry[], s
     if (entry) {
       const mtime = mtimeOf(entry);
       if (mtime === null) continue; // vanished mid-scan
-      mtimeMs = mtime;
+      // Folder-wide, not entry-only: the bundle includes every module the entry
+      // imports, so `?v=` has to move when ANY of them does — otherwise the
+      // page keeps the stale URL and the user edits in vain.
+      mtimeMs = Math.max(mtime, folderSourceMtime(dir));
     }
     let domEntry: string | undefined;
     let domMtimeMs: number | undefined;

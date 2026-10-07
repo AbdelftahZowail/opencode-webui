@@ -69,6 +69,7 @@ import {
 import {
   discoverUserUIEntries,
   extensionSourceRoots,
+  folderSourceMtime,
   globalUserExtensionsDir,
   invalidateExtensionCache,
   setExtensionDisabled,
@@ -722,11 +723,20 @@ async function discoverAllUIEntries(): Promise<UIEntry[]> {
   return merged;
 }
 
-/** Bundled JS for a UI entry, cached by mtime so an edit costs one rebuild. */
+/**
+ * Bundled JS for a UI entry, cached by a FOLDER-WIDE source fingerprint so an
+ * edit to any module the entry imports costs one rebuild.
+ *
+ * This used to key on the entry file's mtime alone, which served a stale
+ * bundle whenever an extension edited a sibling module (a data layer, a
+ * helper, …) without touching its `index.tsx`. That is the whole
+ * point of the hot-reload contract being broken, so the key is now the max
+ * mtime across the folder — see `folderSourceMtime`.
+ */
 async function bundleUIEntry(entry: string): Promise<string> {
-  const mtimeMs = statSync(entry).mtimeMs;
+  const fingerprint = Math.max(statSync(entry).mtimeMs, folderSourceMtime(dirname(entry)));
   const cached = bundleCache.get(entry);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.js;
+  if (cached && cached.mtimeMs === fingerprint) return cached.js;
   const built = await Bun.build({
     entrypoints: [entry],
     target: "browser",
@@ -750,7 +760,7 @@ async function bundleUIEntry(entry: string): Promise<string> {
   }
   if (!artifact) throw new Error(`bun.build produced no js artifact for ${entry}`);
   const js = await artifact.text();
-  bundleCache.set(entry, { mtimeMs, js });
+  bundleCache.set(entry, { mtimeMs: fingerprint, js });
   return js;
 }
 

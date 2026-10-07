@@ -225,7 +225,10 @@ trust (same model as host plugins) — no sandboxing of extension code.
   `notify`, `services`, `dom` kit, `kv`).
 - **Hot reload**: external browser bundles rebuild on edit, bump `?v=`, push
   the manifest over SSE, and the page same-id-swaps with a live repaint
-  (sub-second, no refresh). Repo dev uses Vite HMR. Proxy `server.ts`
+  (sub-second, no refresh). The fingerprint is **folder-wide** — the max mtime
+  across the extension's source files, not the entry file's alone, because an
+  entry imports its siblings and editing a sibling module must invalidate the
+  bundle built from `index.tsx`. Repo dev uses Vite HMR. Proxy `server.ts`
   modules reload with no proxy restart.
 
 > **How to change the webui without breaking extensibility**
