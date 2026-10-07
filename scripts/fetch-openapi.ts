@@ -3,8 +3,9 @@
 // (same auth path as the proxy) into docs/reference/openapi.json.
 //   bun run scripts/fetch-openapi.ts
 import { Service } from "@opencode/client/service";
+import { resolveEngineEndpoint } from "../server/engineDiscovery";
 
-const ep = await Service.ensure();
+const ep = await resolveEngineEndpoint((m) => console.error(`[fetch-openapi] ${m}`));
 const res = await fetch(`${ep.url}/openapi.json`, { headers: Service.headers(ep) });
 if (!res.ok) {
   console.error("HTTP", res.status);

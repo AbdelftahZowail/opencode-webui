@@ -56,7 +56,8 @@ import {
   validatePatch,
   type ConfigPatch,
 } from "./config";
-import { createEngineResolver, type EngineEndpoint } from "./engineResolver";
+import { createEngineResolver } from "./engineResolver";
+import { discoverEngine } from "./engineDiscovery";
 import { handleShelfRequest } from "./shelf";
 import {
   clearPidFile,
@@ -191,70 +192,11 @@ async function writeDebug(lines: unknown[]) {
 // therefore fall back to the registration record (url + password, pid verified
 // alive): version drift degrades feature-by-feature instead of bricking the
 // app. Strictly spawn-free, and only reached when Service.discover() found
-// nothing — a compatible engine is adopted by the call above.
-
-/** Spawn-free fallback: the registration file, if its pid is still alive. */
-function registrationEndpoint(): EngineEndpoint | undefined {
-  try {
-    const stateDir = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
-    const raw = readFileSync(join(stateDir, "opencode", "service.json"), "utf8");
-    const info = JSON.parse(raw) as { url?: unknown; password?: unknown; pid?: unknown };
-    if (typeof info.url !== "string" || info.url.length === 0) return undefined;
-    if (typeof info.pid === "number") {
-      try {
-        process.kill(info.pid, 0); // alive?
-      } catch {
-        return undefined; // stale registration — never adopt a dead record
-      }
-    }
-    const url = info.url.replace(/\/+$/, "");
-    // A registration record is written by a LOCAL engine. Refuse a non-local URL
-    // rather than let the proxy forward every authenticated request — and the
-    // engine password — to wherever a tampered record points (SSRF / credential
-    // leak). Loopback + unspecified addresses are the only valid targets here.
-    if (!isLocalEngineUrl(url)) {
-      dbg("engine discovery: registration file points at a non-local URL — refusing", url);
-      return undefined;
-    }
-    const password = typeof info.password === "string" && info.password.length > 0 ? info.password : undefined;
-    return password ? { url, auth: { type: "basic", username: "opencode", password } } : { url };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Loopback / unspecified engine host? The registration file is machine-local. */
-function isLocalEngineUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    return (
-      host === "localhost" ||
-      host.endsWith(".localhost") ||
-      host === "::1" ||
-      host === "::" ||
-      host === "0.0.0.0" ||
-      // Exact IPv4 loopback only — a bare `^127\.` prefix would accept a
-      // hostname like `127.0.0.1.attacker.tld` (which resolves remotely).
-      /^127(\.\d{1,3}){3}$/.test(host) ||
-      // WHATWG canonicalizes an IPv4-mapped IPv6 host to hex, so
-      // `[::ffff:127.0.0.1]` arrives as `::ffff:7f00:1`.
-      host === "::ffff:7f00:1"
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function discoverEngine(): Promise<EngineEndpoint | undefined> {
-  const found = await Service.discover().catch(() => undefined);
-  if (found) return found;
-  const fallback = registrationEndpoint();
-  if (fallback) dbg("engine discovery: Service.discover() found nothing; using registration file", fallback.url);
-  return fallback;
-}
+// nothing — a compatible engine is adopted by the call above. The fallback
+// itself lives in `./engineDiscovery` so the API-sync scripts share it.
 
 const engineResolver = createEngineResolver({
-  discover: () => discoverEngine(),
+  discover: () => discoverEngine((message) => dbg(message)),
   ensure: () => Service.ensure(),
   resolveOverride: resolveEngineOverride,
   onConnected: (url, suffix) =>

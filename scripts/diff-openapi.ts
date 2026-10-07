@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 //   bun run scripts/diff-openapi.ts --json     # machine-readable JSON
 //   bun run scripts/diff-openapi.ts --check    # exit 1 if added/removed/modified
 import { Service } from "@opencode/client/service";
+import { resolveEngineEndpoint } from "../server/engineDiscovery";
 
 const SNAP_PATH = fileURLToPath(new URL("../docs/reference/openapi.json", import.meta.url));
 const asJson = process.argv.includes("--json");
@@ -21,7 +22,7 @@ async function loadSnapshot(): Promise<any> {
 }
 
 async function loadLive(): Promise<any> {
-  const ep = await Service.ensure();
+  const ep = await resolveEngineEndpoint((m) => console.error(`[diff-openapi] ${m}`));
   const res = await fetch(`${ep.url}/openapi.json`, { headers: Service.headers(ep) });
   if (!res.ok) {
     console.error(`live fetch failed: ${res.status} ${res.statusText} @ ${ep.url}`);
