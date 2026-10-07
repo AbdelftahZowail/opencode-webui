@@ -21,6 +21,7 @@ import {
   refreshSessions,
   selectSession,
   sessionHref,
+  sessionOrSubagentsLive,
   setPendingWorkspace,
   startDraftSession,
   useStore,
@@ -226,16 +227,6 @@ export function Sidebar() {
     baselineOpened(sessions.map((s) => s.id));
   }, [sessions]);
 
-  // Parents with a currently running/queued subagent child, for the row
-  // marker. Children aren't listed top-level but stay present in `sessions`.
-  const subagentActiveParents = useMemo(() => {
-    const parents = new Set<string>();
-    for (const s of sessions) {
-      if (s.parentID && isLive(s.id)) parents.add(s.parentID);
-    }
-    return parents;
-  }, [sessions, running, queued]);
-
   // Pending-workspace highlight yields to any click outside the sidebar.
   useEffect(() => {
     if (!pending) return;
@@ -296,6 +287,41 @@ export function Sidebar() {
   }, [sessions, home, running, queued, activeIDs, current, activityVersion]);
 
   const hasMore = sessionsCursor != null;
+  /**
+   * Bottom-of-list sentinel for the next page. Scrolling it into view (with a
+   * generous margin) loads more sessions without a click, so "Load more
+   * sessions" is a keyboard/screen-reader fallback rather than the only way.
+   * The guard stops a second page being requested mid-flight.
+   */
+  const loadMoreSentinel = useRef<HTMLDivElement | null>(null);
+  const loadingMore = useRef(false);
+
+  useEffect(() => {
+    if (!hasMore) return;
+    const sentinel = loadMoreSentinel.current;
+    if (!sentinel) return;
+    // Root at the sidebar's scroll viewport (Radix ScrollArea), so visibility
+    // is measured against the list's own scroll box, not the window.
+    const root = sentinel.closest('[data-slot="scroll-area-viewport"]');
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        if (loadingMore.current) return;
+        loadingMore.current = true;
+        void loadMoreSessions().finally(() => {
+          loadingMore.current = false;
+        });
+      },
+      root ? { root, rootMargin: "240px 0px" } : { rootMargin: "240px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // Re-observe after every page (`sessions.length`): a fresh observer reports
+    // the sentinel's CURRENT intersection, so a short list keeps filling until
+    // it falls out of view or the cursor runs dry. `sidebarCollapsed`: the whole
+    // ScrollArea (and the sentinel) unmounts when the rail collapses and remounts
+    // on expand, so the observer must be re-attached to the new node.
+  }, [hasMore, sessions.length, sidebarCollapsed]);
 
   const toggleWorkspace = (name: string) => {
     const nextCollapsed = !collapsedWorkspaces[name];
@@ -436,9 +462,7 @@ export function Sidebar() {
                       sessionID={s.id}
                       title={s.title ?? "Untitled session"}
                       updated={s.time.updated}
-                      active={activeIDs.includes(s.id)}
                       selected={s.id === current}
-                      subagentsActive={subagentActiveParents.has(s.id)}
                       onSelect={() => void selectSession(s.id)}
                     />
                   </div>
@@ -518,13 +542,15 @@ export function Sidebar() {
                 );
               })}
               {hasMore && (
-                <button
-                  type="button"
-                  onClick={() => void loadMoreSessions()}
-                  className="w-full cursor-pointer rounded-md px-2.5 py-2 text-center text-xs text-[var(--text-weaker)] transition-colors hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
-                >
-                  Load more sessions
-                </button>
+                <div ref={loadMoreSentinel}>
+                  <button
+                    type="button"
+                    onClick={() => void loadMoreSessions()}
+                    className="w-full cursor-pointer rounded-md px-2.5 py-2 text-center text-xs text-[var(--text-weaker)] transition-colors hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
+                  >
+                    Load more sessions
+                  </button>
+                </div>
               )}
             </div>
           </ScrollArea>
@@ -859,10 +885,7 @@ export interface SessionRowProps {
   id: string;
   title: string;
   updated: number;
-  active: boolean;
   selected: boolean;
-  /** A subagent child of this session is currently running/queued. */
-  subagentsActive: boolean;
   /**
    * Force the unread marker on/off. Leave undefined to derive it from the
    * session's last engine write (`updated`) — that is the normal path, and it
@@ -877,18 +900,16 @@ function SessionRow({
   id,
   title,
   updated,
-  active,
   selected,
-  subagentsActive,
   unseen: unseenOverride,
   onSelect,
 }: SessionRowProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  // Liveness is read from the store rather than taken from the `active` prop:
-  // `active` is the engine's active-session map, which is laggy and can stay
-  // true for a run that already ended — gating the badge on it would hide
-  // unread state. `running`/`queued` are the authoritative "producing now".
-  const live = useStore((s) => !!s.running[id] || !!s.queued[id]);
+  // One liveness rule for the row: this session OR any of its subagent
+  // children is producing. The same helper drives the browser tab dot, so a
+  // session with a running subagent reads exactly like a running session — a
+  // single "run" badge, never a separate dot.
+  const live = useStore((s) => sessionOrSubagentsLive(s, id));
   // Derived per row, so a session opened in ANY tab clears here on the same
   // tick (the module broadcasts; `useSessionUnseen` repaints). The focused
   // session never badges — you are looking straight at it — and neither does
@@ -912,16 +933,9 @@ function SessionRow({
           }`}
         >
         <div className="flex min-w-0 max-w-full items-center gap-2">
-          {subagentsActive && (
-            <span
-              title="Subagents running"
-              aria-label="Subagents running"
-              className="size-1.5 shrink-0 animate-pulse rounded-full bg-[var(--surface-success-strong)]"
-            />
-          )}
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
           {unseen && <SessionUnseenBadge updated={updated} />}
-          {active && (
+          {live && (
             <Badge className="shrink-0 border-transparent bg-[var(--surface-success-base)] text-[var(--text-on-success-base)]">
               run
             </Badge>
@@ -983,9 +997,7 @@ autoRegister({
       id={p.sessionID as string}
       title={p.title as string}
       updated={p.updated as number}
-      active={p.active as boolean}
       selected={p.selected as boolean}
-      subagentsActive={p.subagentsActive as boolean}
       // Left undefined by our own call sites: the row derives unread state
       // from `updated` so the list, the search panel and other tabs agree.
       // An extension can still pass it to force the marker.

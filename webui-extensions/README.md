@@ -108,7 +108,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | Target id | Props (meaningful subset) |
 |---|---|
 | `sidebar` | — (the shell) |
-| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `active`, `selected`, `subagentsActive`, `unseen` (optional force/deny of the unread marker — omit it and the row derives state from `updated`), `onSelect` |
+| `sidebar.sessionRow` | `sessionID`, `title`, `updated`, `selected`, `unseen` (optional force/deny of the unread marker — omit it and the row derives state from `updated`), `onSelect`. The row derives its own "run" badge from the session and its subagents, so there is no live/active prop to pass. |
 | `conversation` | full `ConversationProps` |
 | `conversation.header` | full `HeaderProps` |
 | `conversation.empty` | — |

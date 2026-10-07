@@ -86,15 +86,6 @@ export function SearchPanel({ open, onClose }: SearchPanelProps) {
 
   const home = useMemo(() => findHome(sessions.map((s) => s.location?.directory)), [sessions]);
 
-  // Parents with a currently running/queued subagent child, for the row marker.
-  const subagentActiveParents = useMemo(() => {
-    const parents = new Set<string>();
-    for (const s of sessions) {
-      if (s.parentID && (running[s.id] || activeIDs.includes(s.id))) parents.add(s.parentID);
-    }
-    return parents;
-  }, [sessions, running, activeIDs]);
-
   // Layer B: server-side title search, debounced 250ms once the query is
   // >= 2 chars — catches sessions beyond the currently loaded pages.
   useEffect(() => {
@@ -240,9 +231,7 @@ export function SearchPanel({ open, onClose }: SearchPanelProps) {
           sessionID={s.id}
           title={s.title ?? "Untitled session"}
           updated={s.time.updated}
-          active={activeIDs.includes(s.id)}
           selected={s.id === current}
-          subagentsActive={subagentActiveParents.has(s.id)}
           onSelect={() => {
             void selectSession(s.id);
             onClose();
