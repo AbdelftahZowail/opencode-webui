@@ -226,6 +226,11 @@ trust (same model as host plugins) — no sandboxing of extension code.
   `-acceptance`) — the extension-system E2E battery, 76 checks total; the
   release gate for anything touching extensions
 
+Run the batteries **sequentially and alone** (a concurrent agent floods
+`/api/event` and evicts the proxy tap ring → the `onEvent` test flakes). Any
+assertion with a millisecond window must be proven **both ways** — reintroduce
+the bug, watch the check go red, restore it — or the guard may be vacuous.
+
 ## Release
 
 The release runbook is **`.opencode/release-helper.md`** (push + publish, every

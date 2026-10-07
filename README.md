@@ -253,10 +253,11 @@ To open the dev UI from a phone/Tailscale, set the bind address to `0.0.0.0` and
 - Setup check: `bun run check:setup` (isolated HOME/XDG)
 - Config check: `bun run check:config`
 - Architecture, editing rules, roadmap: [AGENTS.md](AGENTS.md)
+- Contributing & ground rules: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
 
-Issues and PRs are welcome. For extension-system changes, the E2E battery (`bun run scripts/uitest/ext-battery-*.ts`, 76 checks across four files) must pass — please keep extension-system and unrelated changes in separate commits.
+Issues and PRs are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, the ground rules, and what to run before a PR. For extension-system changes the E2E battery (`bun run scripts/uitest/ext-battery-*.ts`, 76 checks across four files) must pass, and extension-system changes should stay in separate commits.
 
 ## License
 

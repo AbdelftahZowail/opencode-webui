@@ -46,5 +46,6 @@ it. `skills/webui/SKILL.md` is generated from `scripts/gen-skill.ts`.
 
 - **Release runbook** — `.opencode/release-helper.md` (kept at that exact path
   because the super-vibe ship skill reads it; it is the live, per-release record).
+- **Contributing** — `CONTRIBUTING.md` (repo root; the human-facing entry point).
 - **Authoring guide** — `webui-extensions/README.md` (ships with the extensions).
 - **The law/router** — `AGENTS.md`.
