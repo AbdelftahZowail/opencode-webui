@@ -12,9 +12,13 @@ port itself is **in progress** — R0–R14 remain (§5).
 **Read order for a fresh agent:** `AGENTS.md` (the 10 rules — non-negotiable) →
 `docs/principles.md` → `docs/reference/coverage.md` → this file → your brief.
 
-**Step 0 before any R-work: re-sync the stale contract.** The snapshot and this
-plan's ground truth predate engine 2.0.22 (§2.0). Do `runbooks/engine-update.md`
-first; several shipped features call routes that moved.
+**Step 0 (contract re-sync) — DONE 2026-10-07.** The snapshot now matches the
+live engine (**2.0.22**): 116 paths / 255 schemas, `bun run
+scripts/diff-openapi.ts --check` exits 0, and the shipped features that called
+moved routes (permission rules, inbox steer/queue, rename, revert clear,
+skill activation, project-current, server info, generate, MCP write/action) were
+re-pointed at their current routes. The route map is
+`docs/reference/coverage.md`; the procedure is `runbooks/engine-update.md`.
 
 ---
 
@@ -56,25 +60,40 @@ Decoded into engineering terms:
 
 ## 2. Ground truth (verify, don't re-derive)
 
-### 2.0 Contract drift — read this first
+### 2.0 Contract sync — current as of 2026-10-07
 
-This section's rows were measured against **engine 2.0.3** at the P0 sync
-(2026-09-15). The live engine is now **2.0.22** and the HTTP surface has moved:
+Re-synced (Step 0) against the live engine. The snapshot
+(`reference/openapi.json`) is now **116 paths / 255 schemas**, matching live at
+engine **2.0.22**; `bun run scripts/diff-openapi.ts --check` exits 0.
 
-- the snapshot (`reference/openapi.json`, 123 paths / 241 schemas) is **stale**;
-- the live engine serves 116 paths / 255 schemas — **28 documented routes are
-  gone, 21 new routes exist, 88 are modified**;
-- a block moved under `/api/experimental/*` (mcp, session import/stats/export/
-  skill/wait, instructions, generate, config) and others were renamed
-  (`revert/clear` → `DELETE /api/session/{id}/revert`; `vcs/branches` →
-  `vcs/branch`; `form/request` → `/api/form`);
-- **several shipped features call moved routes** — the permission *rules* PUT,
-  inbox steer/queue, form cancel/state, `vcs/branches`, export, wait. The
-  permission-reply **body** shape (`reply` → `decision`) already bit us once.
+The prior snapshot (2026-09-15, 123 paths / 241 schemas, engine **2.0.3**) was
+stale: 28 documented routes had been removed upstream, 21 live routes were
+undocumented, and 88 were modified (+24/−10 schemas). A block moved under
+`/api/experimental/*` (mcp, session import/stats/export/skill/wait/instructions,
+generate, config) and others were renamed (`revert/clear` → `DELETE
+/api/session/{id}/revert`; `vcs/branches` → `vcs/branch`; `form/request` →
+`/api/form`).
 
-`bun run scripts/diff-openapi.ts` prints the current drift (the tooling now
-resolves the engine through the registration fallback, so it works against a
-drifted engine). **Re-syncing is step 0** — `runbooks/engine-update.md`.
+**Several shipped features called moved/renamed routes and are fixed.** The
+sharpest were the *shape* changes, which fail silently: the permission-reply body
+(`reply` → `decision`, `additionalProperties:false` — a 400 the queue never
+surfaced), the interrupt query key (`continue` → `resume` — an unknown query key
+is silently ignored, so interrupt-and-resume did a plain interrupt), and the
+slash-command identifier (`command` → `name`). Path moves fixed in the same pass:
+permission *rules* PUT → `PATCH /api/session/{id}`, inbox steer/queue →
+`PATCH …/inbox/{id} {delivery}`, rename → `PATCH /api/session/{id}`, form
+state/cancel → `GET`/`DELETE …/form/{id}`, skill activation →
+`POST /api/experimental/session/{id}/skill {id}`, export/wait under
+`/api/experimental/*`, `projectCurrent` derived from `/api/location`, and
+`serverInfo` → `GET /api/info`. Removed with no replacement:
+`/api/health`, `/api/server`, `POST /api/service/stop`,
+`/api/plugin/await-activation`, `PATCH /api/shell/{id}/timeout`. The exact
+per-route mapping and the live smoke results are in
+`reference/coverage.md`.
+
+`bun run scripts/diff-openapi.ts` prints the current drift (the tooling resolves
+the engine through the registration fallback, so it works against a drifted
+engine). `runbooks/engine-update.md` is the procedure whenever it drifts again.
 
 ### 2.1 Facts
 
@@ -83,7 +102,7 @@ drifted engine). **Re-syncing is step 0** — `runbooks/engine-update.md`.
 | Engine version | `bun -e 'import {Service} from "@opencode/client/service"; import {resolveEngineEndpoint} from "./server/engineDiscovery"; const ep = await resolveEngineEndpoint(); console.log((await (await fetch(ep.url+"/openapi.json",{headers:Service.headers(ep)})).json()).info?.version)'` — **2.0.22** (2.0.3 at the P0 sync) |
 | Client dependency is `@opencode/client@2.0.3` (the v2 line) | `grep opencode/client package.json` — note it is **not** `@opencode-ai/client` any more (that was a dev-scope prerelease; P7 migrated it) |
 | Proxy forwards only `/api/*` — correct as-is | `server/index.ts`, the `if (path.startsWith("/api"))` branch |
-| Contract drift | `bun run scripts/diff-openapi.ts` (pretty) / `--check` (exit 1 on drift) |
+| Contract drift | `bun run scripts/diff-openapi.ts` (pretty) / `--check` (CI). **Synced 2026-10-07 — `--check` exits 0**; re-run the runbook if it drifts again |
 | Engine discovery is spawn-free-safe | `server/engineDiscovery.ts` + `server/engineResolver.ts` |
 
 ### 2.2 The v2 reference source
@@ -138,7 +157,7 @@ The TUI's capability list is its command/binding registry, not the API surface:
 
 | Phase | Scope | State |
 | --- | --- | --- |
-| P0 | Contract sync (snapshot + client + types + docs) | **done** (`31aefe3`) — but now stale (see §2.0) |
+| P0 | Contract sync (snapshot + client + types + docs) | **done** (`31aefe3`; re-synced 2026-10-07 to engine 2.0.22 — see §2.0) |
 | P1 | ~~Legacy allow-list bridge~~ | **dropped** — v2 is `/api/*`-only |
 | P2 | Turn-scoped diff viewer | **done** |
 | P3 | Worktrees + workspaces | **done** |

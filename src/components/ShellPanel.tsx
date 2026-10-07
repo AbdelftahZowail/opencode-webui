@@ -9,7 +9,6 @@ import {
   Square,
   SquareTerminal,
   Terminal,
-  Timer,
   Trash2,
 } from "lucide-react";
 import { api, type PtyInfo, type ShellInfo } from "../api/client";
@@ -210,17 +209,6 @@ function ShellTab({ active }: { active: boolean }) {
     }
   };
 
-  const setShellTimeout = async (id: string, ms: string) => {
-    const parsed = Number(ms);
-    if (!Number.isFinite(parsed) || parsed < 0) return;
-    try {
-      await api.shellTimeout(id, parsed);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="flex gap-2">
@@ -273,7 +261,6 @@ function ShellTab({ active }: { active: boolean }) {
                 if (!cursors.current[shell.id]) void appendOutput(shell.id);
               }}
               onKill={() => void kill(shell.id)}
-              onSetTimeout={(ms) => void setShellTimeout(shell.id, ms)}
             />
           ))
         )}
@@ -288,16 +275,13 @@ function ShellRow({
   output,
   onToggle,
   onKill,
-  onSetTimeout,
 }: {
   shell: ShellInfo;
   expanded: boolean;
   output: string;
   onToggle: () => void;
   onKill: () => void;
-  onSetTimeout: (ms: string) => void;
 }) {
-  const [timeoutValue, setTimeoutValue] = useState("");
   const outRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
@@ -353,32 +337,6 @@ function ShellRow({
           >
             {output || "No output yet…"}
           </pre>
-          <div className="flex items-center gap-2">
-            <Timer className="size-3.5 text-(color:--text-weaker)" />
-            <Input
-              value={timeoutValue}
-              onChange={(e) => setTimeoutValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  onSetTimeout(timeoutValue);
-                  setTimeoutValue("");
-                }
-              }}
-              placeholder="set timeout (ms)"
-              className="h-6 w-36 font-mono text-xs"
-            />
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={!timeoutValue.trim()}
-              onClick={() => {
-                onSetTimeout(timeoutValue);
-                setTimeoutValue("");
-              }}
-            >
-              Apply
-            </Button>
-          </div>
         </div>
       )}
     </div>

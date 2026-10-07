@@ -8,19 +8,30 @@ The contract we track is the engine's `/openapi.json`. The snapshot lives at
 `src/api/types.ts` are the hand-copied contract layer. `reference/coverage.md` is
 the route map. The engine is **out of scope** — we adapt here, we never change it.
 
-> **Snapshot is stale as of 2026-10-07.** Last real sync was `31aefe3`
-> (2026-09-15, 116 → 123 paths) against **engine 2.0.3**. The live engine is
-> **2.0.22**: 28 documented routes are gone, 21 live routes are undocumented, 88
-> are modified (+24/−10 schemas). A block moved under `/api/experimental/*`
-> (mcp, session import/stats/export/skill/wait, instructions, generate, config)
-> and others were renamed (`revert/clear` → `DELETE /api/session/{id}/revert`;
-> `vcs/branches` → `vcs/branch`; `form/request` → `/api/form`).
+> **Snapshot is current as of 2026-10-07** (Step 0, engine 2.0.22): 116 paths /
+> 255 schemas, matching live; `bun run scripts/diff-openapi.ts --check` exits 0.
+> The prior sync was `31aefe3` (2026-09-15, 123 paths / 241 schemas, engine
+> 2.0.3). That drift — 28 routes removed, 21 undocumented, 88 modified — moved a
+> block under `/api/experimental/*` (mcp write/action, session
+> import/stats/export/skill/wait/instructions, generate, config) and renamed
+> others (`revert/clear` → `DELETE /api/session/{id}/revert`; `vcs/branches` →
+> `vcs/branch`; `form/request` → `/api/form`).
 >
-> **Several shipped features call moved routes** — the permission *rules* PUT,
-> inbox steer/queue, form cancel/state, `vcs/branches`, export, wait. And the
-> permission-reply **body** shape moved (`{reply}` → `{decision}`), which is the
-> sharpest edge because a 400 is silent where a 404 is visible. Re-sync is
-> **step 0 of any parity work** (`plans/parity.md` §2.0).
+> **The sharpest drift was shape, not path** (a 400 is silent where a 404 is
+> visible): the permission-reply body `{reply}` → `{decision}`, the interrupt
+> query key `continue` → `resume`, and the slash-command identifier `command` →
+> `name`. All are fixed, current-shape-first with a legacy fallback where an old
+> engine must still work. Route moves fixed too: permission rules PUT →
+> `PATCH /api/session/{id}`, inbox steer/queue → `PATCH …/inbox/{id} {delivery}`,
+> rename → `PATCH /api/session/{id}`, form state/cancel → `GET`/`DELETE
+> …/form/{id}`, skill/export/wait/generate under `/api/experimental/*`,
+> `projectCurrent` derived from `/api/location`, `serverInfo` → `GET /api/info`.
+> See `reference/coverage.md` for the full mapping and the live smoke results.
+>
+> **Still follow this runbook for the next drift.** The AGENTS rule "do NOT
+> regenerate as part of an unrelated fix" applies: a re-sync is its own
+> workstream (snapshot + `client.ts`/`types.ts` + `coverage.md` together), never
+> bundled into a bug fix.
 
 ## Tooling (already fixed)
 

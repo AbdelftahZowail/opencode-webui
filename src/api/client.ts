@@ -43,7 +43,12 @@ export interface SessionExportData {
   messages: MessageInfo[];
 }
 
-export type VcsMode = "working" | "branch";
+/**
+ * `Vcs.Mode` — `working` (uncommitted), `branch` (merge-base of the current
+ * branch), `committed` (merge-base → HEAD). `committed` was missing from this
+ * type even though the contract always allowed it (parity R0.3/R7).
+ */
+export type VcsMode = "working" | "branch" | "committed";
 
 export interface VcsLocation {
   directory?: string | null;
@@ -193,6 +198,60 @@ function patch<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+/**
+ * Flip an inbox item's delivery (`steer`/`queue`). The engine consolidated the
+ * old `POST .../inbox/{id}/{steer|queue}` sub-routes into
+ * `PATCH .../inbox/{id}` with `{delivery}`; fall back to the legacy sub-route
+ * on 404/405 so an older engine still flips.
+ */
+async function setInboxDelivery(
+  sessionID: string,
+  inboxID: string,
+  delivery: PromptDelivery,
+): Promise<unknown> {
+  try {
+    return await patch<unknown>(`/api/session/${sessionID}/inbox/${inboxID}`, { delivery });
+  } catch (err) {
+    const status = statusOf(err);
+    if (status !== 404 && status !== 405) throw err;
+    return request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}/${delivery}`, {
+      method: "POST",
+    });
+  }
+}
+
+/**
+ * MCP write/action call. The routes moved from `/api/mcp/{server}*` to
+ * `/api/experimental/mcp/{server}*` (only the read routes stayed). Try the
+ * current namespace first and fall back to the legacy path on 404/405.
+ */
+async function mcpRequest(
+  server: string,
+  method: "PUT" | "DELETE" | "POST",
+  location: VcsLocation | undefined,
+  body?: unknown,
+  action?: "connect" | "disconnect",
+): Promise<unknown> {
+  const name = encodeURIComponent(server);
+  const suffix = action ? `/${action}` : "";
+  const q = vcsQuery(location);
+  const init: RequestInit =
+    body !== undefined
+      ? {
+          method,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      : { method };
+  try {
+    return await request<unknown>(`/api/experimental/mcp/${name}${suffix}?${q}`, init);
+  } catch (err) {
+    const status = statusOf(err);
+    if (status !== 404 && status !== 405) throw err;
+    return request<unknown>(`/api/mcp/${name}${suffix}?${q}`, init);
+  }
+}
+
 export interface FsEntry {
   path: string;
   type: "file" | "directory";
@@ -235,9 +294,11 @@ export interface PromptFile {
 
 export interface ProviderInfo {
   id: string;
+  canonical?: string;
   integrationID?: string;
   name: string;
-  disabled?: boolean;
+  /** `Provider.Info.activation` — replaced the old `disabled` flag. */
+  activation?: "auto" | "enabled" | "disabled";
   package: string;
   settings?: Record<string, unknown>;
   headers?: Record<string, string>;
@@ -431,21 +492,13 @@ export interface WorktreeRemoveInput {
 
 // ---- config preferences -------------------------------------------------
 
-/** `Config.Preferences` — from the highest-precedence global config doc. */
-export interface ConfigPreferences {
-  shell?: string;
-  websearch?: false | ConfigWebSearchInfo;
-}
-
-/** `Config.PreferencesPatch` — `null` clears a preference. */
+/**
+ * `Config.Patch` — the live global-config patch (`PATCH /api/experimental/config`).
+ * The old read route (`GET /api/config/preferences`) is gone and `websearch` is
+ * no longer patchable; only the shell preference remains (`null` clears it).
+ */
 export interface ConfigPreferencesPatch {
   shell?: string | null;
-  websearch?: false | ConfigWebSearchInfo | null;
-}
-
-export interface ConfigWebSearchInfo {
-  /** `"random"` reuses one randomly chosen provider until rate limited. */
-  provider: "random" | string;
 }
 
 /** `ConfigShell.Option` — a shell the engine can run commands with. */
@@ -483,12 +536,12 @@ export type ConfigEntry =
   | { type: "agents"; path: string }
   | { type: "claude"; path: string };
 
+/** `ServerInfo` — from `GET /api/info` (which replaced `GET /api/server`). */
 export interface ServerInfo {
+  version: string;
+  pid: number;
   urls: string[];
-}
-
-export interface ServiceStopResponse {
-  accepted: boolean;
+  paths: { tmp: string };
 }
 
 export interface GenerateResponse {
@@ -605,17 +658,29 @@ const apiRaw = {
   activeSessions: () =>
     request<{ data: Record<string, { type: "running" }> }>("/api/session/active"),
   /**
-   * POST /api/session/{sessionID}/wait — engine-native long-poll that
-   * resolves when the session's agent loop goes idle. Returns the RAW
-   * status on purpose: 204 = idle truth, 404 = session gone, 503 =
+   * `POST /api/experimental/session/{sessionID}/wait` — engine-native
+   * long-poll that resolves when the session's agent loop goes idle. Returns
+   * the RAW status on purpose: 204 = idle truth, 404 = session gone, 503 =
    * unavailable, -1 = network error/abort. Only 204 is an idle signal —
    * everything else is "unknown", so nothing here throws.
+   *
+   * The route moved under `/api/experimental/`; older engines only serve
+   * `/api/session/{id}/wait`, so a 404 falls back to the legacy path (both
+   * report "session gone" as 404, so the fallback never masks a real signal).
    */
-  sessionWait: (sessionID: string, signal?: AbortSignal): Promise<number> =>
-    fetch(`/api/session/${encodeURIComponent(sessionID)}/wait`, { method: "POST", signal }).then(
-      (r) => r.status,
+  sessionWait: (sessionID: string, signal?: AbortSignal): Promise<number> => {
+    const id = encodeURIComponent(sessionID);
+    return fetch(`/api/experimental/session/${id}/wait`, { method: "POST", signal }).then(
+      (r) =>
+        r.status === 404
+          ? fetch(`/api/session/${id}/wait`, { method: "POST", signal }).then(
+              (r2) => r2.status,
+              () => -1,
+            )
+          : r.status,
       () => -1,
-    ),
+    );
+  },
   /**
    * GET /api/experimental/session/{sessionID}/log?follow=false — cursor
    * bootstrap for the engine's DURABLE per-session event log (spike-verified:
@@ -660,12 +725,21 @@ const apiRaw = {
     }),
   getSession: (sessionID: string) =>
     request<{ data: SessionInfo }>(`/api/session/${sessionID}`),
-  renameSession: (sessionID: string, title: string) =>
-    request<unknown>(`/api/session/${sessionID}/rename`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title }),
-    }),
+  /**
+   * Rename a session. The engine moved this onto the session resource itself:
+   * `POST .../rename` is gone and `PATCH /api/session/{id}` now carries
+   * `{title}`. Try the current shape first and fall back to the legacy route on
+   * 404/405 so an older engine still renames.
+   */
+  renameSession: async (sessionID: string, title: string) => {
+    try {
+      return await patch<unknown>(`/api/session/${sessionID}`, { title });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return post<unknown>(`/api/session/${sessionID}/rename`, { title });
+    }
+  },
   forkSession: (sessionID: string, boundary: ForkBoundary) =>
     request<{ data: SessionInfo }>(`/api/session/${sessionID}/fork`, {
       method: "POST",
@@ -710,9 +784,15 @@ const apiRaw = {
       body: JSON.stringify({ model }),
     }),
   interrupt: (sessionID: string, continueRun?: boolean) => {
-    // `?continue=true` interrupts the current step AND resumes with pending
+    // `resume=true` interrupts the current step AND resumes with pending
     // steering input while queued prompts stay parked; omitted = plain abort.
-    const query = continueRun === undefined ? "" : `?continue=${continueRun}`;
+    // The query key was RENAMED upstream (`continue` → `resume`), and an
+    // unknown query key is silently ignored — so a `continue`-only request
+    // does a plain interrupt on the current engine. Send BOTH keys: the engine
+    // ignores the one it doesn't know, and one request works on either
+    // generation.
+    const query =
+      continueRun === undefined ? "" : `?continue=${continueRun}&resume=${continueRun}`;
     return request<{ interrupted?: boolean }>(
       `/api/session/${sessionID}/interrupt${query}`,
       { method: "POST" },
@@ -732,9 +812,20 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ messageID }),
     }),
-  /** Clear the staged/current revert (redo past the revert point). */
-  revertClear: (sessionID: string) =>
-    request<unknown>(`/api/session/${sessionID}/revert/clear`, { method: "POST" }),
+  /**
+   * Clear the staged/current revert (redo past the revert point). The route
+   * changed `POST …/revert/clear` → `DELETE /api/session/{id}/revert`; fall
+   * back to the legacy path on 404/405.
+   */
+  revertClear: async (sessionID: string) => {
+    try {
+      return await request<unknown>(`/api/session/${sessionID}/revert`, { method: "DELETE" });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return request<unknown>(`/api/session/${sessionID}/revert/clear`, { method: "POST" });
+    }
+  },
   /** Commit the staged revert. */
   revertCommit: (sessionID: string) =>
     request<unknown>(`/api/session/${sessionID}/revert/commit`, { method: "POST" }),
@@ -758,15 +849,27 @@ const apiRaw = {
     );
   },
   /**
-   * Replace the session-scoped permission rules. Returns 204 (no body).
-   * Rules evaluate after the agent's rules and the LAST match wins.
+   * Replace the session-scoped permission rules. Rules evaluate after the
+   * agent's rules and the LAST match wins.
+   *
+   * The dedicated `PUT .../permission/rules` route was removed upstream — the
+   * ruleset now rides `PATCH /api/session/{id}` as `{permissions}` (returns
+   * 204). Try the current shape first; fall back to the legacy route on
+   * 404/405 so an older engine still accepts the write.
    */
-  sessionPermissionRules: (sessionID: string, permissions: PermissionRuleset) =>
-    request<unknown>(`/api/session/${sessionID}/permission/rules`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ permissions }),
-    }),
+  sessionPermissionRules: async (sessionID: string, permissions: PermissionRuleset) => {
+    try {
+      return await patch<unknown>(`/api/session/${sessionID}`, { permissions });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return request<unknown>(`/api/session/${sessionID}/permission/rules`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ permissions }),
+      });
+    }
+  },
   sessionShell: (sessionID: string, command: string) =>
     request<unknown>(`/api/session/${sessionID}/shell`, {
       method: "POST",
@@ -834,12 +937,21 @@ const apiRaw = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: command, command, text: args ?? "" }),
     }),
-  activateSkill: (sessionID: string, skill: string) =>
-    request<unknown>(`/api/session/${sessionID}/skill`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ skill }),
-    }),
+  /**
+   * Activate a skill in the session. The route moved under
+   * `/api/experimental/` and the body field was RENAMED (`skill` → `id`, a
+   * skill id). Try the current route/body first; fall back to the legacy
+   * route/body on 404/405 so an older engine still activates.
+   */
+  activateSkill: async (sessionID: string, skill: string) => {
+    try {
+      return await post<unknown>(`/api/experimental/session/${sessionID}/skill`, { id: skill });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return post<unknown>(`/api/session/${sessionID}/skill`, { skill });
+    }
+  },
 
   // permissions
   pendingPermissions: () =>
@@ -969,10 +1081,18 @@ const apiRaw = {
   // inbox
   inboxList: (sessionID: string) =>
     request<{ data: InboxInfo[] }>(`/api/session/${sessionID}/inbox`),
+  /**
+   * Flip an admitted inbox item between steer and queue.
+   *
+   * The engine consolidated the two action sub-routes into one update:
+   * `PATCH .../inbox/{id}` with `{delivery}` (this replaced `POST .../steer`
+   * and `POST .../queue`). Try the current shape first and fall back to the
+   * legacy sub-route on 404/405.
+   */
   inboxQueue: (sessionID: string, inboxID: string) =>
-    request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}/queue`, { method: "POST" }),
+    setInboxDelivery(sessionID, inboxID, "queue"),
   inboxSteer: (sessionID: string, inboxID: string) =>
-    request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}/steer`, { method: "POST" }),
+    setInboxDelivery(sessionID, inboxID, "steer"),
   inboxDelete: (sessionID: string, inboxID: string) =>
     request<unknown>(`/api/session/${sessionID}/inbox/${inboxID}`, { method: "DELETE" }),
   /** Queue-delivered prompt (durable inbox item; wakes nothing by itself). */
@@ -981,7 +1101,23 @@ const apiRaw = {
   // filesystem & location
   location: () => request<LocationInfo>("/api/location"),
   locationInfo: () => request<LocationInfo>("/api/location"),
-  projectCurrent: () => request<ProjectInfo>("/api/project/current"),
+  /**
+   * The project for the engine's ambient location. `GET /api/project/current`
+   * was removed upstream; `/api/location` now carries the resolved `project`
+   * inline. Read it from there (current first) and fall back to the legacy
+   * route only when the location has no project (older engines).
+   */
+  projectCurrent: async (): Promise<ProjectInfo> => {
+    const loc = await request<LocationInfo>("/api/location");
+    if (loc.project) {
+      return {
+        id: loc.project.id,
+        canonical: loc.project.canonical,
+        directory: loc.project.directory,
+      };
+    }
+    return request<ProjectInfo>("/api/project/current");
+  },
   projectList: () => request<ProjectInfo[]>("/api/project"),
   /**
    * `PATCH /api/project/{id}` — update display metadata and workspace
@@ -1093,6 +1229,15 @@ const apiRaw = {
     ),
   vcsBase: (location?: VcsLocation) =>
     request<{ location: unknown; data: VcsBase | null }>(`/api/vcs/base?${vcsQuery(location)}`),
+  /**
+   * Branch names for the location. The route was RENAMED `vcs/branches` →
+   * `vcs/branch` (and `data` is a bare `string[]`). Wrapped for the diff
+   * viewer's base-branch picker (parity R7) — no UI consumes it yet.
+   */
+  vcsBranches: (opts: { location?: VcsLocation; search?: string; limit?: number } = {}) =>
+    request<{ location: unknown; data: string[] }>(
+      `/api/vcs/branch?${vcsQuery(opts.location, { search: opts.search, limit: opts.limit })}`,
+    ),
 
   // shell
   shellList: (location?: VcsLocation) =>
@@ -1122,15 +1267,6 @@ const apiRaw = {
   ) =>
     request<{ location: unknown; data: ShellOutputData }>(
       `/api/shell/${id}/output?${vcsQuery(location, { cursor: opts?.cursor, limit: opts?.limit })}`,
-    ),
-  shellTimeout: (id: string, timeout: number, location?: VcsLocation) =>
-    request<{ location: unknown; data: ShellInfo }>(
-      `/api/shell/${id}/timeout?${vcsQuery(location)}`,
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ timeout }),
-      },
     ),
 
   // pty
@@ -1211,7 +1347,9 @@ const apiRaw = {
       `/api/integration/${integrationID}/connect/command/${attemptID}`,
     ),
 
-  // mcp — every route is location-scoped and PUT (not PATCH) adds a server.
+  // mcp — the write/action routes moved under /api/experimental/mcp/* (the
+  // read routes stay at /api/mcp). Every route is location-scoped; PUT (not
+  // PATCH) adds a server. Current route first, legacy path on 404/405.
   mcpList: (location?: VcsLocation) =>
     request<{ location: unknown; data: McpServer[] }>(`/api/mcp?${vcsQuery(location)}`),
   mcpResource: (location?: VcsLocation) =>
@@ -1219,17 +1357,13 @@ const apiRaw = {
       `/api/mcp/resource?${vcsQuery(location)}`,
     ),
   mcpPut: (server: string, config: McpServerConfig, location?: VcsLocation) =>
-    request<unknown>(`/api/mcp/${server}?${vcsQuery(location)}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config }),
-    }),
+    mcpRequest(server, "PUT", location, { config }),
   mcpDelete: (server: string, location?: VcsLocation) =>
-    request<unknown>(`/api/mcp/${server}?${vcsQuery(location)}`, { method: "DELETE" }),
+    mcpRequest(server, "DELETE", location),
   mcpConnect: (server: string, location?: VcsLocation) =>
-    post<unknown>(`/api/mcp/${server}/connect?${vcsQuery(location)}`, null),
+    mcpRequest(server, "POST", location, null, "connect"),
   mcpDisconnect: (server: string, location?: VcsLocation) =>
-    post<unknown>(`/api/mcp/${server}/disconnect?${vcsQuery(location)}`, null),
+    mcpRequest(server, "POST", location, null, "disconnect"),
 
   // plugins
   pluginList: (location?: VcsLocation) =>
@@ -1252,8 +1386,22 @@ const apiRaw = {
    * `pluginList` state. Returns 204; cancelling the wait doesn't cancel
    * activation.
    */
-  pluginAwaitActivation: (location?: VcsLocation) =>
-    post<unknown>(`/api/plugin/await-activation?${vcsQuery(location)}`, null),
+  /**
+   * Wait for plugin activation at a location to settle. This route was
+   * REMOVED upstream (2.0.22): `POST /api/plugin/update` already responds once
+   * every update (and its activation) finished. Kept as a best-effort no-op for
+   * old engines — a 404/405 resolves instead of throwing, so the caller's
+   * existing `.catch` is not even needed.
+   */
+  pluginAwaitActivation: async (location?: VcsLocation) => {
+    try {
+      return await post<unknown>(`/api/plugin/await-activation?${vcsQuery(location)}`, null);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status === 404 || status === 405) return undefined;
+      throw err;
+    }
+  },
 
   // folder extensions (Settings › Extensions on/off switch)
   webuiExtensionState: (id: string, disabled: boolean) =>
@@ -1274,13 +1422,22 @@ const apiRaw = {
   // config & credentials
   configGet: () => request<ConfigEntry[]>("/api/config"),
   /**
-   * Preferences from the highest-precedence GLOBAL config document (no
-   * location parameter — this is not per-project).
+   * Patch the highest-precedence GLOBAL config document (no location — this is
+   * not per-project). The route moved `/api/config/preferences` →
+   * `PATCH /api/experimental/config`; the live `Config.Patch` body carries only
+   * `shell` (required, `null` clears), so always send it. Fall back to the
+   * legacy route on 404/405. Returns 204.
    */
-  configPreferences: () => request<ConfigPreferences>("/api/config/preferences"),
-  /** Patch global preferences; `null` clears a key. Returns the new state. */
-  configPreferencesUpdate: (prefs: ConfigPreferencesPatch) =>
-    patch<ConfigPreferences>("/api/config/preferences", prefs),
+  configPreferencesUpdate: async (prefs: ConfigPreferencesPatch) => {
+    const body = { shell: prefs.shell ?? null };
+    try {
+      return await patch<unknown>("/api/experimental/config", body);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return patch<unknown>("/api/config/preferences", body);
+    }
+  },
   /** Shells available to terminal and agent execution. */
   configShells: () => request<ConfigShellOption[]>("/api/config/shell"),
   credentialPatch: (credentialID: string, label: string) =>
@@ -1291,13 +1448,29 @@ const apiRaw = {
     request<unknown>(`/api/credential/${credentialID}`, { method: "DELETE" }),
 
   // server
-  serverInfo: () => request<ServerInfo>("/api/server"),
-  serviceStop: (instanceID?: string) =>
-    post<ServiceStopResponse>("/api/service/stop", { instanceID: instanceID ?? "" }),
+  /**
+   * `GET /api/info` (`ServerInfo`: version/pid/urls/paths). This replaced
+   * `GET /api/server`, which was removed upstream. Client-only (the Settings →
+   * Server tab was deliberately de-surfaced).
+   */
+  serverInfo: () => request<ServerInfo>("/api/info"),
 
   // misc
-  generate: (prompt: string, model?: ModelRef | null) =>
-    post<GenerateResponse>("/api/generate", { prompt, model: model ?? null }),
+  /**
+   * Stateless one-shot generation. The route moved `/api/generate` →
+   * `POST /api/experimental/generate`; fall back to the legacy path on
+   * 404/405. Client-only (plugins/tools call it via `ctx.generate.text`).
+   */
+  generate: async (prompt: string, model?: ModelRef | null) => {
+    const body = { prompt, model: model ?? null };
+    try {
+      return await post<GenerateResponse>("/api/experimental/generate", body);
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return post<GenerateResponse>("/api/generate", body);
+    }
+  },
   referenceList: () =>
     request<{ location: unknown; data: ReferenceInfo[] }>("/api/reference"),
 };

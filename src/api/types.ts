@@ -74,7 +74,8 @@ export type MessageInfo =
   | AgentSelectedMessage
   | ModelSelectedMessage
   | LocationSwitchedMessage
-  | CompactionMessage;
+  | CompactionMessage
+  | IdleMessage;
 
 /**
  * `GET /api/session/{id}/message?type=` — filters by message type BEFORE
@@ -91,7 +92,8 @@ export type MessageTypeFilter =
   | "compaction"
   | "agent-switched"
   | "model-switched"
-  | "location-switched";
+  | "location-switched"
+  | "idle";
 
 interface MessageBase {
   id: string;
@@ -172,6 +174,16 @@ export interface CompactionMessage extends MessageBase {
   summary?: string;
   recent?: string;
   error?: StructuredError;
+}
+
+/**
+ * `Session.Message.Idle` — the turn-boundary marker the engine writes when a
+ * run settles (this is what replaced the standalone idle signal). `outcome`
+ * says how the turn ended.
+ */
+export interface IdleMessage extends MessageBase {
+  type: "idle";
+  outcome: "succeeded" | "failed" | "interrupted";
 }
 
 export type AssistantPart = TextPart | ReasoningPart | ToolPart;
@@ -301,21 +313,19 @@ export interface AgentInfo {
   hidden: boolean;
 }
 
+/** `Command.Info` — the current engine returns only the name + description. */
 export interface CommandInfo {
   name: string;
-  template: string;
   description?: string;
-  agent?: string;
-  model?: ModelRef;
 }
 
 export interface SkillInfo {
   id: string;
   name: string;
   description?: string;
-  slash?: boolean;
   autoinvoke?: boolean;
-  location: string;
+  /** `Skill.Info.path` — the old `location` field was renamed upstream. */
+  path: string;
   content: string;
 }
 
