@@ -96,6 +96,27 @@ From the repo root, on `master`, with a clean release scope:
   `https://registry.npmjs.org/opencode-webui/<version>` should be 200; the
   `dist.tarball` should download. The npm poller's "latest" is NOT evidence
   here.
+- **The committed OpenAPI snapshot is STALE — do not run `fetch-openapi.ts` as
+  part of an unrelated fix.** As of 2026-10-07 the live engine serves a block
+  of routes under `/api/experimental/` and has renamed others;
+  `bun run scripts/diff-openapi.ts` reports 28 paths the snapshot documents
+  that the engine no longer serves, and 21 live paths it does not document.
+  It bit hard on session export: `api.exportSession` called
+  `/api/session/{id}/export`, which 404s, while
+  `/api/experimental/session/{id}/export` answers 200 — so "Export" and
+  `/copy` silently did nothing. `diff-openapi.ts` also dies with
+  `TypeError: body is not an Object` inside `Service.ensure()` when a
+  previously-spawned engine has died; retrying does not always clear it.
+  Regenerating the snapshot is its own workstream, not a drive-by: it would
+  desync `src/api/types.ts` and every row of `docs/coverage.md`. Prefer the
+  narrow fix plus a dated scope note in `docs/coverage.md` (what 3.2.1+
+  `caaf5ad` did).
+- **Verify a gate actually fails before trusting it.** `check:unseen`'s
+  stamp-throttle regression was written with a 1.2s gap and passed with the
+  bug present — `SETTLE_SLOP_MS` (2s) absorbed it, making the guard vacuous.
+  The window that actually distinguishes them is >slop and <old-throttle. Any
+  assertion with a millisecond window needs the same both-ways proof:
+  reintroduce the bug, watch the check go red, restore it.
 - Scratch lives in `/tmp/opencode/`. Do not touch
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
 
