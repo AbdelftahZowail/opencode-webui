@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { Spinner } from "../ui";
 import { registerPoller } from "../../lib/scheduler";
 import { useIsPhone } from "../../hooks/useIsPhone";
-import { getContributions, subscribeRegistry, type SettingsContribution } from "../../extensions/registry";
+import { getContributions, subscribeRegistry, Target, type SettingsContribution } from "../../extensions/registry";
 import { parseManifestContract, type SettingField } from "../../extensions/manifest";
 import {
   registerExtensionSchema,
@@ -24,7 +24,9 @@ import {
 } from "../../lib/extensionDiagnostics";
 import { AccessSection } from "./AccessSection";
 import { AppSection } from "./AppSection";
-import { PluginsSection } from "./PluginsSection";
+// Side-effect import: PluginsSection self-registers the `settings.plugins`
+// target (rendered through <Target> below), so its module must evaluate here.
+import "./PluginsSection";
 import { Empty, SectionHeader, inputCls } from "./shared";
 import { checkPlugins, loadPlugins, updatePlugins, useStore } from "../../store";
 
@@ -359,12 +361,13 @@ function PluginsTab() {
     void loadPlugins();
   }, []);
   return (
-    <PluginsSection
+    <Target
+      id="settings.plugins"
       plugins={plugins ?? []}
       busy={busy}
       error={error}
-      onCheck={(target) => void checkPlugins(target)}
-      onUpdate={(targets) => void updatePlugins(targets)}
+      onCheck={(target: string | null | undefined) => void checkPlugins(target)}
+      onUpdate={(targets: string[]) => void updatePlugins(targets)}
     />
   );
 }

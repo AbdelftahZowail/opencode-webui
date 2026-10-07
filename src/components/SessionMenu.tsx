@@ -13,14 +13,18 @@ import {
   useStore,
 } from "../store";
 import type { SessionExportData } from "../api/client";
-import type { PermissionSavedInfo } from "../api/types";
+import type { PermissionRuleset, PermissionSavedInfo } from "../api/types";
 import { notify } from "../lib/notify";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
-import { PermissionRulesEditor } from "./PermissionRulesEditor";
+import { Target } from "../extensions/registry";
+// Side-effect import: PermissionRulesEditor self-registers the
+// `permission.rulesEditor` target (rendered through <Target> below), so its
+// module must evaluate here.
+import "./PermissionRulesEditor";
 
 type SessionDialog = "rename" | "fork" | "compact" | "permissions" | null;
 
@@ -105,9 +109,10 @@ function PermissionRulesDialog({ sessionID, onClose }: { sessionID: string; onCl
             Session-scoped. Evaluated after the agent's own rules — the last matching rule wins.
           </DialogDescription>
         </DialogHeader>
-        <PermissionRulesEditor
+        <Target
+          id="permission.rulesEditor"
           rules={rules ?? []}
-          onSave={(next) => {
+          onSave={(next: PermissionRuleset) => {
             setBusy(true);
             void updateSessionPermissionRules(sessionID, next)
               .then(() => onClose())

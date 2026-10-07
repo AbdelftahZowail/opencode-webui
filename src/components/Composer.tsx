@@ -29,6 +29,7 @@ import {
   materializeDraft,
   newSession,
   closeRunsPanel,
+  openDiffViewer,
   openRunsPanel,
   openStashPanel,
   redoSession,
@@ -641,7 +642,7 @@ export function Composer({
       {
         name: "diff",
         description: "Open diff viewer",
-        run: () => signalUI("explorer"),
+        run: () => openDiffViewer(sessionID),
       },
       {
         name: "help",

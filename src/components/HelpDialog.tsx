@@ -5,6 +5,7 @@ import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from "./ui/dialog";
 
 const KEYBINDS: [string, string][] = [
   ["Enter", "Send · queue while the agent works"],
+  ["Ctrl/⌘+Enter", "Queue the message for after this turn"],
   ["Esc", "Interrupt the running agent"],
   ["Tab / Shift+Tab", "Next / previous agent"],
   ["↑ / ↓ (input at start/end)", "Prompt history"],
@@ -12,9 +13,12 @@ const KEYBINDS: [string, string][] = [
   ["← / → (outside input)", "Cycle subagent sessions"],
   ["↑ (outside input)", "Parent session"],
   ["Ctrl+B", "Background synchronous subagents"],
+  ["Ctrl+S", "Stash the current prompt"],
   ["Ctrl+P", "Command palette"],
   ["Ctrl+N", "New session"],
+  ["Ctrl+\\", "Split view — open a session beside this one"],
   ["⌘F / Ctrl+F", "Search sessions"],
+  ["Ctrl+K", "Kill the selected shell (Runs panel)"],
   ["/", "Slash commands & skills"],
   ["@", "Reference files"],
   ["!", "Shell mode"],
