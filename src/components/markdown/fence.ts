@@ -15,6 +15,17 @@
  */
 export type LiveKind = "html" | "svg" | "pdf" | "image";
 
+export type FenceMarker = "`" | "~";
+
+/** A parsed fenced block recovered from the raw markdown source. */
+export interface FencedBlockInfo {
+  marker: FenceMarker;
+  /** Lowercased first info-string token (may be empty for a bare fence). */
+  lang: string;
+  /** Raw fence body, without the trailing newline. */
+  source: string;
+}
+
 /** Tilde-fence language tags that trigger LIVE inline rendering. */
 const LIVE_KINDS: Record<string, LiveKind> = {
   html: "html",
@@ -37,13 +48,71 @@ export interface LiveFenceInfo {
   source: string;
 }
 
-const FENCE_RE = /^(`{3,}|~{3,})/;
+/** Language + exact source of a fenced block, derived from its rendered AST. */
+export interface CodeBlockInfo {
+  lang: string;
+  source: string;
+}
 
-/** True when the fence that starts at `offset` is a tilde fence. */
-function isTildeFenceAt(source: string, offset: number): boolean {
-  if (offset < 0 || offset >= source.length) return false;
-  const m = FENCE_RE.exec(source.slice(offset));
-  return m !== null && m[1]!.startsWith("~");
+/** Minimal structural view of the hast nodes react-markdown passes through. */
+interface HastLike {
+  tagName?: string;
+  value?: string;
+  properties?: { className?: unknown };
+  children?: HastLike[];
+}
+
+/**
+ * Read a fenced code block's language and source from its rendered `<pre>`
+ * hast node. Using the AST (rather than re-parsing the raw document) is what
+ * makes nested fences correct: a fence inside a blockquote or list item carries
+ * `> ` / indent markers in the raw source, but the node's text is already
+ * marker-free. Returns null when the node is not a fenced `pre > code`.
+ */
+export function getCodeBlockInfo(node: unknown): CodeBlockInfo | null {
+  const pre = node as HastLike | undefined;
+  if (!pre || pre.tagName !== "pre") return null;
+  const code = pre.children?.find((child) => child.tagName === "code");
+  if (!code) return null;
+  const raw = code.properties?.className;
+  const classes = Array.isArray(raw)
+    ? raw.map(String)
+    : typeof raw === "string"
+      ? raw.split(/\s+/)
+      : [];
+  const langClass = classes.find((cls) => cls.startsWith("language-"));
+  const lang = langClass ? langClass.slice("language-".length).toLowerCase() : "";
+  const source = (code.children ?? [])
+    .map((child) => child.value ?? "")
+    .join("")
+    .replace(/\r?\n$/, "");
+  return { lang, source };
+}
+
+const FENCE_HEADER_RE = /^(`{3,}|~{3,})([^\n]*)\r?\n/;
+
+/**
+ * Recover a fenced block (either ` or ~) from the raw source at `offset`.
+ * Returns null for indented code, for offsets that do not point at a fence, and
+ * whenever the offset check cannot be made — callers then keep the safe default
+ * (render the source as-is).
+ */
+export function getFencedBlock(source: string, offset: number | undefined): FencedBlockInfo | null {
+  if (typeof offset !== "number" || offset < 0 || offset >= source.length) return null;
+  const rest = source.slice(offset);
+  const header = FENCE_HEADER_RE.exec(rest);
+  if (!header) return null;
+  const fence = header[1]!;
+  const marker: FenceMarker = fence.startsWith("~") ? "~" : "`";
+  const lang = (header[2] ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  const bodyStart = offset + header[0].length;
+  const body = source.slice(bodyStart);
+  // Closing fence: a line that is only the same fence character (GFM allows
+  // trailing spaces).
+  const close = marker === "~" ? /(?:^|\n)(~{3,})[ \t]*(?:\r?\n|$)/ : /(?:^|\n)(`{3,})[ \t]*(?:\r?\n|$)/;
+  const closeMatch = close.exec(body);
+  const value = closeMatch ? body.slice(0, closeMatch.index === 0 ? 0 : closeMatch.index + 1) : body;
+  return { marker, lang, source: value.replace(/\r?\n$/, "") };
 }
 
 /**
@@ -52,22 +121,9 @@ function isTildeFenceAt(source: string, offset: number): boolean {
  * case the safe default — code — wins).
  */
 export function getLiveFence(source: string, offset: number | undefined): LiveFenceInfo | null {
-  if (typeof offset !== "number" || offset < 0) return null;
-  if (!isTildeFenceAt(source, offset)) return null;
-
-  // Recover lang + body. The mdast node's own `lang`/`value` are not passed
-  // through react-markdown's component props, so parse the raw fence here:
-  // marker, info string, newline, then body up to the closing fence.
-  const rest = source.slice(offset);
-  const header = /^(~{3,})([^\n]*)\r?\n/.exec(rest);
-  if (!header) return null;
-  const lang = (header[2] ?? "").trim().split(/\s+/)[0]!.toLowerCase();
-  const kind = LIVE_KINDS[lang];
+  const block = getFencedBlock(source, offset);
+  if (!block || block.marker !== "~") return null;
+  const kind = LIVE_KINDS[block.lang];
   if (!kind) return null;
-  const bodyStart = offset + header[0].length;
-  const body = source.slice(bodyStart);
-  // Closing fence: a line that is only tildes (GFM allows trailing spaces).
-  const closeMatch = /(?:^|\n)(~{3,})[ \t]*(?:\r?\n|$)/.exec(body);
-  const value = closeMatch ? body.slice(0, closeMatch.index === 0 ? 0 : closeMatch.index + 1) : body;
-  return { lang, kind, source: value.replace(/\r?\n$/, "") };
+  return { lang: block.lang, kind, source: block.source };
 }

@@ -65,7 +65,12 @@ createRoot(document.getElementById("root")!).render(
  * for xterm at all until a shell is actually opened.
  */
 if (!hasCoarsePointer()) {
-  const warm = () => void import("./components/TerminalView");
+  const warm = () => {
+    void import("./components/TerminalView");
+    // Warm the shiki engine + Oniguruma wasm on desktop idle so the first code
+    // block highlights without a plain→highlight swap (R1). Phones skip it.
+    void import("./lib/markdown/shiki").then((m) => m.warmHighlighter());
+  };
   const idle = (window as unknown as { requestIdleCallback?: (cb: () => void) => number })
     .requestIdleCallback;
   if (idle) idle(warm);

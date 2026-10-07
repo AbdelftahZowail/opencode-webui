@@ -8,7 +8,11 @@ export { Markdown } from "./Markdown";
 export { Table, Th, Td } from "./Table";
 export { ShelfChip } from "./ShelfChip";
 export { PreviewBlock, PreviewPausedBlock } from "./PreviewBlock";
-export { getLiveFence, type LiveFenceInfo, type LiveKind } from "./fence";
+export { CodeBlock } from "./CodeBlock";
+export { MermaidBlock } from "./MermaidBlock";
+export { LatexBlock } from "./LatexBlock";
+export { BlockBoundary, FenceFallback } from "./BlockBoundary";
+export { getLiveFence, getFencedBlock, getCodeBlockInfo, type LiveFenceInfo, type LiveKind, type FencedBlockInfo, type CodeBlockInfo } from "./fence";
 export {
   isMarkdownRenderingEnabled,
   setMarkdownRendering,

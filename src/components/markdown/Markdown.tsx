@@ -9,6 +9,9 @@
  *    previews in a sandboxed iframe / native viewer. Backtick fences always
  *    stay code; the two are told apart by the raw document offset of the
  *    fence (see `fence.ts`).
+ *  - Fenced code (R1/R2) — syntax-highlighted (shiki, lazy); ``` mermaid and
+ *    ``` latex fences render a diagram / glyphs with their source hidden, and
+ *    crash-isolate to the plain source on failure. All lazy-loaded.
  *  - Shelf link chips — `/api/shelf/file/…` links become a small file chip.
  *
  * The whole thing is one memoized component (`Markdown`) so a streaming
@@ -21,7 +24,12 @@ import { openImage } from "../ImageViewer";
 import { Table, Th, Td } from "./Table";
 import { ShelfChip } from "./ShelfChip";
 import { PreviewBlock, PreviewPausedBlock } from "./PreviewBlock";
-import { getLiveFence } from "./fence";
+import { CodeBlock } from "./CodeBlock";
+import { MermaidBlock } from "./MermaidBlock";
+import { LatexBlock } from "./LatexBlock";
+import { BlockBoundary } from "./BlockBoundary";
+import { getLiveFence, getCodeBlockInfo } from "./fence";
+import { specialBlockKind } from "../../lib/markdown/languages";
 import { useMarkdownRendering } from "./controls";
 
 /**
@@ -89,11 +97,13 @@ function buildComponents(text: string, renderingEnabled: boolean): Components {
 }
 
 /**
- * A `pre` is either a live tilde fence (→ PreviewBlock, by default) or plain
- * fenced code (→ the normal styled block). A fence's raw offset in the source
- * string is what distinguishes `~~~` from ```; ReactMarkdown's default `pre`
- * shape (nested `code`) is preserved for the plain case so existing CSS-style
- * targeting keeps working.
+ * A `pre` is a live tilde fence (→ PreviewBlock) or fenced code. The `~~~` vs
+ * ``` distinction comes from the raw source offset (the rendered class only
+ * carries `language-*`); the language and exact source are then read from the
+ * rendered `<pre>` AST node, so nested fences (blockquote/list) stay
+ * marker-free. Code is routed by info-string: mermaid and LaTeX hide their
+ * source, everything else is a syntax-highlighted code block. The plain styled
+ * `<pre>` remains the fallback for anything that is not a fence.
  */
 function PreOrPreview({
   text,
@@ -103,12 +113,40 @@ function PreOrPreview({
   ...rest
 }: ComponentPropsWithoutRef<"pre"> & { text: string; renderingEnabled: boolean; node?: unknown }) {
   const offset = (node as { position?: { start?: { offset?: number } } } | undefined)?.position?.start?.offset;
-  const live = useMemo(() => getLiveFence(text, offset), [text, offset]);
+  const { live, block } = useMemo(
+    () => ({ live: getLiveFence(text, offset), block: getCodeBlockInfo(node) }),
+    [text, offset, node],
+  );
   if (live) {
     // A live tilde fence: the browser handles the tilde convention. When the
     // user has paused previews, show the source with a clear "paused" frame
     // instead of silently dropping the convention.
     return renderingEnabled ? <PreviewBlock info={live} /> : <PreviewPausedBlock info={live} />;
+  }
+  // Fenced code (AST-derived, so nested fences stay marker-free): the
+  // info-string selects a richer renderer — mermaid diagrams and KaTeX math
+  // hide their source; everything else is a syntax-highlighted code block.
+  if (block) {
+    const special = specialBlockKind(block.lang);
+    if (special === "mermaid") {
+      return (
+        <BlockBoundary source={block.source}>
+          <MermaidBlock source={block.source} />
+        </BlockBoundary>
+      );
+    }
+    if (special === "latex") {
+      return (
+        <BlockBoundary source={block.source}>
+          <LatexBlock source={block.source} />
+        </BlockBoundary>
+      );
+    }
+    return (
+      <BlockBoundary source={block.source}>
+        <CodeBlock code={block.source} lang={block.lang || undefined} />
+      </BlockBoundary>
+    );
   }
   return (
     <pre {...rest} className={PRE_CLS}>

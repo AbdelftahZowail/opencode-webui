@@ -784,8 +784,8 @@ function CompactionCard({
         {shouldCollapse && <ChevronRight className={`ml-auto size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`} />}
       </button>
       {showSummary && (
-        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-base)] whitespace-pre-wrap">
-          {showSummary}
+        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-base)]">
+          <Markdown text={showSummary} />
           {shouldCollapse && !expanded && (
             <button type="button" onClick={() => setExpanded(true)} className="ml-1 cursor-pointer text-[var(--text-interactive-base)] hover:underline">
               show more

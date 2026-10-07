@@ -347,6 +347,9 @@ Sized S (hours) / M (a day-ish) / L (multi-day) / XL (a program of its own).
 **Everything here needs the human's sign-off before you start** — the plan is
 the spec; §9 lists the open decisions.
 
+**Landed:** Step 0 contract re-sync, **R0** ship defects, **R1** syntax
+highlighting + **R2** mermaid/LaTeX (see `git log`). Remaining: R3–R14.
+
 ### R0 — Ship defects (serial, first, small) · S
 
 Live bugs in what already shipped. Fix these before new work so the tree is
