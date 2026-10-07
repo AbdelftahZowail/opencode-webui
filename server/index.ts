@@ -132,6 +132,11 @@ const APP_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // Vite serves the UI and proxies /api to this proxy. Settings that only make
 // sense for the one-port production topology are flagged in the API below.
 const IS_DEV = existsSync(join(APP_ROOT, "vite.config.ts"));
+// A `bun run dev` / `dev:server` checkout is a SECOND instance (its proxy sits
+// on :4098 beside the real :4097), so it must not claim the shared pidfile —
+// same rule as the sandbox. `bun start` (NODE_ENV=production) is a deliberate
+// single-port run and still owns it.
+const IS_DEV_PROXY = IS_DEV && process.env.NODE_ENV !== "production";
 const DEBUG_LOG = process.env.WEBUI_DEBUG_LOG ?? "/tmp/webui-debug.log";
 const DEBUG = Bun.env.WEBUI_DEBUG === "1";
 const REPORT_REPO = process.env.WEBUI_REPORT_REPO ?? "AbdelftahZowail/opencode-webui";
@@ -1781,12 +1786,16 @@ function settingsPayload() {
 // install is a no-op; the first install (and a refresh after an upgrade) shows
 // a one-time notice with the undo.
 //
-// The pidfile lets `stop`/`restart`/`update` find THIS server — so a sandbox
-// must never write it. The sandbox is a throwaway second instance on its own
-// port; claiming the shared pidfile would aim those verbs at the sandbox and
-// orphan the real webui (observed: `restart` stopped the sandbox while :4097
-// kept serving the old build). Sandbox is stopped by its own terminal/process.
-if (!SANDBOX()) {
+// The pidfile lets `stop`/`restart`/`update` find THIS server — so only the
+// managed server may write it; second instances must not. A sandbox is a
+// throwaway instance on its own port, and a `bun run dev` proxy (IS_DEV_PROXY)
+// is the same shape (:4098 beside the real :4097). Either claiming the shared
+// pidfile aims those verbs at the wrong process and orphans the managed webui —
+// observed: a dev proxy's stale pidfile made `update` no-op its stop, its
+// respawn died on EADDRINUSE against the still-running :4097 server, and
+// `update` reported "restarted" while the old version kept serving. Second
+// instances are stopped by their own terminal/process.
+if (!SANDBOX() && !IS_DEV_PROXY) {
   writePidFile(server.port ?? PROXY_PORT);
   process.on("exit", clearPidFile);
 }

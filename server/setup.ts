@@ -638,6 +638,22 @@ export function spawnDetached(launch: LaunchCommand): boolean {
   }
 }
 
+/**
+ * Wait for a freshly spawned server to claim the pidfile (it writes it on
+ * boot). A live pid different from `prev` means the respawn came up; a timeout
+ * means it died — commonly EADDRINUSE against an orphaned instance the stale
+ * pidfile didn't name. Port-independent and works regardless of auth mode.
+ */
+async function waitForNewPid(prev: number | null, timeoutMs = 10_000): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const info = readPidFile();
+    if (info && info.pid !== prev && isAlive(info.pid) && pidLooksLikeOurs(info.pid)) return info.pid;
+    await Bun.sleep(250);
+  } while (Date.now() < deadline);
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Install / uninstall
 // ---------------------------------------------------------------------------
@@ -858,7 +874,7 @@ function parseLaunchJson(stdout: string): { version: string; cmd: string[]; disp
   return null;
 }
 
-function runUpdate(entryUrl: string): number {
+async function runUpdate(entryUrl: string): Promise<number> {
   if (entryUrl.includes("bunfs")) {
     console.log(`${SERVICE_NAME}: this is a compiled binary — download the latest from ${RELEASES_URL}`);
     return 1;
@@ -885,8 +901,18 @@ function runUpdate(entryUrl: string): number {
   }
   const current = readOwnVersion();
   const launch: LaunchCommand = { cmd: parsed.cmd, display: parsed.display };
+  const previous = readPidFile()?.pid ?? null;
   stopRunning();
   spawnDetached(launch);
+  // Never claim a restart we didn't get. The respawned server claims the
+  // pidfile on boot, so if a new live pid never appears it died silently —
+  // typically EADDRINUSE against an orphaned instance the pidfile didn't name.
+  if (!(await waitForNewPid(previous))) {
+    console.error(
+      `${SERVICE_NAME}: the new server did not come up — another instance may still hold the port (run \`${SERVICE_NAME} status\`)`,
+    );
+    return 1;
+  }
   if (parsed.version === current) {
     console.log(`${SERVICE_NAME}: already on the latest version (v${current}) — restarted`);
     return 0;
@@ -929,13 +955,23 @@ export async function runSetupCli(action: string | undefined, entryUrl: string, 
       return 0;
     case "restart": {
       const launch = readLaunchConfig();
+      const previous = readPidFile()?.pid ?? null;
       stopRunning();
       const command: LaunchCommand = launch
         ? { cmd: launch.cmd, display: launch.display }
         : resolveLaunchCommand(entryUrl);
-      const ok = spawnDetached(command);
-      console.log(ok ? `${SERVICE_NAME}: restarted` : `${SERVICE_NAME}: could not restart`);
-      return ok ? 0 : 1;
+      if (!spawnDetached(command)) {
+        console.log(`${SERVICE_NAME}: could not restart`);
+        return 1;
+      }
+      if (!(await waitForNewPid(previous))) {
+        console.error(
+          `${SERVICE_NAME}: the new server did not come up — another instance may still hold the port`,
+        );
+        return 1;
+      }
+      console.log(`${SERVICE_NAME}: restarted`);
+      return 0;
     }
     case "uninstall": {
       const result = uninstallSetup();
