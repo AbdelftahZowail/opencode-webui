@@ -5,7 +5,7 @@ cross-check against the actual repo state (`git log`, `package.json`, the
 `AGENTS.md` "Release checklist") before executing anything here — evidence from
 the repo beats this file.
 
-- **Last released version:** `3.2.1` (tag `v3.2.1`)
+- **Last released version:** `3.3.0` (tag `v3.3.0`)
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -82,8 +82,19 @@ From the repo root, on `master`, with a clean release scope:
   `server/setup.ts`) may carry several workstreams. Hunk-split only when it is
   clean and safe; otherwise one detailed commit that enumerates everything is
   acceptable.
-- **Do not commit in-progress design docs** (e.g. `docs/extension-roadmap-2.md`
-  at 3.2.0) — leave them untracked.
+- **Design docs CAN be committed when they carry no private data.** A roadmap /
+  proposal doc (e.g. `docs/extension-roadmap-2.md`) is fine to push once the
+  owner confirms it has nothing private or machine-specific — it is the
+  "what's next" map. This reversed the earlier "leave roadmap-2 untracked" rule
+  at 3.3.0; decide per-doc, do not blanket-untrack.
+- **Personal extensions never ship from this repo.** `webui-extensions/` is the
+  SHIPPED stratum; the user's own extensions live in
+  `~/.config/opencode/webui-extensions/` (a separate git checkout) and are
+  loaded as the higher-precedence USER stratum. At 3.3.0 two extensions were
+  removed from the repo for this reason (`autopilot/`, `source-control/`) and
+   the unpushed commits that added them were dropped. Before releasing, confirm
+   nothing personal is under `webui-extensions/` and that no core doc/code
+   references a removed personal extension by name.
 - **`npm publish` returns HTTP 202 "being processed"** in this environment, and
   the packument can lag a couple of minutes. Do not conclude failure from a
   quick re-read.

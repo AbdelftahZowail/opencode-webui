@@ -3,7 +3,7 @@
   "description": "Web UI for the OpenCode coding agent \u2014 chat, streaming, tool cards, and extensions over the OpenCode engine's HTTP API.",
   "private": false,
   "type": "module",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
