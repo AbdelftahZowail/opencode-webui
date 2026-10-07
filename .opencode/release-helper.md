@@ -133,6 +133,66 @@ From the repo root, on `master`, with a clean release scope:
 
 ## Entries
 
+### 3.3.0 — 2026-10-07
+- **Type:** minor (features + fixes; no extension-contract break — no
+  target/collection/service id, registry kind, hook, or bridge change). One
+  documented-subset change for wrappers: `sidebar.sessionRow` no longer receives
+  `active` / `subagentsActive` (the row derives its run badge from
+  `sessionOrSubagentsLive`). Not a versioned-contract break: the spec (§ rule 4)
+  version-contracts IDs, not props.
+- **Shipped:** queue/engine-drift fixes (permission reply body `reply` →
+  `decision` with legacy fallback; form listing `/api/form/request` → `/api/form`;
+  form state off the retired `/state` route onto `GET .../form/{id}`;
+  `cancelForm` DELETE; status-based fallbacks via `statusOf`; evidence-based
+  permission removal with a newborn-grace age gate; boolean `replyPermission` +
+  failed-reply UI). Folder-wide hot-reload fingerprint (`folderSourceMtime`).
+  Sidebar run-badge unification + infinite-scroll session loading. Message-rail
+  rework + convergent search scroll + `composer.above` moved above the composer
+  swap. `docs/extension-roadmap-2.md` committed.
+- **Repo cleanup (this release):** the two personal extensions were removed from
+  the repo — `webui-extensions/autopilot/` and `webui-extensions/source-control/`
+  (byte-identical copies live in `~/.config/opencode/webui-extensions/`, the USER
+  stratum) — and the two unpushed commits that added source-control were dropped
+  (`git reset --mixed origin/master`). `webui-extensions/` now ships only the core
+  `report` extension. Dangling `scm.ts` / `autopilot.ts` references in core
+  comments/docs were genericized.
+- **Adversarial verification (4 fresh-context verifiers + 2 re-verifiers):**
+  secrets/privacy/scope clean; API/store and UI passes found two BLOCKING
+  defects — (1) `formState`'s status sniff missed JSON 404s (engine `message`
+  does not contain the status), so the store's form reap silently never fired;
+  fixed by attaching `.status` in `request()` + `statusOf`; (2) permission
+  removal had no age gate and could drop (and tombstone) a freshly asked
+  permission that lagged both listings; fixed with `permissionFirstSeen` +
+  `NEWBORN_GRACE_MS`. Both re-verified RESOLVED with live-engine probes
+  (JSON-404 shape, `{decision}` vs `{reply}` → 400). Also fixed: the frozen
+  `useStore(() => new Set)` chip label; the sidebar observer not re-attaching
+  after collapse/expand; and three coverage.md/roadmap-2 doc inaccuracies.
+  Residual (non-blocking, shipped as-is): `CollapsedSessionLink` still keys its
+  dot off `active` (expanded row is migrated; cosmetic asymmetry); a permission
+  whose per-session verification keeps FAILING is kept pending indefinitely
+  (fail-safe by design); the coverage.md table still lists the snapshot path
+  `/api/form/request` (covered by the route-map preamble).
+- **Gate evidence:** typecheck ✅, build ✅ (clean rebuild; `dist/assets` carries
+  only the `report` chunk — the stale private-extension chunks/glob strings were
+  a BLOCKING finding for the npm tarball and are gone), batteries
+  **34/10/17/15 = 76/0**, `check:setup` **51/0**, `npm pack` 36 files (no `src/`).
+  Prod-shaped tarball smoke on a throwaway port + isolated XDG (packed server +
+  packed dist, engine pinned): `/` 200, `/api/webui/config` 200,
+  `/api/shelf/list` 200, `/api/event` carries `server.connected` +
+  `webui.extensions`.
+- **Publish:** `npm publish` exited 0 with HTTP-202 "being processed". Verified
+  against the cache-busted packument: `dist-tags.latest = 3.3.0`,
+  `time["3.3.0"] = 2026-10-07T12:42:01.550Z`; version doc 200; tarball
+  `https://registry.npmjs.org/opencode-webui/-/opencode-webui-3.3.0.tgz`
+  downloaded, **2,033,973 B**, sha1 `a172cbef79bbb8f8231e1a48ad6c94a6418d59d7`
+  (matches the packument), 36 entries, no `autopilot`/`source-control`/`src/`.
+  Tag `v3.3.0` = `ba63644`; GitHub tag HTML/API 200; the skill's `v3.3.0` raw
+  links return 200 (`webui-extensions/README.md`, `src/api/client.ts`,
+  `src/components/Sidebar.tsx`, `docs/extension-roadmap-2.md`,
+  `skills/webui/SKILL.md`). NOTE: the tarball CDN lagged the metadata by ~1 min
+  (404 then 200) — the packument updating first is expected; retry the tarball,
+  do not call it missing.
+
 ### 3.2.1 — 2026-10-05
 - **Type:** patch (fixes; no extension-contract break).
 - **Shipped:** slash-command engine compat — `api.runCommand` sends **both**
