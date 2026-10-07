@@ -100,6 +100,24 @@ function noteFormSeen(ids: Iterable<string>) {
 }
 
 /**
+ * When each PERMISSION id was first seen — the create-race guard for the
+ * evidence-based removal in `refreshQueues`. Permission listings lag on both
+ * sides right after a request is asked, so absence from them is only trusted
+ * as "settled" once the request has had NEWBORN_GRACE_MS to appear; otherwise a
+ * freshly asked permission would be dropped (and tombstoned), hiding a blocked
+ * agent.
+ */
+const permissionFirstSeen = new Map<string, number>();
+
+function notePermissionSeen(ids: Iterable<string>) {
+  const now = Date.now();
+  for (const id of ids) if (!permissionFirstSeen.has(id)) permissionFirstSeen.set(id, now);
+  if (permissionFirstSeen.size > 500) {
+    for (const [id, t] of permissionFirstSeen) if (now - t > 10 * NEWBORN_GRACE_MS) permissionFirstSeen.delete(id);
+  }
+}
+
+/**
  * Forms confirmed settled (answered/cancelled/reaped), with timestamps — a
  * tombstone so the engine's laggy global listing can't resurrect them (and
  * re-trigger a /state check every sweep) before the listing itself catches
@@ -870,10 +888,69 @@ async function refreshQueues() {
   }
 
   if (perms.status === "fulfilled") {
-    // Listings lag behind events on BOTH sides (verified against the live
-    // service). Union by id — removal is event-driven (permission.replied).
+    // Removal needs EVIDENCE, not just absence.
+    //
+    // The union below can only ever ADD (listings lag on both sides), so a
+    // permission that is settled without this tab seeing `permission.replied` —
+    // another client answered it, an agent replied through the API, a plugin
+    // settled it, or this tab was asleep when the event fired — would sit in
+    // `state.permissions` FOREVER. That is the "waiting in another session"
+    // chip you cannot click away: the request is long gone and the badge is
+    // not. So absence is treated as a CLAIM and confirmed against the
+    // per-session listing, which is the authoritative scope for that session.
     const listed = perms.value.data;
-    setState({ permissions: unionById(state.permissions, listed) });
+    const listedIds = new Set(listed.map((r) => r.id));
+    const unconfirmed = state.permissions.filter((r) => !listedIds.has(r.id));
+
+    // Record first-seen for the create-race guard (see the settle gate below).
+    notePermissionSeen([...state.permissions.map((r) => r.id), ...listedIds]);
+
+    // One fetch per session that still has an unconfirmed request, not one per
+    // request. `state.permissions` is usually 0-3 entries.
+    const sessions = [...new Set(unconfirmed.map((r) => r.sessionID))];
+    const verified = await Promise.all(
+      sessions.map(async (sid) => {
+        try {
+          const res = await api.sessionPermissions(sid);
+          return new Set(res.data.map((r) => r.id));
+        } catch (err) {
+          // Cannot verify -> keep believing it is pending. A chip that lags is
+          // recoverable; a chip that hides a blocked agent is not.
+          console.warn("refreshQueues session permissions failed:", err);
+          return null;
+        }
+      }),
+    );
+    const now = Date.now();
+    const settled = new Set<string>();
+    for (const r of unconfirmed) {
+      const ids = verified[sessions.indexOf(r.sessionID)];
+      if (ids === null || ids === undefined) continue;
+      // Absence from BOTH listings is only evidence once the request has had
+      // time to show up in them — the same newborn grace the form path uses. A
+      // brand-new permission can lag; dropping it then (and tombstoning it for
+      // NEWBORN_GRACE_MS) would hide a blocked agent, the exact failure this
+      // evidence path exists to prevent.
+      const first = permissionFirstSeen.get(r.id) ?? now;
+      if (!ids.has(r.id) && now - first > NEWBORN_GRACE_MS) settled.add(r.id);
+    }
+
+    for (const id of settled) {
+      settledRecently.set(id, now);
+      permissionFirstSeen.delete(id);
+    }
+    if (settledRecently.size > 500) {
+      for (const [id, at] of settledRecently) if (now - at > NEWBORN_GRACE_MS) settledRecently.delete(id);
+    }
+
+    const fresh = listed.filter((r) => {
+      const at = settledRecently.get(r.id);
+      return at === undefined || now - at > NEWBORN_GRACE_MS;
+    });
+    log("queue", `refresh perms tracked=${state.permissions.length} listed=${listed.length} settled=${settled.size}`);
+    setState({
+      permissions: unionById(state.permissions, fresh).filter((r) => !settled.has(r.id)),
+    });
   } else console.warn("refreshQueues permissions failed:", perms.reason);
 
   if (forms.status === "fulfilled") {
@@ -918,11 +995,14 @@ async function refreshQueues() {
           if ((st.data?.status ?? "pending") !== "pending") settled.add(id);
         } catch (err) {
           // 404 usually means resolved-and-reaped server-side — but right
-          // after creation it can also be the engine's commit lag. Only
-          // trust it once the request has been around a while.
-          const msg = err instanceof Error ? err.message : String(err);
+          // after creation it can also be the engine's commit lag. Only trust
+          // it once the request has been around a while. Read the status off
+          // the error: an engine JSON 404's `message` does NOT contain "404"
+          // ("Form not found: …"), so a message sniff silently missed those.
+          const status = (err as { status?: number } | null)?.status;
+          const gone = status === 404 || (err instanceof Error && err.message.includes("404"));
           const first = formFirstSeen.get(id) ?? Date.now();
-          if (msg.includes("404") && Date.now() - first > NEWBORN_GRACE_MS) settled.add(id);
+          if (gone && Date.now() - first > NEWBORN_GRACE_MS) settled.add(id);
         }
       }),
     );
@@ -4560,14 +4640,28 @@ export async function backgroundSubagents(sessionID: string) {
   }
 }
 
-export async function replyPermission(requestID: string, reply: "once" | "always" | "reject") {
+/**
+ * Answer one permission request.
+ *
+ * Only remove it from the queue once the engine has ACCEPTED the reply. The
+ * old version removed it in a `finally`, so a failed POST (a body rejection on
+ * an engine whose reply field differs, a 404, a dropped request) made the panel
+ * vanish while the agent stayed blocked on the request — and then a plugin
+ * countdown approved it for you a few seconds later. That read as "I clicked
+ * allow and nothing happened". Keeping it pending lets the user retry, and the
+ * per-session listing reconciles it away once it really lands.
+ */
+export async function replyPermission(requestID: string, reply: "once" | "always" | "reject"): Promise<boolean> {
   const req = state.permissions.find((p) => p.id === requestID);
-  if (!req) return;
+  if (!req) return false;
   try {
     await api.replyPermission(req.sessionID, requestID, reply);
-  } finally {
-    setState({ permissions: state.permissions.filter((p) => p.id !== requestID) });
+  } catch (err) {
+    log("panel", `permission reply FAILED ${requestID}:`, err instanceof Error ? err.message : String(err));
+    return false; // keep pending so the user can retry
   }
+  setState({ permissions: state.permissions.filter((p) => p.id !== requestID) });
+  return true;
 }
 
 export async function replyForm(formID: string, answer: Record<string, string | number | boolean | string[]>) {

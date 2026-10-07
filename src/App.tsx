@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Columns2, Menu, Plus } from "lucide-react";
 import { CommandPalette } from "./components/CommandPalette";
 import { HelpDialog } from "./components/HelpDialog";
@@ -403,22 +403,57 @@ function ForeignPendingChip() {
   // Fixed-position chip would float above the mobile keyboard — dock it away
   // while typing (<sm only); it returns when the keyboard closes.
   const kbOpen = useKeyboardOpen();
+  // Sessions, then a memoized id-set — NOT `useStore((s) => new Set(...))`:
+  // shallow-equality compares own enumerable keys, and a Set has none, so every
+  // Set compares equal and the selector freezes at its mount value (labelling
+  // every foreign session "(closed)").
+  const sessions = useStore((s) => s.sessions);
+  const known = useMemo(() => new Set(sessions.map((x) => x.id)), [sessions]);
+  // One line per SESSION, not per request: three permissions in one session is
+  // "one session is blocked", and the old tooltip printed that session id three
+  // times, which read as three separate problems.
+  const groups = useMemo(() => {
+    const byId = new Map<string, { count: number; kinds: Set<string> }>();
+    for (const item of foreign) {
+      const entry = byId.get(item.req.sessionID) ?? { count: 0, kinds: new Set<string>() };
+      entry.count += 1;
+      entry.kinds.add(item.kind);
+      byId.set(item.req.sessionID, entry);
+    }
+    return [...byId.entries()];
+  }, [foreign]);
+  const total = foreign.length;
   const foreignKey = foreign.map((f) => f.req.id).join(",");
   useEffect(() => {
     if (foreignKey) log("chip", `foreign waiting: ${foreignKey}`);
   }, [foreignKey]);
-  if (foreign.length === 0) return null;
+  if (total === 0) return null;
+  const title = groups
+    .map(([sessionID, entry]) => {
+      const what = waitingOn(entry.kinds);
+      const known2 = known.has(sessionID) ? "" : " (closed)";
+      return `${what}${known2} — ${entry.count} waiting`;
+    })
+    .join("\n");
   return (
     <button
       type="button"
       onClick={() => void selectSession(foreign[0]!.req.sessionID, { history: "push" })}
-      title={foreign.map((r) => `${r.kind} — ${r.req.sessionID}`).join("\n")}
+      title={title}
       className={`${kbOpen ? "hidden sm:flex" : "flex"} fixed right-4 bottom-10 z-40 items-center gap-1.5 rounded-full border border-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)] bg-[var(--surface-float-base)] px-2.5 py-1 text-xs text-[var(--text-weak)] shadow-md transition-colors hover:text-[var(--text-strong)]`}
     >
       <span className="size-1.5 animate-pulse rounded-full bg-[color:var(--surface-warning-strong)]" aria-hidden />
-      {foreign.length} waiting in other session{foreign.length > 1 ? "s" : ""} — switch
+      {total} waiting in {groups.length === 1 ? "another session" : "other sessions"} — switch
     </button>
   );
+}
+
+/** What a session is blocked on, for the chip's tooltip. */
+function waitingOn(kinds: Set<string>): string {
+  if (kinds.has("permission")) return "needs permission";
+  if (kinds.has("question")) return "asked a question";
+  if (kinds.has("form")) return "needs input";
+  return "waiting";
 }
 
 function EmptyState({ connected }: { connected: boolean }) {

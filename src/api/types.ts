@@ -269,6 +269,14 @@ export interface FormState {
   answer?: Record<string, string | number | boolean | string[]>;
 }
 
+/**
+ * `GET /api/session/{id}/form/{formID}` — the form plus its live `state`, which
+ * is what replaced the retired `.../state` route on the current engine.
+ */
+export interface FormDetail extends FormInfo {
+  state: FormState;
+}
+
 // ---- catalog ------------------------------------------------------------
 
 export interface ModelInfo {

@@ -157,6 +157,15 @@ function RequestPanel({ item, behind }: { item: PendingRequest; behind: number }
 // ---- bodies --------------------------------------------------------------
 
 function PermissionBody({ req }: { req: QueuedPermission }) {
+  // A failed reply leaves the request pending (see `replyPermission`), so say
+  // so instead of silently doing nothing — the agent is still blocked.
+  const [failed, setFailed] = useState(false);
+  const answer = (reply: "once" | "always" | "reject") => {
+    setFailed(false);
+    void replyPermission(req.id, reply).then((ok) => {
+      if (!ok) setFailed(true);
+    });
+  };
   return (
     <>
       {req.resources.length > 0 && (
@@ -175,16 +184,24 @@ function PermissionBody({ req }: { req: QueuedPermission }) {
       )}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-sans text-xs text-[color:var(--text-weak)]">
-          {req.source ? <>by tool <span className="font-mono">{req.source.id}</span></> : req.action || null}
+          {failed ? (
+            <span className="text-[color:var(--surface-critical-strong)]">
+              reply rejected — request still open, try again
+            </span>
+          ) : req.source ? (
+            <>by tool <span className="font-mono">{req.source.id}</span></>
+          ) : (
+            req.action || null
+          )}
         </span>
         <div className="flex gap-1.5">
-          <Button variant="destructive" size="sm" onClick={() => void replyPermission(req.id, "reject")}>
+          <Button variant="destructive" size="sm" onClick={() => answer("reject")}>
             Reject
           </Button>
-          <Button variant="secondary" size="sm" onClick={() => void replyPermission(req.id, "once")}>
+          <Button variant="secondary" size="sm" onClick={() => answer("once")}>
             Once
           </Button>
-          <Button size="sm" onClick={() => void replyPermission(req.id, "always")}>
+          <Button size="sm" onClick={() => answer("always")}>
             Always allow
           </Button>
         </div>

@@ -8,6 +8,7 @@
 import type {
   AgentInfo,
   CommandInfo,
+  FormDetail,
   FormInfo,
   FormState,
   InboxInfo,
@@ -154,9 +155,24 @@ async function responseError(res: Response): Promise<string> {
   return message;
 }
 
+/**
+ * HTTP status of a thrown API error. `responseError` prefers the engine's JSON
+ * `message`, which does NOT contain the status — so engine-drift fallbacks must
+ * read the status off the error, never by sniffing the message text (a JSON
+ * 404 whose message is "Form not found: …" silently defeated a message sniff).
+ * `request()` attaches it; the message-prefix check is a fallback only.
+ */
+function statusOf(err: unknown): number | undefined {
+  const status = (err as { status?: number } | null)?.status;
+  if (typeof status === "number") return status;
+  const m = err instanceof Error ? err.message.match(/^(\d{3})/) : null;
+  return m ? Number(m[1]) : undefined;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
-  if (!res.ok) throw new Error(await responseError(res));
+  // Attach the status so a caller can branch on route/body drift.
+  if (!res.ok) throw Object.assign(new Error(await responseError(res)), { status: res.status });
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -827,12 +843,43 @@ const apiRaw = {
 
   // permissions
   pendingPermissions: () =>
-    request<{ location: unknown; data: PermissionRequest[] }>("/api/permission/request"),  replyPermission: (sessionID: string, requestID: string, reply: PermissionReply) =>
-    request<unknown>(`/api/session/${sessionID}/permission/${requestID}/reply`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reply, message: null }),
-    }),
+    request<{ location: unknown; data: PermissionRequest[] }>("/api/permission/request"),
+  /**
+   * One session's pending permissions. This is the AUTHORITATIVE removal
+   * evidence for a request the global listing stopped returning — see
+   * `refreshQueues`. `/api/permission/request` is location-scoped and lags, so
+   * "absent globally" is not on its own proof that a request was settled.
+   */
+  sessionPermissions: (sessionID: string) =>
+    request<{ data: PermissionRequest[] }>(`/api/session/${sessionID}/permission`),
+  /**
+   * `POST .../permission/{id}/reply`.
+   *
+   * The body field was RENAMED between engine generations — `reply` in the
+   * reference spec, `decision` on the current engine — and the body is
+   * `additionalProperties: false`, so sending the wrong name is a hard 400 and
+   * the request stays pending FOREVER. That is precisely how a "waiting in
+   * another session" chip becomes impossible to clear: the answer never lands.
+   * Send the current name, fall back to the legacy one on a body rejection, so
+   * both generations work.
+   */
+  replyPermission: async (sessionID: string, requestID: string, reply: PermissionReply) => {
+    const send = (field: "decision" | "reply") =>
+      request<unknown>(`/api/session/${sessionID}/permission/${requestID}/reply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ [field]: reply, message: null }),
+      });
+    try {
+      return await send("decision");
+    } catch (err) {
+      // Only a BODY rejection (unknown field) is worth retrying. Anything else
+      // — network, or a 404 because it was already settled — surfaces as-is.
+      const status = statusOf(err);
+      if (status !== 400 && status !== 422) throw err;
+      return send("reply");
+    }
+  },
   /**
    * The project's saved ("always allow") rules — what an `always` reply with a
    * `save` list persists. NOT location-scoped: the route takes `projectID`.
@@ -846,23 +893,64 @@ const apiRaw = {
     request<unknown>(`/api/permission/saved/${id}`, { method: "DELETE" }),
 
   // forms
-  pendingForms: () => request<{ location: unknown; data: FormInfo[] }>("/api/form/request"),
+  /**
+   * The global form listing moved: `/api/form/request` is gone on the current
+   * engine and the listing lives at `/api/form`. Try the current route and fall
+   * back, so one stale route name cannot silently blank the question panels.
+   */
+  pendingForms: async () => {
+    try {
+      return await request<{ location: unknown; data: FormInfo[] }>("/api/form");
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return request<{ location: unknown; data: FormInfo[] }>("/api/form/request");
+    }
+  },
   /** Per-session form listing — fresher than the global one (which can omit
    * freshly created question-forms for minutes under load). */
   sessionForms: (sessionID: string) =>
     request<{ location: unknown; data: FormInfo[] }>(`/api/session/${sessionID}/form`),
-  formState: (sessionID: string, formID: string) =>
-    request<{ location: unknown; data: FormState }>(
-      `/api/session/${sessionID}/form/${formID}/state`,
-    ),
+  /**
+   * One form's live state.
+   *
+   * Two shapes across engine generations, and the legacy one is GONE on the
+   * current engine (`GET .../form/{id}/state` 404s):
+   *   - current: `GET .../form/{id}` returns the form AND its `state`
+   *   - legacy:  `GET .../form/{id}/state` returns the state directly
+   *
+   * This mattered more than it looks: a 404 from a still-PENDING form used to
+   * be read by the store as "settled", so on the current engine every panel
+   * aged itself out after the newborn grace. Try current, fall back to legacy,
+   * and let a real 404 throw so the caller keeps its reason-based handling.
+   */
+  formState: async (sessionID: string, formID: string) => {
+    try {
+      const detail = await request<{ data: FormDetail }>(`/api/session/${sessionID}/form/${formID}`);
+      return { data: detail.data?.state ?? { status: "pending" } };
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      const legacy = await request<{ data: FormState }>(`/api/session/${sessionID}/form/${formID}/state`);
+      return legacy;
+    }
+  },
   replyForm: (sessionID: string, formID: string, answer: Record<string, string | number | boolean | string[]>) =>
     request<unknown>(`/api/session/${sessionID}/form/${formID}/reply`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ answer }),
     }),
-  cancelForm: (sessionID: string, formID: string) =>
-    request<unknown>(`/api/session/${sessionID}/form/${formID}/cancel`, { method: "POST" }),
+  /** Dismiss a form: `DELETE .../form/{id}` now, legacy `POST .../cancel`. */
+  cancelForm: async (sessionID: string, formID: string) => {
+    try {
+      return await request<unknown>(`/api/session/${sessionID}/form/${formID}`, { method: "DELETE" });
+    } catch (err) {
+      const status = statusOf(err);
+      if (status !== 404 && status !== 405) throw err;
+      return request<unknown>(`/api/session/${sessionID}/form/${formID}/cancel`, { method: "POST" });
+    }
+  },
 
   // questions
   questionRequestGet: () =>
