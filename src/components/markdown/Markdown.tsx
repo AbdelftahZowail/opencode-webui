@@ -9,15 +9,17 @@
  *    previews in a sandboxed iframe / native viewer. Backtick fences always
  *    stay code; the two are told apart by the raw document offset of the
  *    fence (see `fence.ts`).
- *  - Fenced code (R1/R2) — syntax-highlighted (shiki, lazy); ``` mermaid and
- *    ``` latex fences render a diagram / glyphs with their source hidden, and
- *    crash-isolate to the plain source on failure. All lazy-loaded.
+ *  - Fenced code (R1/R2/R14) — routed by info-string through the
+ *    "markdown.codeBlock" renderer seam: mermaid and latex are built-in
+ *    contributions, an extension can contribute its own (or override one),
+ *    and everything unclaimed is syntax-highlighted (shiki, lazy). A renderer
+ *    that throws falls back to the plain source, never blanking the transcript.
  *  - Shelf link chips — `/api/shelf/file/…` links become a small file chip.
  *
  * The whole thing is one memoized component (`Markdown`) so a streaming
  * parent commit never re-parses unchanged history.
  */
-import { memo, useMemo, type ComponentPropsWithoutRef } from "react";
+import { memo, useEffect, useMemo, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openImage } from "../ImageViewer";
@@ -25,11 +27,15 @@ import { Table, Th, Td } from "./Table";
 import { ShelfChip } from "./ShelfChip";
 import { PreviewBlock, PreviewPausedBlock } from "./PreviewBlock";
 import { CodeBlock } from "./CodeBlock";
-import { MermaidBlock } from "./MermaidBlock";
-import { LatexBlock } from "./LatexBlock";
+// Side-effect imports: MermaidBlock / LatexBlock self-register their
+// "markdown.codeBlock" contributions at module boot (R14). Markdown only needs
+// the registration, not the components.
+import "./MermaidBlock";
+import "./LatexBlock";
 import { BlockBoundary } from "./BlockBoundary";
-import { getLiveFence, getCodeBlockInfo } from "./fence";
-import { specialBlockKind } from "../../lib/markdown/languages";
+import { getLiveFence, getFencedBlock, getCodeBlockInfo } from "./fence";
+import { resolveCodeBlockRenderer } from "../../lib/markdown/codeBlockRenderers";
+import { subscribeRegistry } from "../../extensions/registry";
 import { useMarkdownRendering } from "./controls";
 
 /**
@@ -59,9 +65,13 @@ const INLINE_CODE_CLS =
  */
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   const enabled = useMarkdownRendering();
+  // A code-block renderer can register/swap at runtime (extension hot-load),
+  // so re-read the markdown component map whenever the registry changes —
+  // a hot-registered or edited renderer repaints without a page reload.
+  const registryVersion = useRegistryVersion();
   const components = useMemo(
     () => buildComponents(text, enabled),
-    [text, enabled],
+    [text, enabled, registryVersion],
   );
   return (
     <div
@@ -85,6 +95,17 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
 
 type Components = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
 
+/**
+ * Freshness for late/hot-swapped extension registrations — the repo idiom
+ * (a local counter bumped by the registry's subscribe; the registry has no
+ * exported version snapshot to read via useSyncExternalStore).
+ */
+function useRegistryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => subscribeRegistry(() => setVersion((v) => v + 1)), []);
+  return version;
+}
+
 function buildComponents(text: string, renderingEnabled: boolean): Components {
   return {
     table: (props) => <Table {...props} />,
@@ -101,9 +122,11 @@ function buildComponents(text: string, renderingEnabled: boolean): Components {
  * ``` distinction comes from the raw source offset (the rendered class only
  * carries `language-*`); the language and exact source are then read from the
  * rendered `<pre>` AST node, so nested fences (blockquote/list) stay
- * marker-free. Code is routed by info-string: mermaid and LaTeX hide their
- * source, everything else is a syntax-highlighted code block. The plain styled
- * `<pre>` remains the fallback for anything that is not a fence.
+ * marker-free. Code is routed by info-string through the code-block renderer
+ * seam (R14): the built-in mermaid/latex renderers register into
+ * "markdown.codeBlock", an extension can register there too, and anything
+ * unclaimed falls back to the syntax-highlighted `<CodeBlock>`. The plain
+ * styled `<pre>` remains the fallback for anything that is not a fence.
  */
 function PreOrPreview({
   text,
@@ -113,8 +136,12 @@ function PreOrPreview({
   ...rest
 }: ComponentPropsWithoutRef<"pre"> & { text: string; renderingEnabled: boolean; node?: unknown }) {
   const offset = (node as { position?: { start?: { offset?: number } } } | undefined)?.position?.start?.offset;
-  const { live, block } = useMemo(
-    () => ({ live: getLiveFence(text, offset), block: getCodeBlockInfo(node) }),
+  const { live, block, fenced } = useMemo(
+    () => ({
+      live: getLiveFence(text, offset),
+      block: getCodeBlockInfo(node),
+      fenced: getFencedBlock(text, offset),
+    }),
     [text, offset, node],
   );
   if (live) {
@@ -124,23 +151,25 @@ function PreOrPreview({
     return renderingEnabled ? <PreviewBlock info={live} /> : <PreviewPausedBlock info={live} />;
   }
   // Fenced code (AST-derived, so nested fences stay marker-free): the
-  // info-string selects a richer renderer — mermaid diagrams and KaTeX math
-  // hide their source; everything else is a syntax-highlighted code block.
+  // info-string selects a registered renderer — mermaid diagrams and KaTeX
+  // math hide their source; an extension may claim any language; everything
+  // unclaimed is a syntax-highlighted code block.
   if (block) {
-    const special = specialBlockKind(block.lang);
-    if (special === "mermaid") {
-      return (
-        <BlockBoundary source={block.source}>
-          <MermaidBlock source={block.source} />
-        </BlockBoundary>
-      );
-    }
-    if (special === "latex") {
-      return (
-        <BlockBoundary source={block.source}>
-          <LatexBlock source={block.source} />
-        </BlockBoundary>
-      );
+    const renderer = resolveCodeBlockRenderer(block.lang);
+    if (renderer) {
+      let rendered: ReactNode;
+      try {
+        rendered = renderer.render({
+          language: block.lang,
+          source: block.source,
+          info: fenced?.info ?? block.lang,
+        });
+      } catch (err) {
+        // A renderer that throws synchronously must not blank the transcript.
+        console.error("[markdown] code-block renderer crashed:", err);
+        rendered = <CodeBlock code={block.source} lang={block.lang || undefined} />;
+      }
+      return <BlockBoundary source={block.source}>{rendered}</BlockBoundary>;
     }
     return (
       <BlockBoundary source={block.source}>

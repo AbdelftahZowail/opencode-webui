@@ -63,10 +63,11 @@ extension code is not sandboxed (same model as host plugins).
 > + `data-oc-*` stamping, core self-registration, and the `ui-extensions/` →
 > `webui-extensions/` rename are landed (`docs/reference/extension-system-spec.md` §11).
 > The **roadmap seams are landed too** (`docs/plans/extensions.md` items 1–9,
-> `EXT_API_VERSION` 2): prop-transforming wraps, the activation context +
+> `EXT_API_VERSION` 3): prop-transforming wraps, the activation context +
 > disposal, scheduler access, the event bus, the curated store facade,
-> declared settings, thin slots, manifest `requires` diagnostics, and peer
-> composition. The contract below is what that work converged on — write to it.
+> declared settings, thin slots, manifest `requires` diagnostics, peer
+> composition, and the code-block renderer seam (R14). The contract below is
+> what that work converged on — write to it.
 
 ## Choosing a stratum (framing rule)
 
@@ -122,7 +123,24 @@ with rich props, so wraps and value-overrides stay surgical.
 | `message:<type>` / `message:*` | replace-with-fall-through per message type |
 | `tool.card` | `part: ToolPart`, `stateKey?` |
 | `tool.edit` / `write` / `shell` / `subagent` / `execute` / `read` / `generic` | per-tool view props |
+| `tool.patch` / `tool.question` / `tool.skill` | per-tool view props (R10) |
 | `tool:<name>` | replace-with-fall-through per tool name |
+| `stats.panel` | `data`, `loading`, `error`, `onRetry?` (R6 stats route) |
+| `timeline.dialog` | `messages`, `sessionID`, `onJump`, `onRevert`, `onCopy`, `onFork`, `onClose` (R4) |
+| `turn.tokens` | `steps` (R9 per-turn token line) |
+| `session.tabs` | `tabs`, `current`, `tabsEnabled`, orientation/compact, callbacks (R3) |
+| `sidebar.sessionPins` | `pins`, `tabsEnabled`, `selected`, `onSelectSlot`, `onUnpin`, `onToggleTabs` (R3) |
+| `form.review` | `fields`, `values`, `acked?`, `onClose?` (R13) |
+| `directory.picker` | directory completion + recents (R8) |
+| `permission.reject` | `open`, `action?`, `onOpenChange`, `onReject` (R8) |
+| `errorDetails.dialog` | `open`, `message`, `source?`, `reference?`, `onCopy?`, `onInvestigate?`, `onClose` (R11) |
+| `reconnect.overlay` | `connected`, `serviceOK`, `onRetry?` (R11) |
+| `update.notice` | `state`, `version?`, `currentVersion?`, `error?`, `dismissedVersion?`, callbacks (R11) |
+| `debug.dialog` | `open`, `info`, `onCopy?`, `onClose` (R11) |
+| `pair.dialog` | `open`, `info` (URLs + masked password + QR URL), `onCopy?`, `onClose` (R11) |
+| `sessionList.dialog` | `open`, `sessions`, `currentSessionID?`, `live?`, `searchResults?`, `searching?`, `pinned?`, `allProjects?`, `onSearch?`, `onTogglePin?`, `onToggleAllProjects?`, `onSelect`, `onRename?`, `onDelete?`, `onClose` (R11 — mounted by `SessionListHost`; server search is **global**, "this project" scopes client-side) |
+| `open.picker` | `open`, `sessions`, `projects`, `currentSessionID?`, `currentDirectory?`, `live?`, `worktrees?`, `worktreesLoading?`, `onOpenSession`, `onOpenDirectory`, `onDrillProject?`, `onCreateWorktree?`, `onClose` (R11 — mounted by `OpenPickerHost`) |
+| `settings.appearance` / `settings.shell` | — (R12) |
 
 Persisted-vs-live guarantee (streaming authors depend on this): persisted
 messages always carry a `[data-oc-message]` ancestor; live projections
@@ -139,9 +157,9 @@ must never touch streaming output can rely on the distinction structurally.
   are built standalone: `import type` from `src/` is erased at build and
   safe, but any *runtime* `src/` import breaks the copy outside the repo.
   Use `window.__opencodeUI` (`register`, `react`, `api`, `store` [the curated
-  facade], `events`, `settings`, `collections`, `bus`, `prefs`, `notify`,
-  `services`, `dom`, `kv`; raw modules as `advanced.*`) — shipped code consumes the identical
-  surface via `getExtensionApi()`.
+  facade], `events`, `settings`, `markdown`, `collections`, `bus`, `prefs`,
+  `notify`, `services`, `dom`, `kv`; raw modules as `advanced.*`) — shipped
+  code consumes the identical surface via `getExtensionApi()`.
 - **The `@/` alias works in shipped extensions only.** Same repo, same
   tsconfig (`@/*` → `./src/*`, e.g. a shipped extension imports
   `@/components/ui/dialog`) — external copies must still use the bridge,
@@ -365,7 +383,9 @@ UI-only, local `run(args, { sessionID })`; engine commands come from
 `GET /api/command` + `GET /api/skill` and win name clashes), `pages`
 (item `{ title, description?, render }`, routed at `/ext/{id}`),
 `settings` (item `{ title, description?, render }`, section in
-Settings › Extensions), `contextMenu.message`, `contextMenu.session`,
+Settings › Extensions), `markdown.codeBlock` (item `{ languages, render }`,
+a fenced-code renderer keyed by info-string — see **Code-block renderers**),
+`contextMenu.message`, `contextMenu.session`,
 `contextMenu.file` (item `{ label, run, order? }`), and the `slot:<id>`
 placement collections (see Slots below).
 
@@ -383,6 +403,57 @@ register({
   item: { title: "Uptime", render: () => <Uptime /> },
 });
 ```
+
+### Code-block renderers (`markdown.codeBlock`)
+
+A fenced code block is routed by its info-string through a registry collection
+(`markdown.codeBlock`). The built-in `mermaid` and `latex` renderers (R2) ship
+as two contributions of it — `markdown.mermaid` / `markdown.latex`, both at
+order **100** — so drawing a new fence and overriding a built-in are the same
+operation.
+
+```tsx
+// Low-level form — exactly what the built-ins register:
+register({
+  kind: "contribute",
+  id: "my-fence-renderer",
+  collection: "markdown.codeBlock",
+  order: 50, // lower wins; 50 < 100 overrides mermaid or latex
+  item: { languages: ["foo", "bar"], render: (ctx) => <MyBlock {...ctx} /> },
+});
+```
+
+The typed bridge form (the same entry; `ctx` is `CodeBlockRenderContext`):
+
+```tsx
+const { markdown } = getExtensionApi(); // or window.__opencodeUI
+const off = markdown.registerCodeBlockRenderer(
+  ["foo", "bar"], // one info-string or a list (matched case-insensitively)
+  (ctx) => <div>{ctx.language}: {ctx.source}</div>,
+  { id: "my-fence-renderer", order: 50 }, // both optional; id is derived if omitted
+);
+off(); // unregister — restores the default code block for those languages
+```
+
+- `ctx = { language, source, info }`: `language` is the lowercased info token,
+  `source` the raw fence body (no trailing newline), `info` the full
+  info-string (token plus any meta; it falls back to the token when the raw
+  fence cannot be recovered, e.g. mid-stream).
+- **Override / order:** the first matching contribution by ascending `order`,
+  then by id (lexicographically) wins. The built-ins sit at order 100; to
+  *override* `mermaid`/`latex` reliably, contribute at a **lower order** — at an
+  equal order the sort is id-based, so do not rely on it. One renderer can claim
+  several languages.
+- **Reserved ids:** `markdown.mermaid` and `markdown.latex` are the built-ins'
+  fixed contract ids — give your entry its own id (the typed helper derives one
+  when omitted). Reusing a built-in id swaps it out permanently (same-id
+  re-register semantics), including after unregister.
+- **Crash isolation:** a renderer that throws (synchronously, or during React
+  render) falls back to the plain source; it never blanks the transcript.
+- **Hot-swap:** the transcript re-reads the registry when it changes, so a
+  hot-registered or edited renderer repaints live — no reload.
+- An extension-rendered fence owns its own markup (it is not wrapped in the
+  core `data-oc-code-block` / `data-oc-mermaid` / `data-oc-latex` anchor).
 
 ### Slots (placement)
 
@@ -486,6 +557,19 @@ extensions break silently on every redesign.
 | `data-oc-permission-rules-editor` + `data-oc-permission-rule-row` + `data-oc-permission-rule-effect` | PermissionRulesEditor root, one per rule row, one per effect button |
 | `data-oc-mcp-server` + `data-oc-mcp-add` | McpIndicator: one per server row, and the add-server form |
 | `data-oc-slot` | Slot wrapper (`slot:<id>` — one per known slot id) |
+| `data-oc-code-block` / `data-oc-mermaid` / `data-oc-latex` / `data-oc-block-fallback` | Markdown code/mermaid/latex renderers and their plain fallback (R1/R2/R14 — an extension-rendered fence owns its own markup) |
+| `data-oc-stats` / `data-oc-stats-calendar` / `data-oc-stats-day` | StatsPanel root, calendar grid, one per day cell (R6) |
+| `data-oc-timeline` / `data-oc-timeline-row` / `data-oc-timeline-action` | TimelineDialog root, one per user-message row, per action (R4) |
+| `data-oc-session-tabs` / `data-oc-tab` / `data-oc-tab-id` / `data-oc-tab-status` / `data-oc-tab-indicator` | Tab rail root, one per tab, per-tab status/indicator (R3) |
+| `data-oc-session-pins` / `data-oc-pin` / `data-oc-pin-slot` / `data-oc-pin-id` | Pins rail root, one per pinned session, its quick-slot number (R3) |
+| `data-oc-reasoning-group` / `data-oc-explore-group` / `data-oc-turn-tokens` / `data-oc-jump-latest` / `data-oc-revert-detail` | Transcript grouping, per-turn token line, jump-to-latest, revert detail (R9) |
+| `data-oc-tool-patch` / `data-oc-tool-question` / `data-oc-question-row` / `data-oc-tool-skill` / `data-oc-tool-diagnostics` / `data-oc-tool-denied` / `data-oc-tool-badge` | Tool-card patch/question/skill bodies, diagnostics, denied marker, badge (R10) |
+| `data-oc-diff-image` / `data-oc-diff-base` / `data-oc-diff-help` / `data-oc-diff-wrap` | Diff viewer image pane, base picker, shortcut help, wrap toggle (R7/R12) |
+| `data-oc-attention-section` / `data-oc-shell-section` / `data-oc-appearance-section` | Settings › Notifications / Shell / Appearance sections (R5/R12) |
+| `data-oc-directory-picker` / `data-oc-permission-reject` | Directory completion picker (R8) / permission reject dialog (R8) |
+| `data-oc-form-review` | Form Review tab (R13) |
+| `data-oc-session-list-dialog` / `data-oc-session-list-row` / `data-oc-open-picker` / `data-oc-open-session` / `data-oc-open-project` / `data-oc-open-worktree` | R11a session-list dialog + open/recents picker (mounted by `SessionListHost` / `OpenPickerHost`) |
+| `data-oc-permission-fullscreen` / `data-oc-permission-fullscreen-toggle` / `data-oc-permission-settings` | R12 full-screen permission prompt, its per-request toggle, and the Settings › Security toggle |
 
 ```ts
 // dom.ts — badge next to the send button, cleaned up on hot-swap
@@ -630,6 +714,8 @@ Everything the app can — shipped extensions are the same build:
 - `api` from `src/api/client.ts` (every endpoint fires `api.pre/post/error`)
 - the event bus (`ctx.on` / `events.subscribe`) — raw engine events + derived
   lifecycle events, frame-batched
+- code-block renderers (`markdown.registerCodeBlockRenderer` — the
+  `markdown.codeBlock` collection, the seam R1/R2's built-ins use)
 - `getService` / services from `src/extensions/registry.tsx`
 - UI primitives from `src/components/ui/` (shadcn) — always build on these
   so extensions look native
@@ -638,8 +724,8 @@ Everything the app can — shipped extensions are the same build:
 
 External (user/project-dir) extensions use the one extension API surface
 (`register`, `react`, `api`, `store` facade, `events`, `settings`,
-`collections`, `bus`, `prefs`, `notify`, `services`, `dom` kit, `kv`,
-`advanced.*` raw modules) — used identically by our shipped ones.
+`collections`, `bus`, `prefs`, `notify`, `services`, `markdown`, `dom` kit,
+`kv`, `advanced.*` raw modules) — used identically by our shipped ones.
 
 ## Hot reload guarantees
 

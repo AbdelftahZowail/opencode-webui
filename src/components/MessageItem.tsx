@@ -4,6 +4,7 @@ import type {
   AssistantMessage,
   FileAttachment,
   MessageInfo,
+  ReasoningPart,
   ShellMessage,
   ToolContent,
   ToolPart,
@@ -16,6 +17,14 @@ import { historyFilePath, historyImageSrc, isImageMime } from "../lib/attachment
 import { openImage } from "./ImageViewer";
 import { Markdown } from "./markdown";
 import { formatModelRef } from "../lib/modelLabel";
+import {
+  compactionDetail,
+  exploreSummary,
+  formatTokens,
+  groupParts,
+  type PartEntry,
+  type TurnTokenStep,
+} from "../lib/grouping";
 import { Spinner } from "./ui";
 import { Marker, MarkerContent } from "./ui/marker";
 import { getPrefs, subscribePrefs } from "../prefs";
@@ -278,7 +287,7 @@ function AssistantCopyButton({ text }: { text: string }) {
   );
 }
 
-export const MessageItem = memo(function MessageItem({ message, compact = false, sessionID, isTail = false, responseText }: { message: MessageInfo; compact?: boolean; sessionID?: string; isTail?: boolean; responseText?: string }) {
+export const MessageItem = memo(function MessageItem({ message, compact = false, sessionID, isTail = false, responseText, turnTokens }: { message: MessageInfo; compact?: boolean; sessionID?: string; isTail?: boolean; responseText?: string; turnTokens?: TurnTokenStep[] }) {
   // Extension freshness — read before the body so hooks order is stable.
   const registryVersion = useRegistryVersion();
   // Memoized on the registry version only: decorations are a static list
@@ -312,7 +321,7 @@ export const MessageItem = memo(function MessageItem({ message, compact = false,
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registryVersion, effectiveMessage.type, effectiveMessage.id]);
-  const defaultBody = () => renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText);
+  const defaultBody = () => renderMessageBody(effectiveMessage, compact, sessionID, isTail, responseText, turnTokens);
   let body: ReactNode;
   if (messageTarget) {
     // Crash-isolated inside renderTarget: a throwing replace falls through
@@ -357,7 +366,7 @@ export const MessageItem = memo(function MessageItem({ message, compact = false,
 });
 
 /** The per-type body exactly as MessageItem always rendered it. */
-function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string, isTail?: boolean, responseText?: string): ReactNode {
+function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: string, isTail?: boolean, responseText?: string, turnTokens?: TurnTokenStep[]): ReactNode {
   switch (message.type) {
     case "user": {
       const canAct = !!sessionID && !message.id.startsWith("msg_local_") && !message.id.startsWith("__draft__");
@@ -407,7 +416,7 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
       const fallback = showCopy ? assistantCopyText(message as AssistantMessage) : "";
       const copyText = showCopy ? (responseText ?? fallback) : "";
       const hasText = copyText.trim().length > 0;
-      return <AssistantView message={message} compact={compact} showCopy={showCopy && hasText} copyText={copyText} />;
+      return <AssistantView message={message} compact={compact} showCopy={showCopy && hasText} copyText={copyText} turnTokens={turnTokens} />;
     }
     case "system":
     case "synthetic": {
@@ -465,7 +474,14 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
     case "compaction": {
       const isRunning = message.status === "running";
       const isFailed = message.status === "failed";
-      const label = isFailed ? "Compaction failed" : isRunning ? "Compacting…" : "Conversation compacted";
+      const detail = compactionDetail(message);
+      const label = detail.cancelled
+        ? "Compaction cancelled"
+        : isFailed
+          ? "Compaction failed"
+          : isRunning
+            ? "Compacting…"
+            : "Conversation compacted";
       const reason = message.reason === "auto" || message.reason === "manual" ? ` (${message.reason})` : "";
       const summary = (message as { summary?: string }).summary;
       const recent = (message as { recent?: string }).recent;
@@ -478,6 +494,12 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
           <Note>
             {label}
             {reason}
+            {detail.tokens && (
+              <span className="text-[var(--text-weaker)]">
+                {" "}
+                · {formatTokens(detail.tokens.input)} in · {formatTokens(detail.tokens.output)} out
+              </span>
+            )}
             {message.error && (
               <span className="text-[var(--text-on-critical-base)]">
                 {" — "}
@@ -497,13 +519,18 @@ function renderMessageBody(message: MessageInfo, compact: boolean, sessionID?: s
       }
       return (
         <Row>
-          <CompactionCard
-            label={label}
-            reason={reason}
-            summary={summary}
-            recent={recent}
-            running={isRunning}
-          />
+          {/* Full-width rule above the compaction card (R9). */}
+          <div className="w-full">
+            <div aria-hidden className="mb-2 h-px w-full bg-[var(--border-weak-base)]" />
+            <CompactionCard
+              label={label}
+              reason={reason}
+              summary={summary}
+              recent={recent}
+              running={isRunning}
+              tokens={detail.tokens}
+            />
+          </div>
         </Row>
       );
     }
@@ -759,12 +786,14 @@ function CompactionCard({
   summary,
   recent,
   running,
+  tokens,
 }: {
   label: string;
   reason: string;
   summary?: string;
   recent?: string;
   running: boolean;
+  tokens?: { input: number; output: number };
 }) {
   const [expanded, setExpanded] = useState(false);
   const shouldCollapse = !!summary && summary.length > 400;
@@ -781,7 +810,19 @@ function CompactionCard({
           {label}
           <span className="font-normal text-[var(--text-weaker)]">{reason}</span>
         </span>
-        {shouldCollapse && <ChevronRight className={`ml-auto size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`} />}
+        {tokens && (
+          <span
+            className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-weaker)]"
+            title={`${tokens.input.toLocaleString()} in · ${tokens.output.toLocaleString()} out`}
+          >
+            {formatTokens(tokens.input)} in · {formatTokens(tokens.output)} out
+          </span>
+        )}
+        {shouldCollapse && (
+          <ChevronRight
+            className={`${tokens ? "" : "ml-auto"} size-3 shrink-0 text-[var(--text-weaker)] transition-transform ${expanded ? "rotate-90" : ""}`}
+          />
+        )}
       </button>
       {showSummary && (
         <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-base)]">
@@ -803,7 +844,7 @@ function CompactionCard({
   );
 }
 
-function AssistantView({ message, compact, showCopy, copyText }: { message: AssistantMessage; compact: boolean; showCopy?: boolean; copyText?: string }) {
+function AssistantView({ message, compact, showCopy, copyText, turnTokens }: { message: AssistantMessage; compact: boolean; showCopy?: boolean; copyText?: string; turnTokens?: TurnTokenStep[] }) {
   const showTimestamps = useTimestamps();
   return (
     <Row align="left">
@@ -832,16 +873,21 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
           </div>
         )}
         {(() => {
-          const ordinal = { text: 0, reasoning: 0 };
-          return message.content.map((part, partIndex) => {
-            const key =
-              part.type === "tool"
-                ? `${message.id}:tool:${part.id}`
-                : `${message.id}:${part.type}:${ordinal[part.type]++}`;
+          // R9: consecutive reasoning parts collapse into one row; 2+
+          // consecutive read/glob/grep tools collapse into one exploration
+          // row. Grouping is per assistant message; keys stay stable across
+          // polls so disclosure state and React reconciliation survive.
+          return groupParts(message.content, message.id).map((group) => {
+            if (group.kind === "reasoning") {
+              return <ReasoningGroup key={group.key} groupKey={group.key} entries={group.entries} />;
+            }
+            if (group.kind === "explore") {
+              return <ExploreGroup key={group.key} entries={group.entries} message={message} />;
+            }
             return (
-              <Fragment key={key}>
-                <MessagePart stateKey={key} part={part} messageID={message.id} partIndex={partIndex} message={message} />
-                <PartDecorations message={message} part={part as unknown as ToolPart} partIndex={partIndex} />
+              <Fragment key={group.key}>
+                <MessagePart stateKey={group.key} part={group.part} messageID={message.id} partIndex={group.index} message={message} />
+                <PartDecorations message={message} part={group.part as unknown as ToolPart} partIndex={group.index} />
               </Fragment>
             );
           });
@@ -851,6 +897,7 @@ function AssistantView({ message, compact, showCopy, copyText }: { message: Assi
             <Target id="message.copyButton" text={copyText} variant="assistant" />
           </div>
         )}
+        {turnTokens && turnTokens.length > 0 && <Target id="turn.tokens" steps={turnTokens} />}
       </div>
     </Row>
   );
@@ -892,15 +939,23 @@ function rememberDisclosure(key: string, value: boolean) {
   }
 }
 
-function ReasoningBlock({ text, stateKey }: { text: string; stateKey?: string }) {
+/**
+ * R9 — a run of consecutive reasoning parts as ONE collapsible row. The
+ * `null`-vs-boolean manual-open semantics are unchanged: null follows the
+ * global `/thinking` toggle (`session.toggle.thinking` → `showReasoning`); a
+ * click pins this group. Reasoning is plain text in this port, so the
+ * "desaturated thinking theme" is expressed with muted tokens (see report).
+ */
+function ReasoningGroup({
+  groupKey,
+  entries,
+}: {
+  groupKey: string;
+  entries: PartEntry<ReasoningPart>[];
+}) {
   const [showReasoning, setShowReasoning] = useState(getPrefs().showReasoning);
-  /**
-   * null = follow the global /thinking toggle; boolean = this block was
-   * clicked individually. A global toggle re-takes control of every block,
-   * so /thinking always expands/collapses ALL thinking blocks at once.
-   */
-  const [manualOpen, setManualOpen] = useState<boolean | null>(() =>
-    stateKey ? (disclosureState.get(stateKey) ?? null) : null,
+  const [manualOpen, setManualOpen] = useState<boolean | null>(
+    () => disclosureState.get(groupKey) ?? null,
   );
   useEffect(
     () =>
@@ -911,24 +966,88 @@ function ReasoningBlock({ text, stateKey }: { text: string; stateKey?: string })
     [],
   );
   const open = manualOpen ?? showReasoning;
+  const text = entries
+    .map((e) => e.part.text)
+    .filter((t) => t && t.trim() !== "")
+    .join("\n\n");
   if (!text) return null;
   return (
-    <div className="overflow-hidden rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-inset-base)]">
+    <div
+      data-oc-reasoning-group
+      data-oc-reasoning-count={entries.length}
+      className="overflow-hidden rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-inset-base)]"
+    >
       <button
         type="button"
         onClick={() => {
           const next = !open;
           setManualOpen(next);
-          if (stateKey) rememberDisclosure(stateKey, next);
+          rememberDisclosure(groupKey, next);
         }}
         className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-left text-xs text-[var(--text-weak)] transition-colors hover:text-[var(--text-base)]"
       >
         <ChevronRight className={`size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
         <Brain className="size-3.5 shrink-0" />
         Reasoning
+        {entries.length > 1 && (
+          <span className="font-mono text-[10px] text-[var(--text-weaker)]">· {entries.length}</span>
+        )}
       </button>
       {open && (
-        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-weak)] italic whitespace-pre-wrap">{text}</div>
+        <div className="border-t border-[var(--border-weak-base)] px-2.5 py-2 text-xs leading-relaxed text-[var(--text-weak)] italic whitespace-pre-wrap [&_code]:text-[var(--text-weaker)] [&_pre]:text-[var(--text-weaker)]">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A single reasoning part (live streaming) renders as a one-part group. */
+function ReasoningBlock({ text, stateKey }: { text: string; stateKey?: string }) {
+  if (!text) return null;
+  return (
+    <ReasoningGroup
+      groupKey={stateKey ?? `reasoning:${text.length}`}
+      entries={[{ part: { type: "reasoning", text }, index: 0, key: stateKey ?? "reasoning" }]}
+    />
+  );
+}
+
+/**
+ * R9 — 2+ consecutive `read`/`glob`/`grep` tool parts collapse into one row
+ * with a counted summary; expanding renders each tool card unchanged.
+ */
+function ExploreGroup({ entries, message }: { entries: PartEntry<ToolPart>[]; message: AssistantMessage }) {
+  const [open, setOpen] = useState(false);
+  if (entries.length === 0) return null;
+  return (
+    <div
+      data-oc-explore-group
+      data-oc-explore-count={entries.length}
+      className="overflow-hidden rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)]"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={open ? "Collapse exploration" : "Expand exploration"}
+        className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-left text-xs text-[var(--text-weak)] transition-colors hover:text-[var(--text-base)]"
+      >
+        <ChevronRight className={`size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+        <span className="font-medium">Explored</span>
+        <span className="truncate text-[var(--text-weaker)]">{exploreSummary(entries)}</span>
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">
+          {entries.length}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-1.5 border-t border-[var(--border-weak-base)] px-2.5 py-2">
+          {entries.map((entry) => (
+            <Fragment key={entry.key}>
+              <Target id="tool.card" part={entry.part} stateKey={entry.key} />
+              <PartDecorations message={message} part={entry.part} partIndex={entry.index} />
+            </Fragment>
+          ))}
+        </div>
       )}
     </div>
   );

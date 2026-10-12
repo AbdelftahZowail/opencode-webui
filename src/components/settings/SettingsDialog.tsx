@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Blocks, ChevronLeft, ChevronRight, Puzzle, ShieldCheck, Smartphone, XIcon } from "lucide-react";
+import { Blocks, Bell, ChevronLeft, ChevronRight, Palette, Puzzle, ShieldCheck, Smartphone, Terminal, XIcon } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
@@ -24,9 +24,14 @@ import {
 } from "../../lib/extensionDiagnostics";
 import { AccessSection } from "./AccessSection";
 import { AppSection } from "./AppSection";
-// Side-effect import: PluginsSection self-registers the `settings.plugins`
-// target (rendered through <Target> below), so its module must evaluate here.
+import { NotificationsSection } from "./NotificationsSection";
+import { PermissionSection } from "./PermissionSection";
+// Side-effect imports: these sections self-register `settings.plugins`,
+// `settings.shell` and `settings.appearance` (rendered through <Target>
+// below), so their modules must evaluate here.
 import "./PluginsSection";
+import "./ShellSection";
+import "../../theme/AppearanceSection";
 import { Empty, SectionHeader, inputCls } from "./shared";
 import { checkPlugins, loadPlugins, updatePlugins, useStore } from "../../store";
 
@@ -105,7 +110,10 @@ export function SettingsDialog() {
     () => [
       { id: "extensions", label: "Extensions", icon: Blocks },
       { id: "plugins", label: "Plugins", icon: Puzzle },
+      { id: "notifications", label: "Notifications", icon: Bell },
       { id: "security", label: "Security", icon: ShieldCheck },
+      { id: "appearance", label: "Appearance", icon: Palette },
+      { id: "shell", label: "Shell", icon: Terminal },
       ...(phone ? [{ id: "app", label: "App", icon: Smartphone }] : []),
     ],
     [phone],
@@ -142,7 +150,7 @@ export function SettingsDialog() {
           <DialogHeader className="pr-8">
             <DialogTitle>Settings</DialogTitle>
             <p className="text-xs text-[var(--text-weaker)]">
-              Extensions · plugins · security{phone ? " · app" : ""}
+              Extensions · plugins · notifications · security · appearance · shell{phone ? " · app" : ""}
             </p>
           </DialogHeader>
 
@@ -162,8 +170,20 @@ export function SettingsDialog() {
               <TabsContent value="plugins">
                 <PluginsTab />
               </TabsContent>
+              <TabsContent value="notifications">
+                <NotificationsSection />
+              </TabsContent>
               <TabsContent value="security">
-                <AccessSection />
+                <div className="space-y-4">
+                  <PermissionSection />
+                  <AccessSection />
+                </div>
+              </TabsContent>
+              <TabsContent value="appearance">
+                <Target id="settings.appearance" />
+              </TabsContent>
+              <TabsContent value="shell">
+                <Target id="settings.shell" />
               </TabsContent>
               {phone && (
                 <TabsContent value="app">

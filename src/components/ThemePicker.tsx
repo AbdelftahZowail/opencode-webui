@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Palette } from "lucide-react";
-import { THEMES, applyTheme, getTheme } from "../theme/themes";
+import { getTheme, listAllThemes, selectTheme, subscribeTheme } from "../theme/themes";
 import { useStore } from "../store";
 import { Button } from "./ui/button";
 import {
@@ -12,6 +12,8 @@ import {
 
 export function ThemePicker() {
   const [current, setCurrent] = useState(getTheme().id);
+  // Built-in + discovered custom themes; refreshed on any theme change.
+  const [themes, setThemes] = useState(() => listAllThemes());
   const signal = useStore((s) => s.uiSignals.themes);
   const [open, setOpen] = useState(false);
 
@@ -20,7 +22,18 @@ export function ThemePicker() {
     if (signal) setOpen(true);
   }, [signal]);
 
-  const label = THEMES.find((t) => t.id === current)?.label ?? THEMES[0]!.label;
+  // Repaint the active marker and the list when the theme changes (custom
+  // themes load at boot and from Settings › Appearance).
+  useEffect(
+    () =>
+      subscribeTheme(() => {
+        setCurrent(getTheme().id);
+        setThemes(listAllThemes());
+      }),
+    [],
+  );
+
+  const label = themes.find((t) => t.id === current)?.label ?? themes[0]?.label ?? "Theme";
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -32,11 +45,11 @@ export function ThemePicker() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-40">
-        {THEMES.map((t) => (
+        {themes.map((t) => (
           <DropdownMenuItem
             key={t.id}
             className="justify-between"
-            onSelect={() => setCurrent(applyTheme(t.id).id)}
+            onSelect={() => setCurrent(selectTheme(t.id).id)}
           >
             <span>{t.label}</span>
             {t.id === current && <Check className="size-3.5" />}

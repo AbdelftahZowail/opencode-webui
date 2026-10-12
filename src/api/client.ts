@@ -27,6 +27,7 @@ import type {
   SessionsResponse,
   SkillInfo,
 } from "./types";
+import type { SessionStatsInfo } from "../lib/stats";
 import { fireHooks } from "../extensions/hooks";
 
 export type ForkBoundary =
@@ -613,6 +614,23 @@ export type WebuiUpdateResult =
   | { ok: false; needConfirm: true; exposure: WebuiExposure }
   | { ok: false; error: string };
 
+/**
+ * `GET /api/webui/update/check` — proxy-local update probe (the engine has no
+ * update route; the proxy fetches the npm registry). `channel` distinguishes a
+ * repo checkout (`dev`), a compiled binary, and a published install, because the
+ * install path behaves differently per channel (see server/setup.ts runUpdate).
+ * `unavailable` means the probe could not reach the registry — a soft state the
+ * UI renders, never an error (the route still answers HTTP 200).
+ */
+export interface WebuiUpdateCheck {
+  current: string;
+  latest?: string | null;
+  updateAvailable: boolean;
+  channel: "dev" | "binary" | "published";
+  unavailable?: boolean;
+  error?: string;
+}
+
 const apiRaw = {
   health: () => request<{ ok: boolean; service?: string; error?: string }>("/api/webui/status"),
 
@@ -633,6 +651,21 @@ const apiRaw = {
   },
   webuiRestart: () =>
     request<{ ok: boolean; restarting: boolean }>("/api/webui/settings/restart", { method: "POST" }),
+
+  /**
+   * Proxy-local update check (no engine route): the proxy asks the npm
+   * registry for the latest published version and reports the running
+   * `channel`. A failed probe resolves with `unavailable: true`, not a throw.
+   */
+  checkWebuiUpdate: () => request<WebuiUpdateCheck>("/api/webui/update/check"),
+  /**
+   * Proxy-local update install: spawns the detached `update` CLI and returns
+   * immediately. The running version only changes on the published channel —
+   * a dev checkout / compiled binary logs and no-ops (server/setup.ts
+   * runUpdate). Apply with the existing restart route when ready.
+   */
+  installWebuiUpdate: () =>
+    request<{ ok: boolean; updating: boolean }>("/api/webui/update", { method: "POST" }),
 
   // sessions
   /**
@@ -776,6 +809,24 @@ const apiRaw = {
     if (res.ok) return (await res.json()) as { data: SessionExportData };
     if (res.status !== 404) throw new Error(await responseError(res));
     return request<{ data: SessionExportData }>(`/api/session/${id}/export${query}`);
+  },
+  /**
+   * `GET /api/experimental/session/stats` — the engine's aggregate stats over a
+   * range (defaults to year-to-date when the caller passes nothing). The route
+   * moved under `/api/experimental/`; a 404 falls back to the legacy path (both
+   * answer 404 only when genuinely unavailable, so the fallback masks nothing).
+   */
+  sessionStats: async (opts?: { from?: string; to?: string; project?: string; timezone?: string; tools?: "none" | "summary" | "detail" }): Promise<SessionStatsInfo> => {
+    const params = new URLSearchParams();
+    if (opts?.from) params.set("from", opts.from);
+    if (opts?.to) params.set("to", opts.to);
+    if (opts?.project) params.set("project", opts.project);
+    if (opts?.timezone) params.set("timezone", opts.timezone);
+    if (opts?.tools) params.set("tools", opts.tools);
+    const q = params.toString();
+    const unwrap = async (path: string) => (await request<{ data: SessionStatsInfo }>(path)).data;
+    try { return await unwrap(`/api/experimental/session/stats${q ? `?${q}` : ""}`); }
+    catch (err) { if (statusOf(err) !== 404) throw err; return unwrap(`/api/session/stats${q ? `?${q}` : ""}`); }
   },
   compactSession: (sessionID: string, delivery: CompactDelivery = "steer") =>
     request<{ data: unknown }>(`/api/session/${sessionID}/compact`, {
@@ -989,12 +1040,17 @@ const apiRaw = {
    * Send the current name, fall back to the legacy one on a body rejection, so
    * both generations work.
    */
-  replyPermission: async (sessionID: string, requestID: string, reply: PermissionReply) => {
+  replyPermission: async (
+    sessionID: string,
+    requestID: string,
+    reply: PermissionReply,
+    message?: string,
+  ) => {
     const send = (field: "decision" | "reply") =>
       request<unknown>(`/api/session/${sessionID}/permission/${requestID}/reply`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ [field]: reply, message: null }),
+        body: JSON.stringify({ [field]: reply, message: message ?? null }),
       });
     try {
       return await send("decision");
@@ -1489,6 +1545,11 @@ const apiRaw = {
    * Server tab was deliberately de-surfaced).
    */
   serverInfo: () => request<ServerInfo>("/api/info"),
+  /**
+   * `POST /api/pair` (`PairingCode`) — a short-lived, single-use code for a
+   * `/auth/connect/:code` pairing link. No request body.
+   */
+  pairCode: () => request<{ code: string; expires_in: number }>("/api/pair", { method: "POST" }),
 
   // misc
   /**

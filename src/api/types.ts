@@ -173,6 +173,14 @@ export interface CompactionMessage extends MessageBase {
   reason?: "auto" | "manual";
   summary?: string;
   recent?: string;
+  /**
+   * Billing carried by `Session.Message.Compaction.Completed`/`.Failed` (the
+   * engine bills the summarization turn). `model` is `.Completed` only; both
+   * variants may carry `cost`/`tokens`.
+   */
+  model?: ModelRef;
+  cost?: number;
+  tokens?: TokenUsage;
   error?: StructuredError;
 }
 
@@ -255,11 +263,18 @@ export interface PermissionSavedInfo {
 
 // ---- forms --------------------------------------------------------------
 
+/** `Form.When` — a visibility predicate for conditional fields. */
+export interface FormWhen {
+  key: string;
+  op: "eq" | "neq";
+  value: string | number | boolean;
+}
+
 export type FormField =
-  | { key: string; type: "string"; title?: string; description?: string; required?: boolean; placeholder?: string; default?: string; options?: FormOption[]; format?: string }
-  | { key: string; type: "number" | "integer"; title?: string; description?: string; required?: boolean; default?: number }
-  | { key: string; type: "boolean"; title?: string; description?: string; required?: boolean; default?: boolean }
-  | { key: string; type: "multiselect"; title?: string; description?: string; required?: boolean; options: FormOption[]; default?: string[] }
+  | { key: string; type: "string"; title?: string; description?: string; required?: boolean; hidden?: boolean; when?: FormWhen[]; placeholder?: string; default?: string; options?: FormOption[]; format?: string }
+  | { key: string; type: "number" | "integer"; title?: string; description?: string; required?: boolean; hidden?: boolean; when?: FormWhen[]; default?: number }
+  | { key: string; type: "boolean"; title?: string; description?: string; required?: boolean; hidden?: boolean; when?: FormWhen[]; default?: boolean }
+  | { key: string; type: "multiselect"; title?: string; description?: string; required?: boolean; hidden?: boolean; when?: FormWhen[]; options: FormOption[]; default?: string[] }
   | { key: string; type: "external"; url: string; title?: string; description?: string };
 
 export interface FormOption {

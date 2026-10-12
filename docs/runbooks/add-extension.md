@@ -48,7 +48,7 @@ Until E7 lands, the discipline is manual — so do it every time.
 5. **Add battery checks** for the new seam. The extension batteries are the
    release gate:
    ```
-   bun run scripts/uitest/ext-battery-browser.ts   # 34
+   bun run scripts/uitest/ext-battery-browser.ts   # 35
    bun run scripts/uitest/ext-battery-dom.ts       # 10
    bun run scripts/uitest/ext-battery-proxy.ts     # 17
    bun run scripts/uitest/ext-battery-acceptance.ts # 15

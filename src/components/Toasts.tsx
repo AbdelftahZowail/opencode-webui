@@ -30,6 +30,18 @@ export function Toasts() {
           {t.description ? (
             <span className="text-xs leading-snug text-[var(--text-weak)]">{t.description}</span>
           ) : null}
+          {t.action ? (
+            <button
+              type="button"
+              onClick={() => {
+                t.action?.onClick();
+                dismissToast(t.id);
+              }}
+              className="mt-1 self-start cursor-pointer rounded border border-[var(--border-weak-base)] px-1.5 py-0.5 text-[11px] text-[var(--text-weak)] transition-colors hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
+            >
+              {t.action.label}
+            </button>
+          ) : null}
         </div>
       ))}
     </div>

@@ -56,6 +56,9 @@ import {
   getExtensionDiagnostics,
   clearExtensionDiagnostics,
 } from "../../src/lib/extensionDiagnostics";
+import { createExtensionApi, EXT_API_VERSION } from "../../src/lib/extensionApi";
+import { resolveCodeBlockRenderer } from "../../src/lib/markdown/codeBlockRenderers";
+import { Markdown } from "../../src/components/markdown/Markdown";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const BAT_DIR = "/tmp/opencode/bat-browser";
@@ -1131,6 +1134,82 @@ function testSlots(): void {
   }
 }
 
+/**
+ * R14 — the code-block renderer seam is reachable through the PUBLIC extension
+ * API alone. An external bundle gets `window.__opencodeUI` (built here as
+ * `createExtensionApi()`), registers a fence renderer, and core's markdown
+ * pipeline renders it; the built-in mermaid/latex contributions still resolve;
+ * unregistering restores the default code block.
+ */
+function testCodeBlockRenderer(): void {
+  const t0 = Date.now();
+  const label = "external extension registers a code-block renderer (public API)";
+  const LANG = "batcb";
+  const id = "bat-cb-ext";
+  const customMd = "```" + LANG + "\nhello world\n```";
+  unregisterIds([id]);
+  try {
+    const api = createExtensionApi();
+    if (api.version !== EXT_API_VERSION) {
+      fail(label, `createExtensionApi().version=${api.version}, EXT_API_VERSION=${EXT_API_VERSION}`, t0);
+      return;
+    }
+    if (typeof api.markdown?.registerCodeBlockRenderer !== "function") {
+      fail(label, `public surface has no markdown.registerCodeBlockRenderer (v${api.version})`, t0);
+      return;
+    }
+    // Register exactly as an external extension would — public API only.
+    const off = api.markdown.registerCodeBlockRenderer(
+      [LANG],
+      (ctx) => createElement("div", { "data-bat-cb": "1" }, `CUSTOM:${ctx.language}:${ctx.source}`),
+      { id, order: 100 },
+    );
+    try {
+      if (!resolveCodeBlockRenderer(LANG)) {
+        fail(label, `resolveCodeBlockRenderer(${LANG}) null after public-API register`, t0);
+        return;
+      }
+      // The CORE markdown render path must pick up the custom renderer.
+      const html = renderToStaticMarkup(createElement(Markdown, { text: customMd }));
+      if (!html.includes("CUSTOM:batcb:hello world") || !html.includes("data-bat-cb")) {
+        fail(label, `custom output missing from Markdown render: ${html.slice(0, 300)}`, t0);
+        return;
+      }
+      // Built-ins still resolve + render through their contributions.
+      const mmd = resolveCodeBlockRenderer("mermaid");
+      const tex = resolveCodeBlockRenderer("tex");
+      if (!mmd || !tex || !mmd.languages.includes("mermaid") || !tex.languages.includes("latex")) {
+        fail(label, `built-in renderers missing (mermaid=${!!mmd}, tex=${!!tex})`, t0);
+        return;
+      }
+      const mmdHtml = renderToStaticMarkup(createElement(Markdown, { text: "```mermaid\ngraph TD; A-->B;\n```" }));
+      const texHtml = renderToStaticMarkup(createElement(Markdown, { text: "```latex\nx^2\n```" }));
+      if (!mmdHtml.includes("data-oc-mermaid") || !texHtml.includes("data-oc-latex")) {
+        fail(label, `built-in blocks not rendered (mermaid=${mmdHtml.includes("data-oc-mermaid")}, latex=${texHtml.includes("data-oc-latex")})`, t0);
+        return;
+      }
+      // Unregister restores the default code block.
+      off();
+      if (resolveCodeBlockRenderer(LANG) !== null) {
+        fail(label, `unregister left ${LANG} registered`, t0);
+        return;
+      }
+      const after = renderToStaticMarkup(createElement(Markdown, { text: customMd }));
+      if (after.includes("CUSTOM:") || !after.includes("data-oc-code-block")) {
+        fail(label, `default not restored after unregister: ${after.slice(0, 300)}`, t0);
+        return;
+      }
+      pass(label, `ctx→CUSTOM render; mermaid/latex built-ins intact; unregister→CodeBlock (v${api.version})`, t0);
+    } finally {
+      off();
+    }
+  } catch (err) {
+    fail(label, err instanceof Error ? err.message : String(err), t0);
+  } finally {
+    unregisterIds([id]);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live proxy battery (manifest + bundle HTTP)
 // ---------------------------------------------------------------------------
@@ -1501,6 +1580,7 @@ async function main(): Promise<void> {
   await testExtensionSettingsStore();
   testExtensionDiagnostics();
   await testPeerComposition();
+  testCodeBlockRenderer();
 
   // Live proxy battery (isolated 4111/sandbox).
   const t0 = Date.now();

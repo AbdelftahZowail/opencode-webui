@@ -12,9 +12,27 @@ import { selectSession, useStore } from "../store";
 import { getPrefs, subscribePrefs } from "../prefs";
 import { api } from "../api/client";
 import { looksLikeImagePath, mimeFromName } from "../lib/attachments";
+import { errorDiagnostics, extractDiagnostics, type ToolDiagnostic } from "../lib/diagnostics";
+import {
+  acquireShellOutput,
+  collapseText,
+  COLLAPSE_CHAR_BUDGET,
+  EXECUTE_COLLAPSE_LINES,
+  extractShellRef,
+  getShellOutput,
+  shouldCollapseShell,
+  subscribeShellOutput,
+  type ShellOutputState,
+} from "../lib/toolOutput";
 import { DiffView } from "./DiffView";
 import { openImage } from "./ImageViewer";
 import { Spinner } from "./ui";
+// Side-effect imports: the new bodies self-register `tool.patch`,
+// `tool.question`, and `tool.skill` (parity R10). ToolCard only routes to
+// them via <Target>, so the imports are what run their autoRegister.
+import "./ToolPatchBody";
+import "./ToolQuestionBody";
+import "./ToolSkillBody";
 
 const toolDisclosureState = new Map<string, boolean>();
 
@@ -71,7 +89,8 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
   const error = state.status === "error" ? state.error : undefined;
   const streamingText = state.status === "streaming" ? state.input : undefined;
 
-  const props: ToolProps = { part, state, stateKey, input, meta, output, error, streamingText };
+  const denied = isToolDenied(state, meta);
+  const props: ToolProps = { part, state, stateKey, input, meta, output, error, streamingText, denied };
 
   const core = (() => {
   switch (part.name) {
@@ -79,6 +98,13 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
       return <Target id="tool.edit" {...props} />;
     case "write":
       return <Target id="tool.write" {...props} />;
+    case "apply_patch":
+    case "patch":
+      return <Target id="tool.patch" {...props} />;
+    case "question":
+      return <Target id="tool.question" {...props} />;
+    case "skill":
+      return <Target id="tool.skill" {...props} />;
     case "shell":
     case "bash":
       return <Target id="tool.shell" {...props} />;
@@ -142,7 +168,12 @@ export function ToolCard({ part, stateKey }: { part: ToolPart; stateKey?: string
   }
   })();
   return (
-    <div data-oc-tool-card data-oc-tool-name={part.name}>
+    <div
+      data-oc-tool-card
+      data-oc-tool-name={part.name}
+      data-oc-tool-denied={denied || undefined}
+      className={denied ? "line-through" : undefined}
+    >
       {core}
       {/* Universal image strip: any tool can return `file`-type image content
           (read, webfetch, custom MCP tools…), so images render at the card
@@ -165,6 +196,8 @@ interface ToolProps {
   output?: string;
   error?: { type: string; message: string };
   streamingText?: string;
+  /** Permission-denied tools render struck through (parity R10). */
+  denied?: boolean;
 }
 
 // ---- shared building blocks ----------------------------------------------
@@ -181,6 +214,71 @@ function textOf(content: { type: string; text?: string }[] | undefined): string 
     .trim();
   return text || undefined;
 }
+
+/**
+ * A permission-denied tool (parity R10). The engine surfaces a rejection as a
+ * tool error; the marker text isn't pinned, so we accept an explicit
+ * `metadata.denied` flag OR the rejection wording the engine uses. Kept
+ * deliberately narrow: only an unambiguous denial strikes the row.
+ */
+function isToolDenied(state: ToolState, meta: Record<string, unknown>): boolean {
+  if (meta.denied === true || meta.denied === "denied" || meta.denied === "rejected") return true;
+  if (state.status !== "error") return false;
+  const type = state.error.type.toLowerCase();
+  const message = state.error.message.toLowerCase();
+  if (type.includes("denied") || type.includes("reject")) return true;
+  return /\b(denied|rejected)\b/.test(message) || /permission.{0,20}reject/.test(message);
+}
+
+/** Up to 3 error-level diagnostics under a completed write/edit (parity R10). */
+function ToolDiagnostics({ diagnostics }: { diagnostics: ToolDiagnostic[] }) {
+  if (diagnostics.length === 0) return null;
+  return (
+    <div data-oc-tool-diagnostics className="ml-5 mt-1 space-y-0.5 font-mono text-[10px]">
+      {diagnostics.map((d, i) => {
+        const location = d.file
+          ? `${d.file}${d.line != null ? `:${d.line}${d.column != null ? `:${d.column}` : ""}` : ""}`
+          : d.source ?? "diagnostic";
+        return (
+          <div key={i} className="truncate text-[var(--text-weak)]">
+            <span className="text-[color:var(--surface-critical-strong)]">{location}</span> {d.message}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Shared background-shell output hook: the registry state lives in
+ * `lib/toolOutput` and the scheduler owns the polling; this only re-renders on
+ * change and releases the poller when the shell stops running / unmounts.
+ */
+function useShellOutput(id: string | undefined, running: boolean): ShellOutputState | undefined {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!id || !running) return;
+    const release = acquireShellOutput(id);
+    const unsubscribe = subscribeShellOutput(id, () => force((v) => v + 1));
+    return () => {
+      unsubscribe();
+      release();
+    };
+  }, [id, running]);
+  return id ? getShellOutput(id) : undefined;
+}
+
+function BackgroundBadge() {
+  return (
+    <span
+      data-oc-tool-badge="background"
+      className="shrink-0 rounded-sm border border-[var(--border-weak-base)] px-1 py-px font-mono text-[10px] text-[var(--text-weak)]"
+    >
+      Background
+    </span>
+  );
+}
+
 
 /** Workspace-relative path display, like the TUI's pathFormatter. */
 function Path({ value, prefix }: { value: unknown; prefix?: string }) {
@@ -545,24 +643,28 @@ function EditTool(props: ToolProps) {
             )}
           </BlockTool>
         ))}
+        <ToolDiagnostics diagnostics={errorDiagnostics(extractDiagnostics(props.meta, props.output))} />
       </>
     );
   }
 
   return (
-    <InlineTool
-      {...props}
-      icon="←"
-      pending="Preparing edit…"
-      label={
-        <>
-          Edit <Path value={props.input.path} />
-          {props.input.replaceAll != null && props.input.replaceAll !== false && (
-            <span className="text-[var(--text-weaker)]"> (replace all)</span>
-          )}
-        </>
-      }
-    />
+    <div>
+      <InlineTool
+        {...props}
+        icon="←"
+        pending="Preparing edit…"
+        label={
+          <>
+            Edit <Path value={props.input.path} />
+            {props.input.replaceAll != null && props.input.replaceAll !== false && (
+              <span className="text-[var(--text-weaker)]"> (replace all)</span>
+            )}
+          </>
+        }
+      />
+      <ToolDiagnostics diagnostics={errorDiagnostics(extractDiagnostics(props.meta, props.output))} />
+    </div>
   );
 }
 
@@ -572,50 +674,67 @@ function WriteTool(props: ToolProps) {
 
   if (props.state.status === "completed" && content !== undefined) {
     return (
-      <BlockTool
-        title={
-          <>
-            <span className="font-mono">#</span>
-            {"Wrote "}
-            <span className="font-mono text-[var(--text-base)]">{path}</span>
-            <span className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">
-              {content.split("\n").length} lines
-            </span>
-          </>
-        }
-        collapsible
-        stateKey={props.stateKey}
-      >
-        <CodeBlock code={content} />
-      </BlockTool>
+      <>
+        <BlockTool
+          title={
+            <>
+              <span className="font-mono">#</span>
+              {"Wrote "}
+              <span className="font-mono text-[var(--text-base)]">{path}</span>
+              <span className="ml-auto shrink-0 font-mono text-[10px] text-[var(--text-weaker)]">
+                {content.split("\n").length} lines
+              </span>
+            </>
+          }
+          collapsible
+          stateKey={props.stateKey}
+        >
+          <CodeBlock code={content} />
+        </BlockTool>
+        <ToolDiagnostics diagnostics={errorDiagnostics(extractDiagnostics(props.meta, props.output))} />
+      </>
     );
   }
 
   return (
-    <InlineTool
-      {...props}
-      icon="←"
-      pending="Preparing write…"
-      label={
-        <>
-          Write <Path value={props.input.path} />
-        </>
-      }
-    />
+    <div>
+      <InlineTool
+        {...props}
+        icon="←"
+        pending="Preparing write…"
+        label={
+          <>
+            Write <Path value={props.input.path} />
+          </>
+        }
+      />
+      <ToolDiagnostics diagnostics={errorDiagnostics(extractDiagnostics(props.meta, props.output))} />
+    </div>
   );
 }
 
 function ShellTool(props: ToolProps) {
   const command = str(props.input.command);
   const exit = props.meta.exit;
+  const shellRef = extractShellRef(props.input, props.meta);
+  const inFlight = props.state.status === "running" || props.state.status === "streaming";
+  const background = shellRef.background;
+  // Background shells: poll their output through the shared scheduler while
+  // the call is in flight, then freeze the accumulated buffer.
+  const shellState = useShellOutput(background && inFlight ? shellRef.id : undefined, background && inFlight);
+  const liveOutput = shellState?.output;
+  const output = liveOutput && liveOutput.length > 0 ? liveOutput : props.output;
+  const backgroundBadge = background ? <BackgroundBadge /> : null;
 
-  if (props.state.status === "completed") {
+  if (props.state.status === "completed" || background) {
     return (
       <BlockTool
         title={
           <>
             <span className="font-mono">$</span>
             <span className="min-w-0 flex-1 truncate font-mono text-[var(--text-base)]">{command}</span>
+            {inFlight && <Spinner className="size-3 shrink-0" />}
+            {backgroundBadge}
             {typeof exit === "number" && exit !== 0 && (
               <span className="ml-auto shrink-0 font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
                 exit {exit}
@@ -624,15 +743,17 @@ function ShellTool(props: ToolProps) {
           </>
         }
         collapsible
-        collapsedByDefault={!!props.output && props.output.split("\n").length > 10}
+        collapsedByDefault={shouldCollapseShell(output)}
         stateKey={props.stateKey}
       >
-        {props.output ? (
+        {output ? (
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap px-2.5 py-2 font-mono text-xs leading-relaxed text-[var(--text-base)]">
-            {props.output}
+            {output}
           </pre>
         ) : (
-          <p className="px-2.5 py-2 text-xs text-[var(--text-weaker)]">(no output)</p>
+          <p className="px-2.5 py-2 text-xs text-[var(--text-weaker)]">
+            {background && inFlight ? "(running in the background…)" : "(no output)"}
+          </p>
         )}
       </BlockTool>
     );
@@ -643,7 +764,12 @@ function ShellTool(props: ToolProps) {
       {...props}
       icon="$"
       pending="Writing command…"
-      label={<span className="font-mono">{command}</span>}
+      label={
+        <>
+          <span className="font-mono">{command}</span>
+          {backgroundBadge}
+        </>
+      }
     />
   );
 }
@@ -905,6 +1031,10 @@ function ExecuteTool(props: ToolProps) {
   // The state-level error is the authoritative detail; metadata.error is the
   // fallback when only metadata carried it.
   const errorDetail = props.error ?? (metaError?.message ? { type: metaError.type ?? "error", message: metaError.message } : undefined);
+  // Execute output collapses past the execute line budget (parity R10).
+  const collapsedOutput = props.output
+    ? collapseText(props.output, { maxLines: EXECUTE_COLLAPSE_LINES, maxChars: COLLAPSE_CHAR_BUDGET })
+    : undefined;
 
   return (
     <div className="py-0.5 pl-1 text-xs">
@@ -932,9 +1062,10 @@ function ExecuteTool(props: ToolProps) {
           {errorDetail.type}: {errorDetail.message}
         </pre>
       )}
-      {hasError && props.output && errorDetail === undefined && (
+      {hasError && collapsedOutput && errorDetail === undefined && (
         <pre className="ml-5 mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
-          {props.output.split("\n").slice(0, 4).join("\n")}
+          {collapsedOutput.text}
+          {collapsedOutput.collapsed ? "\n…" : ""}
         </pre>
       )}
     </div>

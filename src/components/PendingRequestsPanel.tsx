@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { CircleHelpIcon, ClipboardListIcon, ShieldAlertIcon, XIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CircleHelpIcon,
+  ClipboardListIcon,
+  Maximize2,
+  Minimize2,
+  ShieldAlertIcon,
+  XIcon,
+} from "lucide-react";
 import type { FormField, QuestionAnswer } from "../api/types";
 import {
   cancelPendingRequest,
@@ -15,6 +22,22 @@ import {
   type QueuedQuestion,
 } from "../store";
 import { log } from "../lib/log";
+import { getPrefs, subscribePrefs } from "../prefs";
+import { Target } from "../extensions/registry";
+// Side-effect: register the `form.review` target rendered below.
+import "./FormReview";
+// Side-effect: register the `permission.reject` target rendered below.
+import "./PermissionRejectDialog";
+import {
+  buildAnswer,
+  clearFormDraft,
+  loadFormDraft,
+  saveFormDraft,
+  submitBlocker,
+  unacknowledgedExternal,
+  visibleFields,
+  type FormValues,
+} from "../lib/formDraft";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
@@ -67,6 +90,16 @@ function RequestPanel({ item, behind }: { item: PendingRequest; behind: number }
   const boxRef = useRef<HTMLDivElement>(null);
   const label = useStore((s) => sessionLabel(s, item.req.sessionID));
 
+  // R12: a permission prompt may render full-screen (v2
+  // `permission.prompt.fullscreen`). The state is seeded from the persisted
+  // pref and re-synced when Settings changes it; ctrl/⌘+f overrides it
+  // locally for the request on screen. The panel is keyed by request identity,
+  // so a local override never leaks to the next queued request.
+  const [fullscreen, setFullscreen] = useState(() => getPrefs().permissionFullscreen);
+  useEffect(() => subscribePrefs(() => setFullscreen(getPrefs().permissionFullscreen)), []);
+  const isPermission = item.kind === "permission";
+  const showFullscreen = isPermission && fullscreen;
+
   // Capture-phase Esc owner (same idiom as RunsPanel): reject/cancel the
   // head request and swallow the key so the site-wide interrupt arming and
   // any other global binding stay idle. A dialog stacked ABOVE the panel
@@ -82,6 +115,28 @@ function RequestPanel({ item, behind }: { item: PendingRequest; behind: number }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [item]);
+
+  // R12: ctrl/⌘+f toggles full-screen FOR THE ACTIVE PERMISSION REQUEST only.
+  // Mirrors the Esc handler's guards — a stacked dialog keeps the key, and an
+  // editable target (input/textarea/contenteditable) keeps it. It is bound
+  // only while a permission request is actually displayed, so the browser's
+  // find is shadowed no more than v2 does; the capture phase + stopPropagation
+  // also keep the app's own ⌘/Ctrl+F search from firing meanwhile.
+  useEffect(() => {
+    if (!isPermission) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== "f") return;
+      if (document.querySelector('[role="dialog"]')) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setFullscreen((v) => !v);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [isPermission]);
 
   // Park focus on the box (not a button) so a stray Enter can't confirm
   // anything; Tab reaches the controls from there. Keyed on the REQUEST
@@ -99,6 +154,102 @@ function RequestPanel({ item, behind }: { item: PendingRequest; behind: number }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey]);
 
+  // Swapping between docked and full-screen remounts the box; re-park focus
+  // so the keyboard user stays on the request.
+  useEffect(() => {
+    boxRef.current?.focus({ preventScroll: true });
+  }, [showFullscreen]);
+
+  const body =
+    item.kind === "permission" ? (
+      <PermissionBody req={item.req} />
+    ) : item.kind === "question" ? (
+      <QuestionBody req={item.req} />
+    ) : (
+      <FormBody req={item.req} />
+    );
+
+  const header = (
+    <div className="flex items-center justify-between gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span
+          className={`flex shrink-0 items-center gap-1.5 font-medium ${
+            item.kind === "permission"
+              ? "text-[color:var(--surface-critical-strong)]"
+              : item.kind === "question"
+                ? "text-[color:var(--text-interactive-base)]"
+                : "text-[color:var(--surface-warning-strong)]"
+          }`}
+        >
+          <Icon className="size-3.5" aria-hidden />
+          {item.kind === "form" ? item.req.title || "Form" : meta.label}
+        </span>
+        <Badge
+          variant="outline"
+          className="max-w-52 truncate border-[var(--border-weak-base)] font-normal text-[var(--text-weak)]"
+        >
+          {label}
+        </Badge>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {isPermission && (
+          <button
+            type="button"
+            data-oc-permission-fullscreen-toggle
+            aria-pressed={showFullscreen}
+            aria-label={showFullscreen ? "Exit full screen" : "Full screen"}
+            title={showFullscreen ? "Exit full screen (ctrl+f)" : "Full screen (ctrl+f)"}
+            onClick={() => setFullscreen((v) => !v)}
+            className="flex shrink-0 cursor-pointer items-center gap-1 font-mono text-xs text-[color:var(--text-weaker)] hover:text-[color:var(--text-weak)]"
+          >
+            {showFullscreen ? "exit" : "full screen"}
+            {showFullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => cancelPendingRequest(item)}
+          title={meta.hint}
+          className="flex shrink-0 cursor-pointer items-center gap-1 font-mono text-xs text-[color:var(--text-weaker)] hover:text-[color:var(--text-weak)]"
+        >
+          {meta.hint.replace("esc ", "")}
+          <XIcon className="size-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+
+  const behindNote =
+    behind > 0 ? (
+      <p className="pt-1.5 text-xs text-[color:var(--text-weaker)]">
+        +{behind} more queued in this session
+      </p>
+    ) : null;
+
+  if (showFullscreen) {
+    return (
+      <div
+        data-oc-permission-fullscreen
+        role="region"
+        aria-label="Permission required"
+        className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-[var(--background-strong)] p-4 sm:p-6"
+      >
+        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center">
+          <div
+            ref={boxRef}
+            tabIndex={-1}
+            className="border-l-2 bg-[color:var(--surface-inset-base)] px-4 py-3 font-mono text-sm outline-none"
+            style={{ borderLeftColor: accent }}
+          >
+            {header}
+            <div className="pt-3">{body}</div>
+            {behindNote}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="border-t border-[color:var(--border-weak-base)] px-3 pb-2 pt-2">
       <div className="mx-auto max-w-3xl">
@@ -108,46 +259,9 @@ function RequestPanel({ item, behind }: { item: PendingRequest; behind: number }
           className="max-h-72 overflow-y-auto border-l-2 bg-[color:var(--background-strong)] px-4 py-2 font-mono text-sm outline-none"
           style={{ borderLeftColor: accent }}
         >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span
-                className={`flex shrink-0 items-center gap-1.5 font-medium ${
-                  item.kind === "permission"
-                    ? "text-[color:var(--surface-critical-strong)]"
-                    : item.kind === "question"
-                      ? "text-[color:var(--text-interactive-base)]"
-                      : "text-[color:var(--surface-warning-strong)]"
-                }`}
-              >
-                <Icon className="size-3.5" aria-hidden />
-                {item.kind === "form" ? item.req.title || "Form" : meta.label}
-              </span>
-              <Badge variant="outline" className="max-w-52 truncate border-[var(--border-weak-base)] font-normal text-[var(--text-weak)]">
-                {label}
-              </Badge>
-            </div>
-            <button
-              type="button"
-              onClick={() => cancelPendingRequest(item)}
-              title={meta.hint}
-              className="flex shrink-0 cursor-pointer items-center gap-1 font-mono text-xs text-[color:var(--text-weaker)] hover:text-[color:var(--text-weak)]"
-            >
-              {meta.hint.replace("esc ", "")}
-              <XIcon className="size-3.5" />
-            </button>
-          </div>
-
-          <div className="pt-1.5">
-            {item.kind === "permission" && <PermissionBody req={item.req} />}
-            {item.kind === "question" && <QuestionBody req={item.req} />}
-            {item.kind === "form" && <FormBody req={item.req} />}
-          </div>
-
-          {behind > 0 && (
-            <p className="pt-1.5 text-xs text-[color:var(--text-weaker)]">
-              +{behind} more queued in this session
-            </p>
-          )}
+          {header}
+          <div className="pt-1.5">{body}</div>
+          {behindNote}
         </div>
       </div>
     </div>
@@ -160,9 +274,11 @@ function PermissionBody({ req }: { req: QueuedPermission }) {
   // A failed reply leaves the request pending (see `replyPermission`), so say
   // so instead of silently doing nothing — the agent is still blocked.
   const [failed, setFailed] = useState(false);
-  const answer = (reply: "once" | "always" | "reject") => {
+  // R8: rejecting opens a textarea; the typed reason rides the reply body.
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const answer = (reply: "once" | "always" | "reject", message?: string) => {
     setFailed(false);
-    void replyPermission(req.id, reply).then((ok) => {
+    void replyPermission(req.id, reply, message).then((ok) => {
       if (!ok) setFailed(true);
     });
   };
@@ -195,7 +311,7 @@ function PermissionBody({ req }: { req: QueuedPermission }) {
           )}
         </span>
         <div className="flex gap-1.5">
-          <Button variant="destructive" size="sm" onClick={() => answer("reject")}>
+          <Button variant="destructive" size="sm" onClick={() => setRejectOpen(true)}>
             Reject
           </Button>
           <Button variant="secondary" size="sm" onClick={() => answer("once")}>
@@ -206,6 +322,16 @@ function PermissionBody({ req }: { req: QueuedPermission }) {
           </Button>
         </div>
       </div>
+      <Target
+        id="permission.reject"
+        open={rejectOpen}
+        action={req.action ?? req.source?.id ?? null}
+        onOpenChange={setRejectOpen}
+        onReject={(message: string) => {
+          setRejectOpen(false);
+          answer("reject", message);
+        }}
+      />
     </>
   );
 }
@@ -411,8 +537,8 @@ function QuestionBody({ req }: { req: QueuedQuestion }) {
 
 function FormBody({ req }: { req: QueuedForm }) {
   const fields = req.fields;
-  const [values, setValues] = useState<Record<string, string | number | boolean | string[]>>(() => {
-    const init: Record<string, string | number | boolean | string[]> = {};
+  const [values, setValues] = useState<FormValues>(() => {
+    const init: FormValues = {};
     for (const f of fields) {
       if (f.type === "external") continue;
       if (f.default !== undefined) init[f.key] = f.default as never;
@@ -420,45 +546,102 @@ function FormBody({ req }: { req: QueuedForm }) {
       else if (f.type === "boolean") init[f.key] = false;
       else init[f.key] = "";
     }
-    return init;
+    // A half-answered form survives unmount/remount (R13): any stored draft
+    // is merged over the field defaults.
+    return { ...init, ...(loadFormDraft(req.id) ?? {}) };
   });
+  const [acked, setAcked] = useState<string[]>([]);
+  const [tab, setTab] = useState<"answers" | "review">("answers");
   const [busy, setBusy] = useState(false);
 
-  const required = fields.filter((f): f is Exclude<FormField, { type: "external" }> => f.type !== "external" && f.required === true);
-  const canSubmit = required.every((f) => {
-    const v = values[f.key];
-    if (f.type === "boolean") return true;
-    if (Array.isArray(v)) return v.length > 0;
-    if (typeof v === "number") return true;
-    return typeof v === "string" && v.trim().length > 0;
-  });
+  const visible = useMemo(() => visibleFields(fields, values), [fields, values]);
+  // The one submit gate: missing required answers + unacknowledged links.
+  const blocker = submitBlocker(fields, values, acked);
+  const externalPending = unacknowledgedExternal(fields, acked).length;
+
+  // Write-through draft: every change is saved so a remount resumes the form.
+  useEffect(() => {
+    saveFormDraft(req.id, values);
+  }, [req.id, values]);
 
   function set<K extends string>(key: K, value: (typeof values)[K]) {
     setValues((prev) => ({ ...prev, [key]: value }));
   }
 
+  function cancel() {
+    clearFormDraft(req.id);
+    cancelPendingRequest({ kind: "form", req });
+  }
+
+  const tabBtn = (active: boolean) =>
+    `cursor-pointer rounded px-2 py-0.5 font-sans text-xs transition-colors ${
+      active
+        ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
+        : "text-[var(--text-weaker)] hover:text-[var(--text-strong)]"
+    }`;
+
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (!canSubmit || busy) return;
+        if (blocker !== null || busy) return;
         setBusy(true);
-        void replyForm(req.id, values).finally(() => setBusy(false));
+        void replyForm(req.id, buildAnswer(fields, values)).finally(() => {
+          clearFormDraft(req.id);
+          setBusy(false);
+        });
       }}
     >
-      {fields.map((f) => (
-        <div key={f.key} className="pb-1.5">
-          <Field field={f} value={values[f.key]} onChange={(v) => set(f.key, v)} />
-        </div>
-      ))}
-      <div className="flex justify-end gap-1.5 pt-1">
-        <Button type="button" variant="ghost" size="sm" onClick={() => cancelPendingRequest({ kind: "form", req })}>
-          Cancel
-        </Button>
-        <Button type="submit" size="sm" disabled={!canSubmit || busy}>
-          Submit
-        </Button>
+      {/* Answers / Review two-way header: review never submits, so it is safe
+          to open mid-edit; the panel owns the actual send. */}
+      <div
+        data-oc-form-tabs
+        className="mb-1.5 flex items-center gap-1 border-b border-[var(--border-weak-base)] pb-1.5"
+      >
+        <button type="button" className={tabBtn(tab === "answers")} onClick={() => setTab("answers")}>
+          Answers
+        </button>
+        <button type="button" className={tabBtn(tab === "review")} onClick={() => setTab("review")}>
+          Review{externalPending > 0 ? ` (${externalPending})` : ""}
+        </button>
       </div>
+
+      {tab === "review" ? (
+        <Target
+          id="form.review"
+          fields={req.fields}
+          values={values}
+          acked={acked}
+          onClose={() => setTab("answers")}
+        />
+      ) : (
+        <>
+          {visible.map((f) => (
+            <div key={f.key} className="pb-1.5">
+              <Field
+                field={f}
+                value={values[f.key]}
+                onChange={(v) => set(f.key, v)}
+                acked={acked.includes(f.key)}
+                onAck={() => setAcked((a) => (a.includes(f.key) ? a : [...a, f.key]))}
+              />
+            </div>
+          ))}
+          {blocker !== null && (
+            <p className="pb-1 font-sans text-xs text-[color:var(--surface-warning-strong)]">
+              {blocker}
+            </p>
+          )}
+          <div className="flex justify-end gap-1.5 pt-1">
+            <Button type="button" variant="ghost" size="sm" onClick={cancel}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" disabled={blocker !== null || busy}>
+              Submit
+            </Button>
+          </div>
+        </>
+      )}
     </form>
   );
 }
@@ -467,10 +650,15 @@ function Field({
   field,
   value,
   onChange,
+  acked,
+  onAck,
 }: {
   field: FormField;
   value: string | number | boolean | string[] | undefined;
   onChange: (v: string | number | boolean | string[]) => void;
+  /** External-link acknowledgement state (external fields only). */
+  acked?: boolean;
+  onAck?: () => void;
 }) {
   const inputCls =
     "w-full rounded-md border border-[var(--border-weak-base)] bg-[var(--input-base)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-strong)] outline-none transition-colors placeholder:text-[var(--text-weaker)] focus:border-[var(--border-selected)] focus:ring-1 focus:ring-[var(--border-selected)]";
@@ -558,11 +746,27 @@ function Field({
       );
     case "external":
       return (
-        <div className="rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] px-3 py-2 font-sans text-xs text-[var(--text-base)]">
-          {field.title ?? "External input"}:{" "}
-          <a className="text-[var(--text-interactive-base)] underline" href={field.url} target="_blank" rel="noreferrer">
-            {field.url}
-          </a>
+        <div className="flex flex-col gap-1.5 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-base)] px-3 py-2 font-sans text-xs text-[var(--text-base)]">
+          <span>
+            {field.title ?? "External input"}:{" "}
+            <a className="text-[var(--text-interactive-base)] underline" href={field.url} target="_blank" rel="noreferrer">
+              {field.url}
+            </a>
+          </span>
+          {/* The engine sends no ack flag, so each external link blocks submit
+              until the user confirms it was opened. */}
+          <button
+            type="button"
+            onClick={onAck}
+            disabled={acked}
+            className={`inline-flex w-fit cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] transition-colors ${
+              acked
+                ? "border-[var(--border-weak-base)] text-[color:var(--surface-success-strong)]"
+                : "border-[var(--border-weak-base)] text-[color:var(--text-weak)] hover:border-[var(--border-selected)] hover:text-[var(--text-strong)]"
+            }`}
+          >
+            {acked ? "✓ Acknowledged" : "I've opened this link"}
+          </button>
         </div>
       );
     default:

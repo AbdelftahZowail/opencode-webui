@@ -145,12 +145,18 @@ export function DiffView({
   className,
   view = "unified",
   activeHunk,
+  wrap = false,
 }: {
   diff: string;
   className?: string;
   view?: "unified" | "split";
   /** Marks this hunk (0-based) so the viewer can scroll it into place. */
   activeHunk?: number;
+  /**
+   * R12: wrap long lines instead of scrolling horizontally. When true the
+   * width-fitting `min-w-max` is dropped and rows soft-wrap on word breaks.
+   */
+  wrap?: boolean;
 }) {
   const rows = useMemo(() => parseDiff(diff), [diff]);
   const splits = useMemo(() => (view === "split" ? toSplitRows(rows) : []), [rows, view]);
@@ -162,7 +168,7 @@ export function DiffView({
 
   return (
     <div className={cn("overflow-x-auto font-mono text-xs", className)}>
-      <div className="min-w-max">
+      <div className={wrap ? undefined : "min-w-max"}>
         {view === "split"
           ? splits.map((row, index) => (
               <SplitDiffRow
@@ -170,6 +176,7 @@ export function DiffView({
                 row={row}
                 activeHunk={activeHunk}
                 ordinal={splitOrdinals[index]}
+                wrap={wrap}
               />
             ))
           : rows.map((row, index) => (
@@ -178,6 +185,7 @@ export function DiffView({
                 row={row}
                 activeHunk={activeHunk}
                 ordinal={ordinals[index]}
+                wrap={wrap}
               />
             ))}
       </div>
@@ -189,10 +197,12 @@ function DiffRow({
   row,
   activeHunk,
   ordinal,
+  wrap = false,
 }: {
   row: DiffLine;
   activeHunk?: number;
   ordinal?: number;
+  wrap?: boolean;
 }) {
   const showGutter = row.kind === "add" || row.kind === "delete" || row.kind === "context";
   const isActive = row.kind === "hunk" && ordinal === activeHunk;
@@ -200,7 +210,12 @@ function DiffRow({
     <div
       data-diff-hunk={isActive ? ordinal : undefined}
       data-diff-kind={row.kind}
-      className={cn("flex items-center whitespace-pre", ROW_CLASSES[row.kind], isActive && "ring-1 ring-inset ring-[var(--border-selected)]")}
+      className={cn(
+        "flex",
+        wrap ? "items-start whitespace-pre-wrap break-words" : "items-center whitespace-pre",
+        ROW_CLASSES[row.kind],
+        isActive && "ring-1 ring-inset ring-[var(--border-selected)]",
+      )}
     >
       {showGutter && (
         <span className="shrink-0 select-none pl-2 pr-1 text-right text-(color:--text-weaker)">
@@ -217,10 +232,12 @@ function SplitDiffRow({
   row,
   activeHunk,
   ordinal,
+  wrap = false,
 }: {
   row: SplitRow;
   activeHunk?: number;
   ordinal?: number;
+  wrap?: boolean;
 }) {
   const line = row.left;
   // File/hunk chrome spans both columns (it describes the whole hunk).
@@ -231,7 +248,8 @@ function SplitDiffRow({
         data-diff-hunk={isActive ? ordinal : undefined}
         data-diff-kind={line.kind}
         className={cn(
-          "flex whitespace-pre",
+          "flex",
+          wrap ? "items-start whitespace-pre-wrap break-words" : "whitespace-pre",
           ROW_CLASSES[line.kind],
           isActive && "ring-1 ring-inset ring-[var(--border-selected)]",
         )}
@@ -242,19 +260,20 @@ function SplitDiffRow({
   }
   return (
     <div className="flex">
-      <SplitCell line={row.left} side="left" />
-      <SplitCell line={row.right} side="right" />
+      <SplitCell line={row.left} side="left" wrap={wrap} />
+      <SplitCell line={row.right} side="right" wrap={wrap} />
     </div>
   );
 }
 
-function SplitCell({ line, side }: { line: DiffLine | null; side: "left" | "right" }) {
+function SplitCell({ line, side, wrap = false }: { line: DiffLine | null; side: "left" | "right"; wrap?: boolean }) {
   const kind = line?.kind ?? "context";
   const no = side === "left" ? line?.oldNo : line?.newNo;
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-1 items-center whitespace-pre border-r border-[var(--border-weak-base)]",
+        "flex min-w-0 flex-1 border-r border-[var(--border-weak-base)]",
+        wrap ? "items-start whitespace-pre-wrap break-words" : "items-center whitespace-pre",
         line ? ROW_CLASSES[kind] : "bg-(--surface-diff-hidden-base)",
       )}
     >

@@ -22,8 +22,8 @@ import type { MessageInfo, ToolPart } from "../api/types";
  *  - "contribute" — add an item to a named collection. Collections are
  *                     registry-owned lists ("palette", "slash", "pages",
  *                     "settings", "contextMenu.message", "contextMenu.session",
- *                     "contextMenu.file", …). Adding a collection is data in
- *                     core, not a new kind.
+ *                     "contextMenu.file", "markdown.codeBlock", …). Adding a
+ *                     collection is data in core, not a new kind.
  *  - "hook"       — interception at instrumented boundaries. Open event
  *                     strings; new seams = new event names, never a registry
  *                     change.
@@ -184,6 +184,34 @@ export interface MessagePartContribution {
     part: ToolPart;
     partIndex: number;
   }) => ReactNode | null;
+}
+
+/**
+ * Context handed to a "markdown.codeBlock" renderer (R14 contract).
+ * `language` is the lowercased fence info-string token; `source` is the raw
+ * fence body (no trailing newline); `info` is the full fence info-string
+ * (the language token plus any meta), falling back to `language` when only
+ * the token is recoverable.
+ */
+export interface CodeBlockRenderContext {
+  language: string;
+  source: string;
+  info: string;
+}
+
+/**
+ * Item for the "markdown.codeBlock" collection (R14): a fence renderer keyed
+ * by info-string. The FIRST contribution (ascending `order`, then id) whose
+ * `languages` includes the lowercased fence language wins — so an extension
+ * can take over `mermaid`/`latex` (or any language) by contributing at a
+ * LOWER `order` than the built-in `markdown.mermaid` / `markdown.latex`
+ * contributions (both order 100). The node returned by `render` is shown in
+ * place of the default code block, crash-isolated by core.
+ */
+export interface CodeBlockRendererContribution {
+  /** Fence info-strings this renderer claims (compared lowercased). */
+  languages: string[];
+  render: (ctx: CodeBlockRenderContext) => ReactNode;
 }
 
 /** Internal storage: v2 entries only. */

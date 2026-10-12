@@ -11,22 +11,25 @@ import { groupHunks, parseDiff } from "../components/DiffView";
 import type { FileDiffInfo } from "../api/client";
 
 /**
- * The three sources the viewer can show, matching v2's diff plugin:
- *  - "turn"    — the newest idle-to-idle turn (steered prompts fold into it)
- *  - "working" — HEAD vs the working copy
- *  - "branch"  — the inferred base merge-base vs the working copy
+ * The four sources the viewer can show, matching v2's diff plugin
+ * (All/Committed/Uncommitted/a chosen Base):
+ *  - "turn"      — the newest idle-to-idle turn (steered prompts fold into it)
+ *  - "working"   — HEAD vs the working copy (`Vcs.Mode` "working")
+ *  - "committed" — the base merge-base vs HEAD (`Vcs.Mode` "committed")
+ *  - "branch"    — the inferred base merge-base vs the working copy
  * The type lives here (a pure module) so the store and the viewer share ONE
  * definition without the lib importing the store.
  */
-export type DiffSource = "working" | "branch" | "turn";
+export type DiffSource = "working" | "branch" | "committed" | "turn";
 
-export const DIFF_SOURCES: readonly DiffSource[] = ["turn", "working", "branch"];
+export const DIFF_SOURCES: readonly DiffSource[] = ["turn", "working", "committed", "branch"];
 
 /** Unchanged lines kept around each hunk when asking the engine for a diff. */
 export const VCS_DIFF_CONTEXT_LINES = 12;
 
 export function diffSourceLabel(source: DiffSource): string {
   if (source === "turn") return "Last turn";
+  if (source === "committed") return "Committed";
   if (source === "branch") return "Branch base";
   return "Working tree";
 }
@@ -35,8 +38,29 @@ export function diffSourceHint(source: DiffSource): string {
   if (source === "turn") {
     return "What the most recent turn changed — a turn runs idle marker to idle marker, so prompts steered in while it was busy belong to it";
   }
+  if (source === "committed") {
+    return "The base merge-base compared with HEAD — committed changes only";
+  }
   if (source === "branch") return "The base merge-base compared with the working copy";
   return "HEAD compared with the working copy";
+}
+
+/**
+ * Raster image extensions the patch pane previews inline (v2's
+ * `diff-viewer-image`). SVG is deliberately excluded — it is script-capable.
+ */
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+
+/** Lower-case extension of a path's last segment ("" when there is none). */
+export function fileExtension(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** True for the image types whose patch pane shows a thumbnail. */
+export function isImageFile(path: string): boolean {
+  return IMAGE_EXTENSIONS.has(fileExtension(path));
 }
 
 export type DiffStatus = FileDiffInfo["status"];

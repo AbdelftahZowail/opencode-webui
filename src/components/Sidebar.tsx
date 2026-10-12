@@ -1,12 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import {
+  BarChart3,
+  Bug,
   ChevronDown,
+  FolderOpen,
   FolderTree,
   Library,
+  List,
   PanelLeftClose,
   PanelLeftOpen,
+  Pin,
+  PinOff,
   Plus,
   Puzzle,
+  QrCode,
   Search,
   Settings as SettingsIcon,
   X,
@@ -14,19 +21,27 @@ import {
 import {
   DRAFT_SESSION_ID,
   closeMobileSidebar,
+  deleteSession,
   isDraftSession,
   loadMoreSessions,
   newSessionHref,
+  openDebug,
+  openOpenPicker,
+  openPair,
+  openSessionList,
   prefetchSession,
-  refreshSessions,
+  selectQuickSlot,
   selectSession,
   sessionHref,
   sessionOrSubagentsLive,
   setPendingWorkspace,
+  setTabsEnabled,
   startDraftSession,
+  toggleSessionPin,
+  unpinSession,
+  useSessionPinRefs,
   useStore,
 } from "../store";
-import { api } from "../api/client";
 import { registerPoller } from "../lib/scheduler";
 import type { SessionInfo } from "../api/types";
 import { findHome, sameDirectory, workspaceName } from "../lib/workspaces";
@@ -144,6 +159,10 @@ export function Sidebar() {
   // Mobile navigation drawer (<md): the aside below is fixed-position and
   // translated off-canvas unless this is true. Desktop ignores it.
   const mobileOpen = useStore((s) => s.mobileSidebarOpen);
+  // R3 pins / quick slots: the resolved view model + the tabs-on flag that
+  // decides whether pins are the primary switcher.
+  const tabsEnabled = useStore((s) => s.tabs.enabled);
+  const pins = useSessionPinRefs();
 
   // Any session change dismisses the drawer (covers selectSession — which
   // also closes it in the store — plus draft sessions and back/forward).
@@ -408,6 +427,9 @@ export function Sidebar() {
             <Button variant="ghost" size="icon" onClick={openSearch} title="Search sessions (Ctrl/Cmd+F)">
               <Search />
             </Button>
+            <Button variant="ghost" size="icon" onClick={openSessionList} title="Session list">
+              <List />
+            </Button>
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Expand sidebar">
               <PanelLeftOpen />
             </Button>
@@ -417,6 +439,17 @@ export function Sidebar() {
           <div className="flex min-w-0 items-center gap-1">
             <Button variant="ghost" size="icon" onClick={openSearch} title="Search sessions (Ctrl/Cmd+F)">
               <Search />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={openSessionList}
+              title="Session list — search, pin and switch"
+            >
+              <List />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={openOpenPicker} title="Open a session or project">
+              <FolderOpen />
             </Button>
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
@@ -431,6 +464,17 @@ export function Sidebar() {
         <CollapsedSidebar groups={groups} current={current} activeIDs={activeIDs} onExpand={toggleSidebar} />
       ) : (
         <>
+          {/* R3 pins / quick slots — the top-of-body switcher (renders itself
+              as null while tabs are on and nothing is pinned). */}
+          <Target
+            id="sidebar.sessionPins"
+            pins={pins}
+            tabsEnabled={tabsEnabled}
+            selected={current}
+            onSelectSlot={selectQuickSlot}
+            onUnpin={unpinSession}
+            onToggleTabs={() => setTabsEnabled(!tabsEnabled)}
+          />
           <ScrollArea className="min-h-0 min-w-0 flex-1">
             <div className="w-full min-w-0 max-w-full p-2">
               {groups.length === 0 && (
@@ -455,18 +499,25 @@ export function Sidebar() {
                       .slice(prefixCount)
                       .filter((s) => isLive(s.id) || s.id === current || isSessionUnseen(s.id, s.time.updated));
                 const moreCount = group.list.length - prefixRows.length - keptRows.length;
-                const renderRow = (s: SessionInfo) => (
-                  <div key={s.id} className="mb-0.5">
-                    <Target
-                      id="sidebar.sessionRow"
-                      sessionID={s.id}
-                      title={s.title ?? "Untitled session"}
-                      updated={s.time.updated}
-                      selected={s.id === current}
-                      onSelect={() => void selectSession(s.id)}
-                    />
-                  </div>
-                );
+                const renderRow = (s: SessionInfo) => {
+                  const pinned = pins.some((p) => p.sessionID === s.id);
+                  const quickSlot = pins.find((p) => p.sessionID === s.id)?.slot;
+                  return (
+                    <div key={s.id} className="mb-0.5">
+                      <Target
+                        id="sidebar.sessionRow"
+                        sessionID={s.id}
+                        title={s.title ?? "Untitled session"}
+                        updated={s.time.updated}
+                        selected={s.id === current}
+                        quickSlot={quickSlot}
+                        pinned={pinned}
+                        onTogglePin={() => toggleSessionPin(s.id)}
+                        onSelect={() => void selectSession(s.id)}
+                      />
+                    </div>
+                  );
+                };
                 // The highlight keys off the real directory, not its display
                 // name ("~/code" vs "/home/z/code"); "Other" (no directory)
                 // can never be a pending target.
@@ -765,9 +816,26 @@ function SidebarFooter({
           <Library className="size-3" />
           Shelf
         </a>
+        <a
+          href="/stats"
+          onClick={handleStatsNavClick}
+          title="Stats — token usage and activity"
+          className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground"
+        >
+          <BarChart3 className="size-3" />
+          Stats
+        </a>
         <button type="button" onClick={() => openSettings()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
           <SettingsIcon className="size-3" />
           Settings
+        </button>
+        <button type="button" onClick={() => openDebug()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
+          <Bug className="size-3" />
+          Debug
+        </button>
+        <button type="button" onClick={() => openPair()} className="inline-flex cursor-pointer items-center gap-1.5 hover:text-foreground">
+          <QrCode className="size-3" />
+          Pair
         </button>
         <WebUIVersion />
         {/* Extension pages: native /ext/{id} anchors styled like the footer
@@ -881,6 +949,17 @@ function handleShelfNavClick(event: MouseEvent<HTMLAnchorElement>) {
   window.dispatchEvent(new Event(EXT_NAVIGATE_EVENT));
 }
 
+/**
+ * In-app navigation to the native stats page (`/stats`) — same idiom as the
+ * file-shelf link above.
+ */
+function handleStatsNavClick(event: MouseEvent<HTMLAnchorElement>) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  window.history.pushState({}, "", "/stats");
+  window.dispatchEvent(new Event(EXT_NAVIGATE_EVENT));
+}
+
 export interface SessionRowProps {
   id: string;
   title: string;
@@ -893,6 +972,12 @@ export interface SessionRowProps {
    * agreement without threading a prop through every call site.
    */
   unseen?: boolean;
+  /** R3: 1-based quick-slot number when this session is pinned (else undefined). */
+  quickSlot?: number;
+  /** R3: whether this session is pinned to a quick slot. */
+  pinned?: boolean;
+  /** R3: pin / unpin this session (`session.pin.toggle`). */
+  onTogglePin?: () => void;
   onSelect: () => void;
 }
 
@@ -902,6 +987,9 @@ function SessionRow({
   updated,
   selected,
   unseen: unseenOverride,
+  quickSlot,
+  pinned = false,
+  onTogglePin,
   onSelect,
 }: SessionRowProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -928,11 +1016,22 @@ function SessionRow({
           onClick={(event) => handleSessionLinkClick(event, onSelect)}
           onMouseEnter={() => prefetchSession(id)}
           onFocus={() => prefetchSession(id)}
-          className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 pr-12 transition-colors ${
+          className={`block w-full min-w-0 max-w-full overflow-hidden rounded-md px-2.5 py-2 ${
+            onTogglePin ? "pr-16" : "pr-12"
+          } transition-colors ${
             selected ? "bg-[var(--surface-raised-base)]" : "hover:bg-[var(--surface-base-hover)]"
           }`}
         >
         <div className="flex min-w-0 max-w-full items-center gap-2">
+          {quickSlot !== undefined && (
+            <span
+              data-oc-session-slot
+              className="w-4 shrink-0 text-center font-mono text-[10px] text-[var(--text-weaker)]"
+              title={`Quick slot ${quickSlot}`}
+            >
+              {quickSlot}
+            </span>
+          )}
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{title}</span>
           {unseen && <SessionUnseenBadge updated={updated} />}
           {live && (
@@ -947,14 +1046,28 @@ function SessionRow({
         </div>
       </a>
       <div className="invisible absolute right-2 bottom-1.5 flex items-center gap-1 group-hover:visible group-focus-within:visible">
+        {onTogglePin && (
+          <button
+            type="button"
+            title={pinned ? "Unpin session" : "Pin session (quick slot)"}
+            aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}
+            aria-pressed={pinned}
+            data-oc-session-pin-toggle
+            onClick={() => onTogglePin()}
+            className={`cursor-pointer ${
+              pinned ? "text-[var(--text-interactive-base)]" : "text-[var(--text-weaker)]"
+            } hover:text-[var(--text-strong)]`}
+          >
+            {pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          </button>
+        )}
         {confirmDelete ? (
           <>
             <button
               type="button"
               className="cursor-pointer text-[var(--text-on-critical-strong)] hover:text-[var(--text-on-critical-base)]"
               onClick={() => {
-                void api.deleteSession(id).then(refreshSessions);
-                if (selected) void selectSession(null);
+                void deleteSession(id);
               }}
             >
               yes
@@ -1002,6 +1115,9 @@ autoRegister({
       // from `updated` so the list, the search panel and other tabs agree.
       // An extension can still pass it to force the marker.
       unseen={p.unseen as boolean | undefined}
+      quickSlot={p.quickSlot as number | undefined}
+      pinned={p.pinned as boolean | undefined}
+      onTogglePin={p.onTogglePin as (() => void) | undefined}
       onSelect={p.onSelect as () => void}
     />
   ),

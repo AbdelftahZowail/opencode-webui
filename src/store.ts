@@ -3,7 +3,7 @@
  * form queues. Driven by the /api/event stream plus REST fetches.
  */
 
-import { useRef, useSyncExternalStore } from "react";
+import { useMemo, useRef, useSyncExternalStore } from "react";
 import {
   api,
   type CompactDelivery,
@@ -23,9 +23,38 @@ import { fireHooks } from "./extensions/hooks";
 import { promptFilesToHistory } from "./lib/attachments";
 import { log } from "./lib/log";
 import { VCS_DIFF_CONTEXT_LINES, type DiffSource } from "./lib/sessionDiff";
+import { getDismissedUpdateVersion } from "./lib/updateNotice";
 import { listStash, pushStash, removeStash, type StashEntry } from "./lib/stash";
 import { recordModelUsed, resolveNewSessionModel } from "./lib/modelMemory";
+import { isSessionUnseen } from "./lib/sessionActivity";
+import {
+  buildPinRefs,
+  buildTabRefs,
+  closeAllTabs,
+  closeOtherTabs,
+  closeTab,
+  emptyTabSlice,
+  moveTab,
+  nextTab,
+  nextUnreadTab,
+  numberedSwitchTarget,
+  openTab,
+  pinnedSessionAt,
+  previousTab,
+  previousUnreadTab,
+  pruneTabSlice,
+  reopenTab,
+  sanitizeTabSlice,
+  tabAt,
+  togglePin,
+  unpin,
+  type PinRef,
+  type TabRef,
+  type TabSignals,
+  type TabSlice,
+} from "./lib/sessionTabs";
 import { publishEvent } from "./lib/eventBus";
+import type { SessionStatsInfo } from "./lib/stats";
 import { registerPoller, startScheduler } from "./lib/scheduler";
 import { getPrefs } from "./prefs";
 import type {
@@ -139,6 +168,15 @@ function stampSeq<T extends { id: string }>(current: { id: string; seq: number }
 /** Engine encoding of one mid-task question, when delivered as a form. */
 function isQuestionForm(form: FormInfo): boolean {
   return (form.metadata as { kind?: string } | undefined)?.kind === "question";
+}
+
+/**
+ * R12 read of the auto-accept-permissions preference. Typed against a loose
+ * shape so the store compiles whether or not the `Prefs` field has landed yet;
+ * the preference is owned by the permissions workstream (`prefs.ts`).
+ */
+function autoAcceptPermissions(): boolean {
+  return (getPrefs() as { autoAcceptPermissions?: boolean }).autoAcceptPermissions === true;
 }
 
 function questionFromForm(form: QueuedForm): QueuedQuestion {
@@ -317,6 +355,10 @@ export interface SessionDiffState {
   selectedFile: string | null;
   /** Resolved base for the "branch" source, when the engine reported one. */
   base: VcsBase | null;
+  /** R7 base picker: branch names for this location (empty until loaded). */
+  branches: string[];
+  /** R7 base picker: the user's remembered base override, or null for the default. */
+  baseRef: string | null;
   /** Bumped on every successful load — lets consumers reset scroll/selection. */
   tick: number;
 }
@@ -330,6 +372,8 @@ export function emptyDiffState(): SessionDiffState {
     reviewed: [],
     selectedFile: null,
     base: null,
+    branches: [],
+    baseRef: null,
     tick: 0,
   };
 }
@@ -365,6 +409,12 @@ export interface State {
   focusedPane: string;
   /** The "pick a session for a new split" dialog. */
   splitPickerOpen: boolean;
+  /**
+   * R3 session tabs + pins (§5): the open-tab window, reopen stack, and
+   * quick-slot pins. Pure model lives in `lib/sessionTabs.ts`; persisted under
+   * `webui.tabs`. Orthogonal to split panes (which pin sessions side-by-side).
+   */
+  tabs: TabSlice;
   /**
    * Incremented whenever any surface asks to open/focus the shell panel;
    * lets distant components (e.g. composer chips) trigger it without
@@ -462,6 +512,8 @@ export interface State {
   diffs: Record<string, SessionDiffState>;
   /** P2 — the session whose diff viewer is OPEN; null = closed. */
   diffViewerSessionID: string | null;
+  /** R6 — the session whose timeline overlay is OPEN; null = closed. */
+  timelineSessionID: string | null;
   /** P6 — the prompt-stash panel replaces the composer while open. */
   stashPanelOpen: boolean;
   /** P6 — text the stash hands to the composer once (revertPrompt idiom). */
@@ -478,6 +530,39 @@ export interface State {
   /** P4 — the id of the in-flight plugin action ("load" / "check" / "update"). */
   pluginsBusy: string | null;
   pluginsError: string | null;
+  /** R6 — year-to-date stats payload; null = not loaded yet. */
+  statsData: SessionStatsInfo | null;
+  statsLoading: boolean;
+  statsError: string | null;
+  /** R11 — the error whose details dialog is open; null = closed. */
+  errorDetails: { message: string; source?: string; reference?: string; detail?: string } | null;
+  /** R11 — the app-update notice state machine; null = nothing to show. */
+  updateNotice: {
+    state: "checking" | "available" | "installing" | "installed" | "current" | "unavailable" | "failed";
+    version?: string;
+    currentVersion?: string;
+    error?: string;
+    /** Install channel from the probe — the CLI `update` no-ops on dev/binary. */
+    channel?: "dev" | "binary" | "published";
+  } | null;
+  /**
+   * R11a — server-side session-search state for the session-list dialog. The
+   * engine's search is GLOBAL, so `allProjects` only picks whether the DISPLAY
+   * is scoped to the focused session's project subtree client-side.
+   */
+  sessionSearch: SessionSearchState;
+}
+
+/** R11a — the session-list dialog's server-search slice (see State.sessionSearch). */
+export interface SessionSearchState {
+  /** The last (trimmed) query sent to the engine; "" = no search. */
+  query: string;
+  /** false = scope results to the focused project; true = all projects. */
+  allProjects: boolean;
+  /** Server results for `query`; null until a search has run / after a clear. */
+  results: SessionInfo[] | null;
+  /** A search request is in flight. */
+  searching: boolean;
 }
 
 /**
@@ -499,6 +584,36 @@ export interface UiSignals {
   runsDialog: number;
   help: number;
   variants: number;
+  mcp: number;
+  debug: number;
+  pair: number;
+  /** R11a one-shot open requests for the session-list dialog / open picker. */
+  sessionList: number;
+  openPicker: number;
+}
+
+// ---- R3 session-tab persistence ------------------------------------------
+// Mirrors the split idiom (saveSplits/loadSplits): one localStorage key holds
+// the whole tab slice, validated through `sanitizeTabSlice` on load so corrupt
+// or hand-edited data degrades to the empty slice instead of crashing boot.
+const TABS_KEY = "webui.tabs";
+
+function loadTabs(): TabSlice {
+  try {
+    if (typeof localStorage === "undefined") return emptyTabSlice();
+    const raw = localStorage.getItem(TABS_KEY);
+    return raw ? sanitizeTabSlice(JSON.parse(raw)) : emptyTabSlice();
+  } catch {
+    return emptyTabSlice();
+  }
+}
+
+function saveTabs() {
+  try {
+    localStorage.setItem(TABS_KEY, JSON.stringify(state.tabs));
+  } catch {
+    /* private mode */
+  }
 }
 
 const initialState: State = {
@@ -519,8 +634,9 @@ const initialState: State = {
   panes: [{ id: MAIN_PANE, sessionID: null }],
   focusedPane: MAIN_PANE,
   splitPickerOpen: false,
+  tabs: loadTabs(),
   shellPanelTick: 0,
-  uiSignals: { models: 0, agents: 0, themes: 0, explorer: 0, runsDialog: 0, help: 0, variants: 0 },
+  uiSignals: { models: 0, agents: 0, themes: 0, explorer: 0, runsDialog: 0, help: 0, variants: 0, mcp: 0, debug: 0, pair: 0, sessionList: 0, openPicker: 0 },
   revertPrompt: null,
   runsPanelOpen: false,
   mobileSidebarOpen: false,
@@ -542,6 +658,7 @@ const initialState: State = {
   revertMarkers: {},
   diffs: {},
   diffViewerSessionID: null,
+  timelineSessionID: null,
   stashPanelOpen: false,
   stashPrompt: null,
   stashEntries: [],
@@ -552,6 +669,12 @@ const initialState: State = {
   plugins: null,
   pluginsBusy: null,
   pluginsError: null,
+  statsData: null,
+  statsLoading: false,
+  statsError: null,
+  errorDetails: null,
+  updateNotice: null,
+  sessionSearch: { query: "", allProjects: false, results: null, searching: false },
 };
 
 let state: State = initialState;
@@ -831,7 +954,20 @@ export async function refreshSessions() {
     const activeChanged =
       state.activeIDs.length !== activeIDs.length ||
       state.activeIDs.some((id, i) => id !== activeIDs[i]);
-    if (!sessionsChanged && !activeChanged && flagsEqual(state.running, running) && flagsEqual(state.queued, queued)) {
+    // R3: drop tabs / reopen entries / pins whose session is gone (boot-time
+    // prune). Identity-stable when nothing changed, so it costs nothing here.
+    const tabsPruned = pruneTabSlice(
+      state.tabs,
+      (id) => sessions.some((x) => x.id === id) || !!state.sessionDetails[id],
+    );
+    const tabsChanged = tabsPruned !== state.tabs;
+    if (
+      !sessionsChanged &&
+      !activeChanged &&
+      !tabsChanged &&
+      flagsEqual(state.running, running) &&
+      flagsEqual(state.queued, queued)
+    ) {
       return;
     }
     setState({
@@ -839,7 +975,9 @@ export async function refreshSessions() {
       ...(activeChanged ? { activeIDs } : {}),
       ...(!flagsEqual(state.running, running) ? { running } : {}),
       ...(!flagsEqual(state.queued, queued) ? { queued } : {}),
+      ...(tabsChanged ? { tabs: tabsPruned } : {}),
     });
+    if (tabsChanged) saveTabs();
   } catch (err) {
     console.warn("refreshSessions failed:", err);
   }
@@ -947,9 +1085,15 @@ async function refreshQueues() {
       const at = settledRecently.get(r.id);
       return at === undefined || now - at > NEWBORN_GRACE_MS;
     });
+    // R12 auto-accept: a listed-but-untracked permission is one we answered with
+    // `always` and never surfaced; the listing lags that reply, so do NOT
+    // re-add it as a chip. Already-tracked rows still reconcile as usual.
+    const admittable = autoAcceptPermissions()
+      ? fresh.filter((r) => state.permissions.some((p) => p.id === r.id))
+      : fresh;
     log("queue", `refresh perms tracked=${state.permissions.length} listed=${listed.length} settled=${settled.size}`);
     setState({
-      permissions: unionById(state.permissions, fresh).filter((r) => !settled.has(r.id)),
+      permissions: unionById(state.permissions, admittable).filter((r) => !settled.has(r.id)),
     });
   } else console.warn("refreshQueues permissions failed:", perms.reason);
 
@@ -2676,6 +2820,15 @@ export function handleEvent(event: V2Event) {
       break;
 
     case "permission.asked":
+      // R12 auto-accept: answer immediately (`always`) and never surface the
+      // prompt. Fire-and-forget — the per-session listing reconciles a rare
+      // failure, and a genuinely pending request then shows as usual.
+      if (autoAcceptPermissions() && data.id) {
+        void api.replyPermission(data.sessionID, data.id, "always").catch((err) => {
+          log("panel", `auto-accept permission FAILED ${data.id}:`, err instanceof Error ? err.message : String(err));
+        });
+        break;
+      }
       if (!state.permissions.some((p) => p.id === data.id)) {
         setState({
           permissions: [
@@ -3021,6 +3174,9 @@ export function startStore() {
   }
   void refreshSessions().then(pruneSplits).catch(() => undefined);
   void refreshQueues();
+  // R11b: best-effort update probe at boot — non-blocking, never throws, and
+  // SILENT unless a real update is offered (no recurring toast on reload).
+  void checkForUpdate({ silent: true });
   void api
     .health()
     .then((h) => setState({ serviceOK: h.ok }))
@@ -3233,6 +3389,184 @@ export function closeRunsPanel() {
   setState({ runsPanelOpen: false });
 }
 
+/** Ask the MCP servers surface to open (see State.uiSignals). */
+export function openMcpServers() { signalUI("mcp"); }
+
+/** Ask the debug/diagnostics panel to open (see State.uiSignals). */
+export function openDebug() { signalUI("debug"); }
+
+/** Ask the device-pairing dialog to open (see State.uiSignals). */
+export function openPair() { signalUI("pair"); }
+
+/** Ask the R11 session-list dialog to open (see State.uiSignals). */
+export function openSessionList() { signalUI("sessionList"); }
+
+/** Ask the R11 open / recents picker to open (see State.uiSignals). */
+export function openOpenPicker() { signalUI("openPicker"); }
+
+// ---- R11 error details + update notice ------------------------------------
+//
+// Presentational surfaces whose open state the store owns (AGENTS rule 2).
+// `setUpdateNotice` is the raw setter; `checkForUpdate`/`installUpdate`/
+// `restartUpdate` drive the update machine through its states.
+
+/** Open the error-details dialog for one error. */
+export function openErrorDetails(info: NonNullable<State["errorDetails"]>) {
+  setState({ errorDetails: info });
+}
+
+export function closeErrorDetails() {
+  if (state.errorDetails === null) return;
+  setState({ errorDetails: null });
+}
+
+/** Drive the app-update notice state machine (null clears it). */
+export function setUpdateNotice(info: State["updateNotice"]) {
+  setState({ updateNotice: info });
+}
+
+// ---- R11b update check / install ------------------------------------------
+//
+// The engine has no update route; these call the proxy (which probes the npm
+// registry and spawns the detached `update` CLI). `checkForUpdate` runs once at
+// boot (best-effort) and on Retry; `installUpdate` walks installing → installed;
+// `restartUpdate` reuses the existing settings-restart route to apply it.
+
+/**
+ * Probe for a newer published version. Sets `checking`, then resolves to one of
+ * available / current / unavailable / failed. An offered version the user
+ * already skipped (persisted) is suppressed rather than re-shown.
+ */
+export async function checkForUpdate(opts: { silent?: boolean } = {}) {
+  const silent = opts.silent === true;
+  setState({ updateNotice: { state: "checking" } });
+  try {
+    const res = await api.checkWebuiUpdate();
+    if (res.unavailable) {
+      // A failed probe is normal behind a firewall; at boot keep it SILENT so
+      // an unreachable registry never raises a toast on every reload.
+      setState({
+        updateNotice: silent
+          ? null
+          : { state: "unavailable", currentVersion: res.current, channel: res.channel, error: res.error },
+      });
+      return;
+    }
+    if (res.updateAvailable && res.latest) {
+      if (getDismissedUpdateVersion() === res.latest) {
+        setState({ updateNotice: null });
+        return;
+      }
+      setState({
+        updateNotice: {
+          state: "available",
+          version: res.latest,
+          currentVersion: res.current,
+          channel: res.channel,
+        },
+      });
+      return;
+    }
+    setState({
+      updateNotice: silent ? null : { state: "current", currentVersion: res.current, channel: res.channel },
+    });
+  } catch (err) {
+    setState({ updateNotice: silent ? null : { state: "failed", error: parityError(err) } });
+  }
+}
+
+/** Install the offered version (detached CLI), then prompt for a restart. */
+export async function installUpdate() {
+  const version = state.updateNotice?.version;
+  const currentVersion = state.updateNotice?.currentVersion;
+  const channel = state.updateNotice?.channel;
+  // The detached CLI `update` only applies on a PUBLISHED install; a dev
+  // checkout / compiled binary logs and exits without changing the running
+  // version. Say so instead of claiming an install that did not happen.
+  if (channel && channel !== "published") {
+    setState({
+      updateNotice: {
+        state: "failed",
+        version,
+        currentVersion,
+        channel,
+        error: `self-update applies only to a published install — this is a ${channel} build; update it manually`,
+      },
+    });
+    return;
+  }
+  setState({ updateNotice: { state: "installing", version, currentVersion, channel } });
+  try {
+    await api.installWebuiUpdate();
+    setState({ updateNotice: { state: "installed", version, currentVersion, channel } });
+  } catch (err) {
+    setState({ updateNotice: { state: "failed", version, channel, error: parityError(err) } });
+  }
+}
+
+/** Restart to apply an installed update (reuses the settings-restart route). */
+export async function restartUpdate() {
+  try {
+    await api.webuiRestart();
+  } catch {
+    /* the socket drops during a restart — a dropped response is the expected result */
+  }
+}
+
+// ---- R11a session search --------------------------------------------------
+//
+// The engine's session search is GLOBAL (no project/directory scope param), so
+// `allProjects` only selects whether the DISPLAY is scoped client-side. The
+// dialog debounces and calls `searchSessions`; below 2 chars it clears.
+
+/** Server-side session search for the session-list dialog. */
+export async function searchSessions(query: string, allProjects: boolean) {
+  const q = query.trim();
+  if (q.length < 2) {
+    setState({ sessionSearch: { query: "", allProjects, results: null, searching: false } });
+    return;
+  }
+  setState({ sessionSearch: { query: q, allProjects, results: null, searching: true } });
+  try {
+    const res = await api.listSessions({ search: q, limit: 100 });
+    // A newer search superseded this one — drop the stale response.
+    if (state.sessionSearch.query !== q || state.sessionSearch.allProjects !== allProjects) return;
+    setState({ sessionSearch: { ...state.sessionSearch, results: res.data, searching: false } });
+  } catch (err) {
+    console.warn("searchSessions failed:", err);
+    if (state.sessionSearch.query !== q) return;
+    setState({ sessionSearch: { ...state.sessionSearch, results: null, searching: false } });
+  }
+}
+
+/** Flip the session-list search scope between this project and all projects. */
+export function toggleSessionSearchAllProjects() {
+  setState({ sessionSearch: { ...state.sessionSearch, allProjects: !state.sessionSearch.allProjects } });
+}
+
+/** Clear the session-search slice (on dialog close / explicit clear). */
+export function clearSessionSearch() {
+  const s = state.sessionSearch;
+  if (s.query === "" && s.results === null && !s.searching) return;
+  setState({ sessionSearch: { ...s, query: "", results: null, searching: false } });
+}
+
+/**
+ * R11a — delete a session: drop it, close its tab, leave it if focused, refresh.
+ * (The sidebar row action calls the api directly; this is the shared action the
+ * session-list dialog uses so pin/tab state stays consistent.)
+ */
+export async function deleteSession(sessionID: string) {
+  try {
+    await api.deleteSession(sessionID);
+    removeSessionTab(sessionID);
+    if (state.currentSessionID === sessionID) void selectSession(null);
+    await refreshSessions();
+  } catch (err) {
+    console.warn("deleteSession failed:", err);
+  }
+}
+
 // ---- parity surfaces ------------------------------------------------------
 // P2 diff viewer, P6 prompt stash, P3 worktrees, P4 plugins. Each surface is
 // presentational; these actions own every side effect (AGENTS rule 2) so the
@@ -3267,11 +3601,15 @@ export function openDiffViewer(sessionID: string) {
   const slice = state.diffs[sessionID];
   setState({ diffViewerSessionID: sessionID });
   void loadSessionDiff(sessionID, slice?.source ?? "turn");
+  void loadDiffBranches(sessionID);
 }
 
 export function closeDiffViewer() {
   if (state.diffViewerSessionID === null) return;
+  const sessionID = state.diffViewerSessionID;
   setState({ diffViewerSessionID: null });
+  // Clear the remembered base override on close; reopen defaults to the engine's.
+  if (state.diffs[sessionID]) patchDiff(sessionID, { baseRef: null });
 }
 
 export function setDiffSource(sessionID: string, source: DiffSource) {
@@ -3295,6 +3633,27 @@ export function setDiffReviewed(sessionID: string, file: string, reviewed: boole
       : prev.reviewed.filter((f) => f !== file),
   });
 }
+
+/** R7 — pick the base branch the "branch" diff compares against. */
+export function setDiffBase(sessionID: string, branch: string | null) {
+  if ((state.diffs[sessionID]?.baseRef ?? null) === branch) return;
+  patchDiff(sessionID, { baseRef: branch });
+  void loadSessionDiff(sessionID);
+}
+
+/** R7 — branch names for the base picker (empty on any failure). */
+export async function loadDiffBranches(sessionID: string) {
+  if (isDraftSession(sessionID)) return;
+  const location = sessionDirectory(sessionID);
+  try {
+    const res = await api.vcsBranches({ location: location ? { directory: location } : undefined });
+    patchDiff(sessionID, { branches: res.data });
+  } catch { patchDiff(sessionID, { branches: [] }); }
+}
+
+/** R6 — open the session timeline overlay. */
+export function openTimeline(sessionID: string) { setState({ timelineSessionID: sessionID }); }
+export function closeTimeline() { if (state.timelineSessionID === null) return; setState({ timelineSessionID: null }); }
 
 /**
  * Load one diff source for a session. "turn" is the engine's own turn scoping
@@ -3325,11 +3684,12 @@ export async function loadSessionDiff(sessionID: string, source?: DiffSource) {
             .then((r) => r.data)
             .catch(() => null)) ?? null;
       }
+      const chosenBase = state.diffs[sessionID]?.baseRef ?? null;
       const res = await api.vcsDiff(
         mode,
         location ? { directory: location } : undefined,
         VCS_DIFF_CONTEXT_LINES,
-        base?.ref ?? null,
+        chosenBase ?? base?.ref ?? null,
       );
       files = res.data;
     }
@@ -3435,6 +3795,22 @@ export async function loadWorktrees(directory?: string | null) {
 }
 
 /**
+ * R6 — load year-to-date aggregate stats for the stats surface. `tools: "none"`
+ * keeps the payload small; the range and timezone match the engine's calendar.
+ */
+export async function loadStats() {
+  const now = new Date();
+  const from = new Date(now.getFullYear(), 0, 1);
+  setState({ statsLoading: true, statsError: null });
+  try {
+    // The engine wants integer epoch-MILLISECONDS as strings (ISO-8601 → 500;
+    // epoch-seconds → a silently zeroed response). Verified live.
+    const data = await api.sessionStats({ from: String(from.getTime()), to: String(now.getTime()), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, tools: "none" });
+    setState({ statsData: data, statsLoading: false });
+  } catch (err) { setState({ statsLoading: false, statsError: parityError(err) }); }
+}
+
+/**
  * Create a worktree. This runs the project's setup script, which can take
  * minutes — the caller shows progress and must not block on it.
  */
@@ -3446,6 +3822,23 @@ export async function createWorktree(input: WorktreeCreateInput) {
     setState({ worktreesBusy: false });
     await loadWorktrees(dir);
     // The managed inventory changed — realign the sidebar's workspace groups.
+    void refreshSessions();
+  } catch (err) {
+    setState({ worktreesBusy: false, worktreesError: parityError(err) });
+  }
+}
+
+/**
+ * R11a — inline worktree creation for the open picker (v2 `ctrl+n`). The engine
+ * fills defaults from the location's strategy; the caller passes the drilled
+ * project directory explicitly.
+ */
+export async function createWorktreeForDirectory(directory: string) {
+  setState({ worktreesDirectory: directory, worktreesBusy: true, worktreesError: null });
+  try {
+    await api.worktreeCreate({}, { directory });
+    setState({ worktreesBusy: false });
+    await loadWorktrees(directory);
     void refreshSessions();
   } catch (err) {
     setState({ worktreesBusy: false, worktreesError: parityError(err) });
@@ -3719,6 +4112,15 @@ export async function selectSession(
   });
   if (sessionID) {
     rememberLastSession(sessionID);
+    // R3: selecting a real session opens its tab (idempotent). Split-pane
+    // adoption goes through adoptFocusedSession and deliberately opens no tab.
+    if (state.tabs.enabled) {
+      const tabs = openTab(state.tabs, sessionID);
+      if (tabs !== state.tabs) {
+        setState({ tabs });
+        saveTabs();
+      }
+    }
     // Restore any buffered live stream from before a hard refresh
     // before the history fetch returns, so the transcript appears
     // immediately from the start rather than after the next delta.
@@ -3742,6 +4144,196 @@ export async function selectSession(
   } else if (state.draftWorkspace !== null) {
     setState({ draftWorkspace: null });
   }
+}
+
+// ---- R3 session tabs + pins ----------------------------------------------
+//
+// The pure model is `lib/sessionTabs.ts`; these actions are the ONLY place it
+// mutates store state and persists (AGENTS rule 2). Each action runs the pure
+// transform, writes `state.tabs`, and saves `webui.tabs` — the tab rail and the
+// quick-slot numbers read the slice straight from the store.
+
+/** Engine `time.updated` for a session, from the list or the detail cache. */
+function sessionUpdatedAt(s: State, sessionID: string): number {
+  return (
+    s.sessions.find((x) => x.id === sessionID)?.time.updated ??
+    s.sessionDetails[sessionID]?.time.updated ??
+    0
+  );
+}
+
+/** Unread = output the user has not seen since last opening it (R5 memory). */
+function sessionUnread(s: State, sessionID: string): boolean {
+  return sessionID !== s.currentSessionID && isSessionUnseen(sessionID, sessionUpdatedAt(s, sessionID));
+}
+
+/** Per-tab status flags for the rail (see lib/sessionTabs.ts TabSignals). */
+export function tabSignalsFor(s: State, sessionID: string): TabSignals {
+  return {
+    running: sessionOrSubagentsLive(s, sessionID),
+    queued: !!s.queued[sessionID],
+    permission: s.permissions.some((r) => r.sessionID === sessionID),
+    question:
+      s.questions.some((r) => r.sessionID === sessionID) ||
+      s.forms.some((f) => f.sessionID === sessionID && isQuestionForm(f)),
+    form: s.forms.some((f) => f.sessionID === sessionID && !isQuestionForm(f)),
+    error: (s.runNotices[sessionID] ?? []).some((n) => n.kind === "error" || n.kind === "failed"),
+    unread: sessionUnread(s, sessionID),
+  };
+}
+
+function setTabs(slice: TabSlice) {
+  setState({ tabs: slice });
+  saveTabs();
+}
+
+/** Adopt a tab/quick-slot target as the focused session, when there is one. */
+function selectIfPresent(sessionID: string | null): void {
+  if (sessionID) void selectSession(sessionID);
+}
+
+export function openSessionTab(sessionID: string) {
+  const next = openTab(state.tabs, sessionID);
+  if (next !== state.tabs) setTabs(next);
+}
+
+export function closeSessionTab(sessionID: string) {
+  const idx = state.tabs.open.indexOf(sessionID); // 0-based; -1 when absent
+  if (idx === -1) return;
+  const wasCurrent = state.currentSessionID === sessionID;
+  const next = closeTab(state.tabs, sessionID);
+  setTabs(next);
+  // Closing the focused tab moves focus to its neighbour: the tab that shifted
+  // into the closed slot (its right neighbour), else the one before it.
+  if (wasCurrent) selectIfPresent(tabAt(next, idx + 1) ?? tabAt(next, idx) ?? null);
+}
+
+export function closeOtherSessionTabs(sessionID: string) {
+  const next = closeOtherTabs(state.tabs, sessionID);
+  if (next !== state.tabs) setTabs(next);
+}
+
+export function closeAllSessionTabs() {
+  const next = closeAllTabs(state.tabs);
+  if (next !== state.tabs) setTabs(next);
+}
+
+export function reopenClosedTab() {
+  const { slice, sessionID } = reopenTab(state.tabs);
+  if (slice === state.tabs) return;
+  setTabs(slice);
+  selectIfPresent(sessionID);
+}
+
+export function moveSessionTab(from: number, to: number) {
+  const next = moveTab(state.tabs, from, to);
+  if (next !== state.tabs) setTabs(next);
+}
+
+/** Drop a session's tab WITHOUT neighbour selection — used when deleting. */
+export function removeSessionTab(sessionID: string) {
+  const next = closeTab(state.tabs, sessionID);
+  if (next !== state.tabs) setTabs(next);
+}
+
+export function selectTabNumber(n: number) {
+  selectIfPresent(tabAt(state.tabs, n));
+}
+
+export function selectNextTab() {
+  selectIfPresent(nextTab(state.tabs, state.currentSessionID));
+}
+
+export function selectPreviousTab() {
+  selectIfPresent(previousTab(state.tabs, state.currentSessionID));
+}
+
+export function selectNextUnreadTab() {
+  selectIfPresent(nextUnreadTab(state.tabs, state.currentSessionID, (id) => sessionUnread(state, id)));
+}
+
+export function selectPreviousUnreadTab() {
+  selectIfPresent(previousUnreadTab(state.tabs, state.currentSessionID, (id) => sessionUnread(state, id)));
+}
+
+export function toggleSessionPin(sessionID: string) {
+  const next = togglePin(state.tabs, sessionID);
+  if (next !== state.tabs) setTabs(next);
+}
+
+export function unpinSession(sessionID: string) {
+  const next = unpin(state.tabs, sessionID);
+  if (next !== state.tabs) setTabs(next);
+}
+
+/** `session.quick_switch.N` — open the pinned id in quick slot N (1..9). */
+export function selectQuickSlot(n: number) {
+  selectIfPresent(pinnedSessionAt(state.tabs, n));
+}
+
+export function setTabsEnabled(enabled: boolean) {
+  if (state.tabs.enabled === enabled) return;
+  setTabs({ ...state.tabs, enabled });
+}
+
+/**
+ * `session.tab.select.N` / `session.quick_switch.N` share one dispatcher
+ * (§9.2): N is a tab slot while tabs are enabled, else a quick slot.
+ */
+export function selectNumberedTab(n: number) {
+  selectIfPresent(numberedSwitchTarget(state.tabs, n));
+}
+
+/**
+ * The rail view model, memoized on the slices it resolves from. The selectors
+ * return slice references (never fresh objects), so `useStore`'s shallow
+ * compare stays meaningful; the resolvers read live state inside the memo.
+ */
+export function useSessionTabRefs(): TabRef[] {
+  const tabs = useStore((s) => s.tabs);
+  const current = useStore((s) => s.currentSessionID);
+  const sessions = useStore((s) => s.sessions);
+  const sessionDetails = useStore((s) => s.sessionDetails);
+  const running = useStore((s) => s.running);
+  const queued = useStore((s) => s.queued);
+  const permissions = useStore((s) => s.permissions);
+  const questions = useStore((s) => s.questions);
+  const forms = useStore((s) => s.forms);
+  const runNotices = useStore((s) => s.runNotices);
+  return useMemo(
+    () =>
+      buildTabRefs({
+        slice: tabs,
+        current,
+        titleOf: (id) => sessionLabel(getState(), id),
+        signalsOf: (id) => tabSignalsFor(getState(), id),
+      }),
+    [tabs, current, sessions, sessionDetails, running, queued, permissions, questions, forms, runNotices],
+  );
+}
+
+/** The sidebar pins view model, memoized the same way as the tab refs. */
+export function useSessionPinRefs(): PinRef[] {
+  const tabs = useStore((s) => s.tabs);
+  const current = useStore((s) => s.currentSessionID);
+  const sessions = useStore((s) => s.sessions);
+  const sessionDetails = useStore((s) => s.sessionDetails);
+  const running = useStore((s) => s.running);
+  const queued = useStore((s) => s.queued);
+  const permissions = useStore((s) => s.permissions);
+  const questions = useStore((s) => s.questions);
+  const forms = useStore((s) => s.forms);
+  const runNotices = useStore((s) => s.runNotices);
+  return useMemo(
+    () =>
+      buildPinRefs({
+        slice: tabs,
+        current,
+        titleOf: (id) => sessionLabel(getState(), id),
+        signalsOf: (id) => tabSignalsFor(getState(), id),
+      }),
+    [tabs, current, sessions, sessionDetails, running, queued, permissions, questions, forms, runNotices],
+  );
 }
 
 // ---- split view -----------------------------------------------------------
@@ -4651,11 +5243,15 @@ export async function backgroundSubagents(sessionID: string) {
  * allow and nothing happened". Keeping it pending lets the user retry, and the
  * per-session listing reconciles it away once it really lands.
  */
-export async function replyPermission(requestID: string, reply: "once" | "always" | "reject"): Promise<boolean> {
+export async function replyPermission(
+  requestID: string,
+  reply: "once" | "always" | "reject",
+  message?: string,
+): Promise<boolean> {
   const req = state.permissions.find((p) => p.id === requestID);
   if (!req) return false;
   try {
-    await api.replyPermission(req.sessionID, requestID, reply);
+    await api.replyPermission(req.sessionID, requestID, reply, message);
   } catch (err) {
     log("panel", `permission reply FAILED ${requestID}:`, err instanceof Error ? err.message : String(err));
     return false; // keep pending so the user can retry

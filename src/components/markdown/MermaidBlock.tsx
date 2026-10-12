@@ -7,6 +7,7 @@
  * malformed diagram cannot blank the transcript.
  */
 import { useMermaid } from "../../lib/markdown/useMermaid";
+import { registerCodeBlockRenderer } from "../../lib/markdown/codeBlockRenderers";
 import { FenceFallback } from "./BlockBoundary";
 
 export function MermaidBlock({ source }: { source: string }) {
@@ -34,3 +35,11 @@ export function MermaidBlock({ source }: { source: string }) {
     />
   );
 }
+
+// Dogfood the public seam (R14): the built-in mermaid renderer is one
+// "markdown.codeBlock" contribution — exactly what an extension registers.
+// Order 100 is the default; a lower order overrides it.
+registerCodeBlockRenderer(["mermaid", "mmd"], (ctx) => <MermaidBlock source={ctx.source} />, {
+  id: "markdown.mermaid",
+  order: 100,
+});

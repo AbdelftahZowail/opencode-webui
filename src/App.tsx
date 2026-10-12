@@ -11,6 +11,9 @@ import { Toasts } from "./components/Toasts";
 import { ImageViewer } from "./components/ImageViewer";
 import { ConnectDialog } from "./components/ConnectDialog";
 import { ShelfPage } from "./components/shelf/ShelfPage";
+import { copyText } from "./components/markdown/clipboard";
+import { api } from "./api/client";
+import type { MessageInfo } from "./api/types";
 import { Target, getContributions, subscribeRegistry, type PageContribution } from "./extensions/registry";
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { OPEN_SEARCH_EVENT } from "./lib/uiEvents";
@@ -21,28 +24,63 @@ import {
   MAIN_PANE,
   MAX_SPLITS,
   childSessionsOf,
+  closeAllSessionTabs,
   closeDiffViewer,
+  closeErrorDetails,
+  closeOtherSessionTabs,
+  closeSessionTab,
+  closeTimeline,
   emptyDiffState,
   focusPane,
   focusedPaneKey,
+  forkAtMessage,
   isDraftSession,
+  loadStats,
+  moveSessionTab,
   navigateFocused,
   openMobileSidebar,
   openRunsPanel,
   openSplitPicker,
   removeSplitPane,
   pendingRequests,
+  reopenClosedTab,
   requestInterrupt,
   revealSubagentComposer,
+  selectNextTab,
+  selectNextUnreadTab,
+  selectNumberedTab,
+  selectPreviousTab,
+  selectPreviousUnreadTab,
   selectSession,
+  sessionDirectory,
   sessionOrSubagentsLive,
+  setDiffBase,
   setDiffReviewed,
   setDiffSelectedFile,
   setDiffSource,
+  setHighlightMessage,
+  setTabsEnabled,
+  setUpdateNotice,
+  checkForUpdate,
+  clearSessionSearch,
+  createWorktreeForDirectory,
+  deleteSession,
+  installUpdate,
+  loadWorktrees,
+  restartUpdate,
+  searchSessions,
+  toggleSessionSearchAllProjects,
+  renameSession,
+  toggleSessionPin,
   startDraftSession,
+  startEditAtMessage,
+  useSessionTabRefs,
   useStore,
   type DiffSource,
 } from "./store";
+import { filterSessionsToProject } from "./lib/sessionSearch";
+import { getDismissedUpdateVersion, setDismissedUpdateVersion } from "./lib/updateNotice";
+import type { ProjectInfo } from "./api/client";
 
 /** Extension page routes: /ext/{id} (id auto-derived from the extension id). */
 const EXT_ROUTE_RE = /^\/ext\/([A-Za-z0-9_-]+)$/;
@@ -77,6 +115,7 @@ export default function App() {
   // invariant), so tab title / Esc / hotkeys stay keyed on it unchanged.
   const sessionID = useStore((s) => s.currentSessionID);
   const connected = useStore((s) => s.connected);
+  const serviceOK = useStore((s) => s.serviceOK);
   const session = useStore((s) =>
     s.currentSessionID
       ? s.sessions.find((x) => x.id === s.currentSessionID) ?? s.sessionDetails[s.currentSessionID]
@@ -109,11 +148,17 @@ export default function App() {
   const extPageTitle = extPage?.item.title;
   // Native core page: the file shelf browser. Purely additional, like /ext/{id}.
   const shelfRoute = pathname === "/shelf";
+  // Native core page: usage stats (R6). Same additive branch as /shelf.
+  const statsRoute = pathname === "/stats";
 
   // Browser tab mirrors the conversation: the session's title, prefixed
   // with a live dot while that session OR any of its subagents is working
   // or waiting on a send. Extension pages take over the title for their stay.
   useEffect(() => {
+    if (statsRoute) {
+      document.title = "Stats";
+      return;
+    }
     if (shelfRoute) {
       document.title = "File shelf";
       return;
@@ -129,7 +174,7 @@ export default function App() {
             ? "New session"
             : (session?.title ?? "Untitled session")
         }`;
-  }, [sessionID, session?.title, live, extPageTitle, shelfRoute]);
+  }, [sessionID, session?.title, live, extPageTitle, shelfRoute, statsRoute]);
 
   // TUI session-level arrow bindings — active only OUTSIDE inputs (in the
   // composer, up/down walk prompt history and left/right move the caret):
@@ -211,6 +256,13 @@ export default function App() {
     return () => window.removeEventListener(OPEN_SEARCH_EVENT, onOpen);
   }, []);
 
+  // R3 tab hotkeys are Alt-modified, so they can fire while focus sits in the
+  // composer — run them through the same overlay guard the other keys use.
+  const tabKey = (fn: () => void) => () => {
+    if (overlayOpen()) return;
+    fn();
+  };
+
   useHotkeys({
     arrowup: () => {
       if (!session?.parentID || !sessionID || overlayOpen()) return;
@@ -261,6 +313,24 @@ export default function App() {
       }
       requestInterrupt();
     },
+    "alt+pagedown": tabKey(selectNextTab),
+    "alt+pageup": tabKey(selectPreviousTab),
+    "alt+shift+pagedown": tabKey(selectNextUnreadTab),
+    "alt+shift+pageup": tabKey(selectPreviousUnreadTab),
+    "alt+w": tabKey(() => {
+      if (sessionID) closeSessionTab(sessionID);
+    }),
+    "alt+shift+t": tabKey(reopenClosedTab),
+    "alt+1": tabKey(() => selectNumberedTab(1)),
+    "alt+2": tabKey(() => selectNumberedTab(2)),
+    "alt+3": tabKey(() => selectNumberedTab(3)),
+    "alt+4": tabKey(() => selectNumberedTab(4)),
+    "alt+5": tabKey(() => selectNumberedTab(5)),
+    "alt+6": tabKey(() => selectNumberedTab(6)),
+    "alt+7": tabKey(() => selectNumberedTab(7)),
+    "alt+8": tabKey(() => selectNumberedTab(8)),
+    "alt+9": tabKey(() => selectNumberedTab(9)),
+    "alt+0": tabKey(() => selectNumberedTab(10)),
   });
 
   /** Focus follows pointer AND keyboard into a pane; the store no-ops when unchanged. */
@@ -270,14 +340,21 @@ export default function App() {
     <div className="flex h-dvh flex-col overflow-hidden">
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Target id="sidebar" />
-        <div className="flex min-w-0 flex-1 overflow-hidden">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {/* R3 session-tab rail — additive chrome above the pane row. */}
+          <SessionTabsHost />
+          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
           {/* Main pane: always the routed surface, even while a split holds focus. */}
           <section
             className="flex min-w-0 flex-1 flex-col"
             onPointerDownCapture={focusThis(MAIN_PANE)}
             onFocusCapture={focusThis(MAIN_PANE)}
           >
-            {shelfRoute ? (
+            {statsRoute ? (
+              // Native stats page (R6): full-page surface replacing the
+              // conversation pane; the shell around it stays exactly as-is.
+              <StatsHost />
+            ) : shelfRoute ? (
               // Native file-shelf page: full-page surface replacing the
               // conversation pane; the shell around it stays exactly as-is.
               <ShelfPage />
@@ -335,6 +412,7 @@ export default function App() {
               <Columns2 className="size-4" />
             </button>
           </div>
+          </div>
         </div>
       </div>
       {/* Mobile keyboard: the activity strip docks away while typing — only
@@ -352,11 +430,290 @@ export default function App() {
       <ConnectDialog />
       <HelpDialog />
       <DiffViewerHost />
+      <TimelineHost />
+      {/* R11 overlays: reconnect scrim, error details, debug, pairing, update. */}
+      <Target id="reconnect.overlay" connected={connected} serviceOK={serviceOK} />
+      <ErrorDetailsHost />
+      <DebugHost />
+      <PairHost />
+      <UpdateNoticeHost />
+      {/* R11a mounted dialogs: the session list + the open/recents picker. */}
+      <SessionListHost />
+      <OpenPickerHost />
       {/* The app's ONLY ShellPanel instance: trigger-less (hidden-span
           trigger), opened by requestShellPanel() ticks from the runs panel /
           composer chips — the sidebar no longer hosts one. */}
       <ShellPanel trigger={<span className="hidden" />} />
     </div>
+  );
+}
+
+/**
+ * R3 session-tab rail host: reads the resolved tab view model + the open
+ * slice's enabled/closed state and renders the registered `session.tabs`
+ * target, so extensions can wrap or replace the rail without touching App.
+ */
+function SessionTabsHost() {
+  const refs = useSessionTabRefs();
+  const current = useStore((s) => s.currentSessionID);
+  const enabled = useStore((s) => s.tabs.enabled);
+  const closed = useStore((s) => s.tabs.closed.length);
+  return (
+    <Target
+      id="session.tabs"
+      tabs={refs}
+      current={current}
+      tabsEnabled={enabled}
+      canReopen={closed > 0}
+      onSelect={(id: string) => void selectSession(id)}
+      onClose={closeSessionTab}
+      onReopen={reopenClosedTab}
+      onReorder={moveSessionTab}
+      onCloseOthers={closeOtherSessionTabs}
+      onCloseAll={closeAllSessionTabs}
+      onToggleTabs={() => setTabsEnabled(!enabled)}
+    />
+  );
+}
+
+/**
+ * R11 error-details host: reads the store's `errorDetails` (or null) and
+ * renders the registered `errorDetails.dialog`. `i`/Investigate just closes
+ * the dialog — no new store action (the diagnostic-seeding flow is deferred).
+ */
+function ErrorDetailsHost() {
+  const err = useStore((s) => s.errorDetails);
+  return (
+    <Target
+      id="errorDetails.dialog"
+      open={!!err}
+      {...(err ?? {})}
+      onInvestigate={closeErrorDetails}
+      onClose={closeErrorDetails}
+    />
+  );
+}
+
+/**
+ * R11 debug host: reads the `uiSignals.debug` open tick and the focused
+ * session/model, fetches the engine version once, and renders the registered
+ * `debug.dialog`. Closing is local only — mirroring HelpDialog (the tick is a
+ * one-shot open request, not a controlled open flag).
+ */
+function DebugHost() {
+  const tick = useStore((s) => s.uiSignals.debug);
+  const sessionID = useStore((s) => s.currentSessionID);
+  const model = useStore((s) => {
+    const sid = s.currentSessionID;
+    if (!sid) return null;
+    return (
+      s.pendingModels[sid] ??
+      s.sessionDetails[sid]?.model ??
+      s.sessions.find((x) => x.id === sid)?.model ??
+      null
+    );
+  });
+  const [open, setOpen] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (tick) setOpen(true);
+  }, [tick]);
+  useEffect(() => {
+    if (!open || version) return;
+    void api
+      .serverInfo()
+      .then((info) => setVersion(info.version))
+      .catch(() => {});
+  }, [open, version]);
+  const modelLabel = model ? `${model.providerID}/${model.id}` : null;
+  return (
+    <Target
+      id="debug.dialog"
+      open={open}
+      info={{ version, sessionID, model: modelLabel }}
+      onClose={() => setOpen(false)}
+    />
+  );
+}
+
+/**
+ * R11 pairing host: reads the `uiSignals.pair` open tick and the engine's
+ * advertised URLs (fetched once per open), and renders the registered
+ * `pair.dialog`. The password is always shown masked — never the real secret.
+ */
+function PairHost() {
+  const tick = useStore((s) => s.uiSignals.pair);
+  const [open, setOpen] = useState(false);
+  const [urls, setUrls] = useState<string[]>([]);
+  useEffect(() => {
+    if (tick) setOpen(true);
+  }, [tick]);
+  useEffect(() => {
+    if (!open || urls.length) return;
+    void api
+      .serverInfo()
+      .then((info) => setUrls(info.urls ?? []))
+      .catch(() => {});
+  }, [open, urls.length]);
+  return (
+    <Target
+      id="pair.dialog"
+      open={open}
+      info={{
+        thisUrl: window.location.origin,
+        urls,
+        username: "opencode",
+        passwordMasked: "••••••••",
+        qrUrl: window.location.origin,
+      }}
+      onClose={() => setOpen(false)}
+    />
+  );
+}
+
+/**
+ * R11 update-notice host: renders the registered `update.notice` only while the
+ * store carries a notice. R11b wires the real check/install/restart actions; the
+ * dismissed version is persisted via `lib/updateNotice` and Skip records it.
+ */
+function UpdateNoticeHost() {
+  const notice = useStore((s) => s.updateNotice);
+  if (!notice) return null;
+  return (
+    <Target
+      id="update.notice"
+      {...notice}
+      dismissedVersion={getDismissedUpdateVersion()}
+      onSkip={(version: string) => {
+        setDismissedUpdateVersion(version);
+        setUpdateNotice(null);
+      }}
+      onUpdate={() => void installUpdate()}
+      onRestart={() => void restartUpdate()}
+      onRetry={() => void checkForUpdate()}
+      onClose={() => setUpdateNotice(null)}
+    />
+  );
+}
+
+/**
+ * R11a session-list host: reads the `uiSignals.sessionList` open tick, the
+ * server-search slice, and the SAME R3 pins the sidebar uses, then renders the
+ * registered `sessionList.dialog`. "This project" scoping is applied
+ * client-side (the engine's search is global); pinned sessions are always
+ * retained so the quick-slot column stays complete.
+ */
+function SessionListHost() {
+  const tick = useStore((s) => s.uiSignals.sessionList);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (tick) setOpen(true);
+  }, [tick]);
+
+  const sessions = useStore((s) => s.sessions);
+  const currentSessionID = useStore((s) => s.currentSessionID);
+  const running = useStore((s) => s.running);
+  const queued = useStore((s) => s.queued);
+  const pins = useStore((s) => s.tabs.pins);
+  const results = useStore((s) => s.sessionSearch.results);
+  const searching = useStore((s) => s.sessionSearch.searching);
+  const allProjects = useStore((s) => s.sessionSearch.allProjects);
+  const projectDirectory = useStore((s) =>
+    s.currentSessionID ? sessionDirectory(s.currentSessionID) : null,
+  );
+
+  const scopedSessions = useMemo(
+    () => filterSessionsToProject(sessions, allProjects ? null : projectDirectory, pins),
+    [sessions, allProjects, projectDirectory, pins],
+  );
+  const scopedResults = useMemo(
+    () => (results && !allProjects ? filterSessionsToProject(results, projectDirectory) : results),
+    [results, allProjects, projectDirectory],
+  );
+  const live = useMemo(() => {
+    const out: Record<string, boolean> = {};
+    for (const s of sessions) if (running[s.id] || queued[s.id]) out[s.id] = true;
+    return out;
+  }, [sessions, running, queued]);
+
+  return (
+    <Target
+      id="sessionList.dialog"
+      open={open}
+      sessions={scopedSessions}
+      currentSessionID={currentSessionID}
+      live={live}
+      searchResults={scopedResults}
+      searching={searching}
+      pinned={pins}
+      allProjects={allProjects}
+      onSearch={(q: string, all: boolean) => void searchSessions(q, all)}
+      onToggleAllProjects={toggleSessionSearchAllProjects}
+      onTogglePin={(id: string) => toggleSessionPin(id)}
+      onSelect={(id: string) => void selectSession(id)}
+      onRename={(id: string, title: string) => void renameSession(id, title)}
+      onDelete={(id: string) => void deleteSession(id)}
+      onClose={() => {
+        setOpen(false);
+        clearSessionSearch();
+      }}
+    />
+  );
+}
+
+/**
+ * R11a open-picker host: reads the `uiSignals.openPicker` open tick, loads the
+ * project list on open, and renders the registered `open.picker`. Drilling a
+ * project loads its worktrees through the existing store action; ctrl+n creates
+ * one inline; Enter on a directory opens a fresh draft session there.
+ */
+function OpenPickerHost() {
+  const tick = useStore((s) => s.uiSignals.openPicker);
+  const [open, setOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  useEffect(() => {
+    if (tick) setOpen(true);
+  }, [tick]);
+  useEffect(() => {
+    if (!open) return;
+    void api
+      .projectList()
+      .then((list) => setProjects(Array.isArray(list) ? list : []))
+      .catch(() => {});
+  }, [open]);
+
+  const sessions = useStore((s) => s.sessions);
+  const currentSessionID = useStore((s) => s.currentSessionID);
+  const running = useStore((s) => s.running);
+  const queued = useStore((s) => s.queued);
+  const worktrees = useStore((s) => s.worktrees);
+  const worktreesBusy = useStore((s) => s.worktreesBusy);
+  const currentDirectory = useStore((s) =>
+    s.currentSessionID ? sessionDirectory(s.currentSessionID) : null,
+  );
+  const live = useMemo(() => {
+    const out: Record<string, boolean> = {};
+    for (const s of sessions) if (running[s.id] || queued[s.id]) out[s.id] = true;
+    return out;
+  }, [sessions, running, queued]);
+
+  return (
+    <Target
+      id="open.picker"
+      open={open}
+      sessions={sessions}
+      projects={projects}
+      currentSessionID={currentSessionID}
+      currentDirectory={currentDirectory}
+      live={live}
+      worktrees={worktrees}
+      worktreesLoading={worktreesBusy}
+      onOpenSession={(id: string) => void selectSession(id)}
+      onOpenDirectory={(directory: string) => startDraftSession(directory)}
+      onDrillProject={(directory: string) => void loadWorktrees(directory)}
+      onCreateWorktree={(directory: string) => createWorktreeForDirectory(directory)}
+      onClose={() => setOpen(false)}
+    />
   );
 }
 
@@ -383,10 +740,53 @@ function DiffViewerHost() {
       reviewed={diff.reviewed}
       selectedFile={diff.selectedFile}
       base={diff.base}
+      branches={diff.branches}
+      baseRef={diff.baseRef}
+      location={sessionDirectory(sessionID)}
       onSelectSource={(source: DiffSource) => setDiffSource(sessionID, source)}
       onSelectFile={(file: string | null) => setDiffSelectedFile(sessionID, file)}
       onToggleReviewed={(file: string, reviewed: boolean) => setDiffReviewed(sessionID, file, reviewed)}
+      onSelectBase={(branch: string | null) => setDiffBase(sessionID, branch)}
       onClose={closeDiffViewer}
+    />
+  );
+}
+
+/**
+ * The R6 stats route's store-connected host: reads the stats slice and renders
+ * the registered `stats.panel` target, so extensions can wrap or replace the
+ * panel without touching App. Mounted app-wide for the `/stats` branch.
+ */
+function StatsHost() {
+  const data = useStore((s) => s.statsData);
+  const loading = useStore((s) => s.statsLoading);
+  const error = useStore((s) => s.statsError);
+  useEffect(() => {
+    if (!data && !loading) void loadStats();
+  }, []);
+  return <Target id="stats.panel" data={data} loading={loading} error={error} onRetry={loadStats} />;
+}
+
+/**
+ * The R4 timeline dialog's store-connected host: reads the open session's
+ * transcript slice and renders the registered `timeline.dialog` target, so
+ * extensions can wrap or replace it without touching App.
+ */
+const EMPTY_MESSAGES: MessageInfo[] = [];
+function TimelineHost() {
+  const sessionID = useStore((s) => s.timelineSessionID);
+  const messages = useStore((s) => (sessionID ? s.messages[sessionID] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
+  if (!sessionID) return null;
+  return (
+    <Target
+      id="timeline.dialog"
+      sessionID={sessionID}
+      messages={messages}
+      onJump={(messageID: string) => setHighlightMessage(sessionID, messageID)}
+      onRevert={(messageID: string, text: string) => startEditAtMessage(sessionID, messageID, text)}
+      onCopy={(text: string) => void copyText(text)}
+      onFork={(messageID: string) => void forkAtMessage(sessionID, messageID)}
+      onClose={closeTimeline}
     />
   );
 }

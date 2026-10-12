@@ -22,6 +22,8 @@ export interface FencedBlockInfo {
   marker: FenceMarker;
   /** Lowercased first info-string token (may be empty for a bare fence). */
   lang: string;
+  /** Full trimmed info-string (language token plus any meta); "" for a bare fence. */
+  info: string;
   /** Raw fence body, without the trailing newline. */
   source: string;
 }
@@ -104,7 +106,8 @@ export function getFencedBlock(source: string, offset: number | undefined): Fenc
   if (!header) return null;
   const fence = header[1]!;
   const marker: FenceMarker = fence.startsWith("~") ? "~" : "`";
-  const lang = (header[2] ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  const info = (header[2] ?? "").trim();
+  const lang = info.split(/\s+/)[0]?.toLowerCase() ?? "";
   const bodyStart = offset + header[0].length;
   const body = source.slice(bodyStart);
   // Closing fence: a line that is only the same fence character (GFM allows
@@ -112,7 +115,7 @@ export function getFencedBlock(source: string, offset: number | undefined): Fenc
   const close = marker === "~" ? /(?:^|\n)(~{3,})[ \t]*(?:\r?\n|$)/ : /(?:^|\n)(`{3,})[ \t]*(?:\r?\n|$)/;
   const closeMatch = close.exec(body);
   const value = closeMatch ? body.slice(0, closeMatch.index === 0 ? 0 : closeMatch.index + 1) : body;
-  return { marker, lang, source: value.replace(/\r?\n$/, "") };
+  return { marker, lang, info, source: value.replace(/\r?\n$/, "") };
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Eye, EyeOff, FilePlus2, FolderGit2, Palette, Plug, Puzzle } from "lucide-react";
+import { Check, Eye, EyeOff, FilePlus2, FolderGit2, FolderOpen, List, Palette, Plug, Puzzle } from "lucide-react";
 import { openConnect } from "./ConnectDialog";
 import { getContributions, type PaletteContribution } from "../extensions/registry";
 import {
@@ -15,7 +15,7 @@ import {
   CommandShortcut,
 } from "./ui/command";
 import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
-import { newSession, selectSession, useStore } from "../store";
+import { newSession, openOpenPicker, openSessionList, selectSession, useStore } from "../store";
 import { useHotkeys } from "../hooks/useHotkeys";
 
 interface ThemeEntry {
@@ -118,6 +118,24 @@ export function CommandPalette() {
             <FilePlus2 />
             <span>New session</span>
             <CommandShortcut>Ctrl N</CommandShortcut>
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              setOpen(false);
+              openSessionList();
+            }}
+          >
+            <List />
+            <span>Session list — search, pin and switch</span>
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              setOpen(false);
+              openOpenPicker();
+            }}
+          >
+            <FolderOpen />
+            <span>Open a session or project…</span>
           </CommandItem>
           <CommandItem
             onSelect={() => setPref("showReasoning", !prefs.showReasoning)}

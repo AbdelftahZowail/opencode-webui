@@ -7,7 +7,8 @@ used to be three files (`tui-parity-roadmap.md` = the program/status,
 build method) plus the one-time verification record.
 
 **Status:** the P0–P7 program is **committed and independently verified**; the
-port itself is **in progress** — R0–R14 remain (§5).
+TUI-parity port is **implemented and verified through R13**, with **R14 partial**
+(the code-block renderer seam) — see §5 and the §10 record.
 
 **Read order for a fresh agent:** `AGENTS.md` (the 10 rules — non-negotiable) →
 `docs/principles.md` → `docs/reference/coverage.md` → this file → your brief.
@@ -53,6 +54,10 @@ Decoded into engineering terms:
   table with this reason.
 - **`opencode mini`** — a *separate frontend* (`src/mini/`), not a TUI route. A
   web port of it is a separate project. Out of scope unless the human asks.
+
+- **Editor handoff (`/editor`)** — v2 opens the host-local `$EDITOR`. The browser
+  cannot spawn a process; the equivalent is a copy-to-clipboard / "open in your
+  editor" hint. **Recorded non-goal** (R8 skips it), not a silent drop.
 - **Breaking the engine contract** — we are a client. No engine changes, no
   legacy-surface bridge (see §3).
 
@@ -179,7 +184,7 @@ bun run scripts/diff-openapi.ts --check             # must exit 0 (after the re-
 Plus, for anything touching the extension contract or store wiring:
 
 ```bash
-bun run scripts/uitest/ext-battery-browser.ts       # 34 checks
+bun run scripts/uitest/ext-battery-browser.ts       # 35 checks
 bun run scripts/uitest/ext-battery-dom.ts           # 10
 bun run scripts/uitest/ext-battery-proxy.ts         # 17
 bun run scripts/uitest/ext-battery-acceptance.ts    # 15
@@ -349,8 +354,16 @@ Sized S (hours) / M (a day-ish) / L (multi-day) / XL (a program of its own).
 **Everything here needs the human's sign-off before you start** — the plan is
 the spec; §9 lists the open decisions.
 
-**Landed:** Step 0 contract re-sync, **R0** ship defects, **R1** syntax
-highlighting + **R2** mermaid/LaTeX (see `git log`). Remaining: R3–R14.
+**Landed:** Step 0 contract re-sync; **R0** ship defects; **R1** syntax
+highlighting; **R2** mermaid/LaTeX; **R3–R13** (tabs/pins, timeline, attention,
+stats, diff completeness, composer, transcript, tool cards, overlays,
+settings/themes, forms) — implemented 2026-10-12 (§10 is the record).
+**R14** (extension API) is **partially landed**: the code-block renderer seam
+(`markdown.codeBlock` collection + `markdown.registerCodeBlockRenderer`,
+`EXT_API_VERSION` 3) is built and dogfooded by the built-in mermaid/latex
+renderers; the remaining R14 gaps (`ui.panel`, `ui.tabs`, imperative dialogs,
+`attention`, keymap layers) stay gated on demand (§9 lists the resolved
+decisions).
 
 ### R0 — Ship defects (serial, first, small) · S
 
@@ -406,7 +419,7 @@ does not blank the transcript.
 **Blocked on:** the mermaid/katex dependency decision (§9.1).
 **Note:** do NOT build the extension-facing `registerCodeBlockRenderer` API
 first. Get the built-ins working through the core pipeline, then expose the
-registration (R13) — contract surface last, not first.
+registration (R14) — contract surface last, not first.
 
 ### R3 — Session tabs + pins/quick-slots · L
 
@@ -568,7 +581,9 @@ public URL; the update notice does not re-fire for the same version.
 
 **Acceptance:** a theme JSON dropped in the config dir appears and applies;
 dark/light/system follows the OS; the shell preference persists through
-`configPreferencesUpdate`; auto-accept suppresses prompts.
+`configPreferencesUpdate`; auto-accept suppresses prompts; a permission prompt
+renders full-screen (Settings › Security default; `ctrl/⌘+f` toggles it on the
+active request).
 
 ### R13 — Forms fidelity · M
 
@@ -781,3 +796,56 @@ The plan is the spec; these need your call before the affected stream starts.
 8. **Loop guard.** Decide when "parity" is done: the recommendation is §7 —
    every v2 command mapped, every §5 acceptance met or explicitly recorded.
    Otherwise "everything the TUI can do" has no finish line.
+
+### Resolved decisions (2026-10-12 — R3–R13 build)
+
+Each §9 item above is now decided; recorded so a fresh agent does not
+re-litigate. Rationale follows AGENTS rule 5 (dependency-light: a new dep needs
+justification).
+
+1. **Highlighting dep → shiki** (landed in R1; closest to v2, lazy chunk).
+2. **Tabs vs split → add tabs, keep split** (removing split would be a
+   regression, not parity). R3 does both.
+3. **Notification sounds → WebAudio-synthesised tones, no assets**
+   (dependency-light; `attention.enabled` defaults **false**, matching v2). R5.
+4. **Stats surface → core full-screen `/stats` page** (engine-native → core;
+   matches v2's full-screen route). R6.
+5. **Editor handoff → recorded non-goal** (see §1 non-goals).
+6. **Mini mode → out of scope** (a separate frontend, not a TUI route).
+7. **Pins + quick-slots → built** (confirmed v2; R3).
+8. **Loop guard → §7.**
+9. **Extension API (R14) → first seam shipped** (2026-10-12): fence-renderer
+   registration (`markdown.codeBlock` collection + `markdown.registerCodeBlockRenderer`,
+   `EXT_API_VERSION` 3), with the R1/R2 built-ins registering through it. The wider
+   R14 gaps (`ui.panel`, `ui.tabs`, imperative dialogs, `attention`, keymap layers)
+   remain demand-gated (see `docs/when.md`).
+
+---
+
+## 10. Implementation record — R3–R14 (2026-10-12)
+
+Built on top of R0–R2 (unchanged; not regressed). Every stream is **additive**:
+no existing target id, collection id, service id, or `data-oc-*` anchor was
+renamed or removed. New ids are listed in `webui-extensions/README.md` (target
+inventory + anchor table). Because R14 widens the extension contract, the
+working tree already carries the **minor** bump (`package.json` 3.3.0 → 3.4.0),
+the regenerated skill, and `EXT_API_VERSION` 3; the commit / tag / publish
+remain owed (this build leaves the tree uncommitted).
+
+| Stream | Status | New surface (targets / libs / routes) | Not-ported (reason) |
+| --- | --- | --- | --- |
+| R3 tabs + pins | done | `session.tabs`, `sidebar.sessionPins`, `lib/sessionTabs.ts`; `Alt+*` bindings | v2 leader/chord keybinds → web keys (terminal-only mechanics) |
+| R4 timeline | done | `timeline.dialog`, `lib/timeline.ts`, `/timeline` | none |
+| R5 attention | done | `lib/attention.ts`, Settings › Notifications, MCP toast action | sound *packs*/*files* → WebAudio presets (§9.3) |
+| R6 stats | done | `stats.panel`, `lib/stats.ts`, `api.sessionStats`, `/stats` route | tool breakdown (endpoint queried with `tools:"none"`) |
+| R7 diff completeness | done | committed source, base-branch picker, image pane, `s`/`b`/`d`/`?`, vim scroll, per-file menu | image blob at the *turn boundary* (no endpoint) |
+| R8 composer | done | `directory.picker`, `permission.reject`, `lib/dirRecents.ts`, `lib/paste.ts`, `/cd`, reject-with-message | `/editor` (§1 non-goal) |
+| R9 transcript fidelity | done | `turn.tokens`, `lib/grouping.ts`, scroll anchor + jump-to-latest | cross-message grouping (would restructure the transcript + break `message:*` targets) |
+| R10 tool cards | done | `tool.patch`, `tool.question`, `tool.skill`, `lib/diagnostics.ts`, `lib/toolOutput.ts` | none |
+| R11 overlays | done | `errorDetails.dialog`, `reconnect.overlay`, `update.notice`, `debug.dialog`, `pair.dialog`, `sessionList.dialog`, `open.picker`, `lib/qr.ts`, `api.pairCode`, `lib/sessionSearch.ts`; proxy `GET /api/webui/update/check` + `POST /api/webui/update` | update install no-ops on the **dev**/**binary** channels (published only); engine session search has no project scope → "this project" is a client-side directory filter; `/editor` (§1 non-goal) |
+| R12 settings/themes | done | `settings.appearance`, `settings.shell`, `lib/themeFiles.ts`, dark/light/system + pin/free, custom theme files, auto-accept, diff-wrap, permission-prompt-fullscreen (Settings › Security; panel `ctrl/⌘+f`; anchors `data-oc-permission-fullscreen` / `-toggle` / `-settings`) | plugin-installed *in-memory* themes (no engine route) |
+| R13 forms | done | `form.review`, `lib/formDraft.ts` (`when` rules, ack gating, drafts, review) | form validators (`min/max/pattern`) not surfaced (outside the four rows) |
+| R14 extension API (code-block renderers) | **partial** | `markdown.codeBlock` collection; `markdown.registerCodeBlockRenderer` bridge key; `lib/markdown/codeBlockRenderers.ts`; built-in `markdown.mermaid`/`markdown.latex`; `EXT_API_VERSION` 3 | `ui.panel`, `ui.tabs`, imperative dialogs, `attention`, keymap layers (demand-gated) |
+
+Verification for this pass: §2.6 gates + the four extension batteries (run
+sequentially, alone; 35/10/17/15 = 77/0) + an independent adversarial pass per stream.

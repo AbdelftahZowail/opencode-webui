@@ -98,7 +98,7 @@ which is what keeps that API honest.
 |---|---|---|
 | `wrap` | flow-through tweak of any registered unit | Receives props/output, delegates to the live core by default. **The default path for edits** — core updates always render *through* it, so wraps are stale-proof by construction. |
 | `replace` | take ownership of one registered target | Wins outright at its priority. Frozen-snapshot semantics: the owner opts out of core updates for that target (marked escape hatch). Still receives `(props, Core)` so it *can* compose if the author chooses. |
-| `contribute` | add an item to a named collection | Collections are registry-owned lists: `palette`, `slash`, `pages`, `settings`, `contextMenu.message`, `contextMenu.session`, `contextMenu.file`, … Adding a collection is data in core, not a new kind. A `contextMenu.*` item's `run(ctx)` gets `{ sessionID?, messageID?, file? }` — `file` only for `contextMenu.file` (consumed by FileExplorer's file rows). |
+| `contribute` | add an item to a named collection | Collections are registry-owned lists: `palette`, `slash`, `pages`, `settings`, `markdown.codeBlock`, `contextMenu.message`, `contextMenu.session`, `contextMenu.file`, … Adding a collection is data in core, not a new kind. A `contextMenu.*` item's `run(ctx)` gets `{ sessionID?, messageID?, file? }` — `file` only for `contextMenu.file` (consumed by FileExplorer's file rows). |
 | `hook` | interception at instrumented boundaries | Open event strings. Fired from: the api client wrapper (every endpoint, pre/post), store middleware (every action), and lifecycle points (session adopt, pane focus, extension load, …). New seams = new event names, never a registry change. |
 | `service` | provide/consume named logic | `provide` registers a consumable module (API object, cache, formatter, client). Consumption via `getService(id)`. Doubles as **value overrides**: core consults services for pluggable values (e.g. the timestamp formatter); a higher-precedence provided service wins. This is what makes "tiny logic tweaks" stale-proof. |
 
@@ -131,6 +131,26 @@ core default last]`. Evaluation: wraps transform, the winning replace renders;
 > redesigns the timestamp itself, the user's override still owns that one aspect:
 > legible, tiny conflict, no fork. `replace` is the only stale-prone path, and it is
   explicitly labeled as ownership.
+
+### 5.5 Addendum — code-block renderers (R14, 2026-10-12)
+
+The registry seam widened by R14: the collection **`markdown.codeBlock`**.
+Item shape (contract):
+
+```
+{ languages: string[]; render: (ctx: { language: string; source: string; info: string }) => ReactNode }
+```
+
+Resolution: the first contribution by ascending `order` (then id) whose
+`languages` includes the lowercased fence info-string — the order IS the
+override rule. Core contributes the built-in renderers `markdown.mermaid` and
+`markdown.latex` (both order 100); the R1/R2 consumers dogfood the same seam,
+so an extension registers and overrides by exactly the same mechanism. Exposed
+on the extension API surface as `markdown.registerCodeBlockRenderer`
+(`EXT_API_VERSION` **3** — additive: no v2 key changed shape, so v2-era code
+keeps working). The collection id, the item shape, the built-in ids, and the
+`ctx` shape are contract. The sections above remain the historical decision
+record; this is an append.
 
 ## 6. Hot paths — no refreshes, no restarts
 
@@ -221,12 +241,14 @@ Removed outright, no aliases, no deprecation period:
 - The 8s extension poll (→ SSE manifest push).
 - The narrow `window.__opencodeUI` bridge → **one extension API surface**
   (`register`, `react`, `api`, `store` [the curated facade; the raw store
-  module is `advanced.store`], `events`, `settings`, `collections`, `bus`,
+  module is `advanced.store`], `events`, `settings`, `markdown`, `collections`, `bus`,
   `prefs`, `notify`, `services`, `dom` kit, `kv`) used identically by external
   extensions and our shipped ones. (The later roadmap program —
   `docs/plans/extensions.md` — widened this surface to `EXT_API_VERSION` 2;
   the activation context adds `poll`/`after`/`on`/`subscribe`/`settings`/
-  `collections`/`bus`/`onDispose`.)
+  `collections`/`bus`/`onDispose`. R14 then widened it to `EXT_API_VERSION` 3
+  with `markdown.registerCodeBlockRenderer` / the `markdown.codeBlock`
+  collection — §5.5.)
 - Repo folder `ui-extensions/` renamed to `webui-extensions/` (naming parity with the
   user/project dirs).
 

@@ -19,12 +19,25 @@ import "./components/ToolCard";
 import "./components/DiffViewer";
 import "./components/WorktreePanel";
 import "./components/StashPanel";
+import "./components/StatsPanel";
+import "./components/TimelineDialog";
+import "./components/SessionTabs";
+import "./components/SessionPins";
+import "./components/DebugDialog";
+import "./components/PairDialog";
+import "./components/ErrorDetailsDialog";
+import "./components/ReconnectOverlay";
+import "./components/UpdateNotice";
+import "./components/SessionListDialog";
+import "./components/OpenPicker";
 import { log } from "./lib/log";
 import { hasCoarsePointer } from "./lib/platform";
 import { registerServiceWorker, startLiveTile } from "./lib/pwa";
 import { ensureMcpStatus } from "./lib/mcpStatus";
 import { installExtensionBridge } from "./lib/extensionApi";
 import { startRuntimeExtensions } from "./lib/runtimeExtensions";
+import { loadCustomThemes } from "./lib/themeFiles";
+import { startAttention } from "./lib/attention";
 
 const DEBUG_CONSOLE = typeof localStorage !== "undefined" && localStorage.getItem("webui.debug") === "1";
 (window as unknown as { __WEBUI_DEBUG_CONSOLE__?: boolean }).__WEBUI_DEBUG_CONSOLE__ = DEBUG_CONSOLE;
@@ -37,8 +50,12 @@ const DEBUG_CONSOLE = typeof localStorage !== "undefined" && localStorage.getIte
 installExtensionBridge();
 
 startRuntimeExtensions();
+// Custom themes (`<config>/themes/*.json`) discovered at boot so they appear
+// in the picker/appearance settings without an explicit reload.
+void loadCustomThemes();
 
 startStore();
+startAttention();
 registerServiceWorker();
 startLiveTile();
 // MCP status is global (one poller, one cache) — warm it at boot so the

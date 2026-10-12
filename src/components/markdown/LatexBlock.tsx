@@ -6,6 +6,7 @@
  * plain source so a bad formula cannot blank the transcript.
  */
 import { useLatex } from "../../lib/markdown/useLatex";
+import { registerCodeBlockRenderer } from "../../lib/markdown/codeBlockRenderers";
 import { FenceFallback } from "./BlockBoundary";
 
 export function LatexBlock({ source }: { source: string }) {
@@ -25,3 +26,12 @@ export function LatexBlock({ source }: { source: string }) {
     />
   );
 }
+
+// Dogfood the public seam (R14): the built-in LaTeX renderer is one
+// "markdown.codeBlock" contribution. Order 100 is the default; a lower order
+// overrides it.
+registerCodeBlockRenderer(
+  ["latex", "tex", "math", "katex"],
+  (ctx) => <LatexBlock source={ctx.source} />,
+  { id: "markdown.latex", order: 100 },
+);

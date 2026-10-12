@@ -26,13 +26,24 @@ export function StashPanel({ entries, onPop, onDelete, onClose }: StashPanelProp
   // v2's dialog shows the stash most-recent-first.
   const rows = useMemo(() => [...entries].reverse(), [entries]);
   const [selected, setSelected] = useState(0);
+  // R8: destructive delete is two-tap — the first Backspace/Delete arms the
+  // row, the second (within a short window) actually deletes it.
+  const [armed, setArmed] = useState<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
   // A delete (or a stash change under us) can shrink the list past the cursor.
   useEffect(() => {
     setSelected((s) => Math.min(s, Math.max(0, rows.length - 1)));
+    setArmed(null);
   }, [rows.length]);
+
+  // Disarm the pending delete after a short window (v2's transient state).
+  useEffect(() => {
+    if (armed === null) return;
+    const t = setTimeout(() => setArmed(null), 2000);
+    return () => clearTimeout(t);
+  }, [armed]);
 
   // The composer is unmounted while this panel is open: take focus so arrows
   // don't scroll the page and the capture-phase handler is the obvious owner.
@@ -63,14 +74,17 @@ export function StashPanel({ entries, onPop, onDelete, onClose }: StashPanelProp
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
+        setArmed(null);
         onClose();
         return;
       }
       if (e.key === "ArrowDown") {
+        setArmed(null);
         if (!empty) setSelected((i) => (i + 1) % rows.length);
         return;
       }
       if (e.key === "ArrowUp") {
+        setArmed(null);
         if (!empty) setSelected((i) => (i - 1 + rows.length) % rows.length);
         return;
       }
@@ -78,15 +92,22 @@ export function StashPanel({ entries, onPop, onDelete, onClose }: StashPanelProp
       if (!entry) return;
       if (e.key === "Enter") {
         // v2's select removes + hands the entry over + clears the dialog.
+        setArmed(null);
         onPop(entry);
         onClose();
         return;
       }
+      // Backspace/Delete: two-tap destructive delete (R8).
+      if (armed !== selected) {
+        setArmed(selected);
+        return;
+      }
+      setArmed(null);
       onDelete(entry);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [rows, selected, onPop, onDelete, onClose]);
+  }, [rows, selected, armed, onPop, onDelete, onClose]);
 
   // Click-outside dismisses. Clicks on the toggle that opened the panel are
   // exempt (`data-stash-panel-trigger`), else the dismiss-then-reopen
@@ -147,10 +168,15 @@ export function StashPanel({ entries, onPop, onDelete, onClose }: StashPanelProp
             <>
               ↑↓ select{" · "}
               <span className="text-[color:var(--text-weak)]">↵</span> restore{" · "}
-              <span className="text-[color:var(--text-weak)]">⌫</span> delete{" · "}
+              <span className="text-[color:var(--text-weak)]">⌫</span> twice delete{" · "}
             </>
           )}
           <span className="text-[color:var(--text-weak)]">esc</span> close
+          {armed !== null && (
+            <span className="ml-2 text-[color:var(--surface-critical-strong)]">
+              press ⌫ again to delete
+            </span>
+          )}
         </p>
       </div>
     </div>

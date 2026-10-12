@@ -1,3 +1,5 @@
+import { normalizeAttentionConfig, type AttentionConfig } from "./lib/attention";
+
 /**
  * How often the transcript repaints while a run is streaming:
  *  - `full`    — every 16ms batch (token by token, TUI parity).
@@ -13,6 +15,14 @@ export type Prefs = {
   showToolDetails: boolean;
   showTimestamps: boolean;
   streamMode: StreamMode;
+  /** R12: auto-accept permission requests without a prompt. */
+  autoAcceptPermissions: boolean;
+  /** R12: render permission requests full-screen instead of inline. */
+  permissionFullscreen: boolean;
+  /** R12: wrap long lines in the diff viewer. */
+  diffWrap: boolean;
+  /** R5 attention / notifications config (owned by lib/attention.ts). */
+  attention: AttentionConfig;
 };
 
 const DEFAULTS: Prefs = {
@@ -20,6 +30,10 @@ const DEFAULTS: Prefs = {
   showToolDetails: true,
   showTimestamps: false,
   streamMode: "full",
+  autoAcceptPermissions: false,
+  permissionFullscreen: false,
+  diffWrap: false,
+  attention: { enabled: false, notifications: true, sound: true, volume: 0.6 },
 };
 const STORAGE_KEY = "webui.prefs";
 
@@ -50,6 +64,8 @@ function load(): Prefs {
     const merged: Prefs = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Prefs>) };
     // Guard a hand-edited/garbage value; anything unknown falls back to full.
     if (!STREAM_MODES.includes(merged.streamMode)) merged.streamMode = "full";
+    // R5: coerce a stored/partial attention config into a complete, valid one.
+    merged.attention = normalizeAttentionConfig(merged.attention);
     return merged;
   } catch {
     return { ...DEFAULTS };

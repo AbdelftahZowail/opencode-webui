@@ -15,6 +15,7 @@ import {
   refreshMcpStatus,
   subscribeMcpStatus,
 } from "../lib/mcpStatus";
+import { useStore } from "../store";
 
 /**
  * MCP status as a header indicator.
@@ -46,9 +47,17 @@ function statusLabel(status: McpStatus): string {
 export function McpIndicator() {
   const { servers, error } = useSyncExternalStore(subscribeMcpStatus, getMcpStatus);
   const [open, setOpen] = useState(false);
+  // External open path (R5): a toast's "Open MCP servers" action bumps the
+  // uiSignals.mcp counter; the popover opens on each increment. Same one-shot
+  // tick idiom as HelpDialog / the pickers.
+  const mcpTick = useStore((s) => s.uiSignals.mcp);
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (mcpTick) setOpen(true);
+  }, [mcpTick]);
 
   useEffect(() => {
     // Idempotent: the first mount anywhere starts the one global poller; later

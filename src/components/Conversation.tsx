@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { ArrowUp, Menu, X } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowUp, Check, Copy, Menu, X } from "lucide-react";
 import {
   applyRevertView,
   childSessionsOf,
@@ -19,17 +19,17 @@ import {
   type LiveAssistant,
   type LiveContentPart,
 } from "../store";
-import type { MessageInfo } from "../api/types";
+import type { AssistantMessage, MessageInfo } from "../api/types";
 import { Target, autoRegister } from "../extensions/registry";
 import { Slot } from "../extensions/slots";
 import {
   MessageScroller,
-  MessageScrollerButton,
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
   MessageScrollerViewport,
   useMessageScroller,
+  useMessageScrollerScrollable,
   useMessageScrollerVisibility,
 } from "./ui/message-scroller";
 import { Badge } from "./ui/badge";
@@ -37,6 +37,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { useKeyboardOpen } from "../hooks/useKeyboardOpen";
 import { McpIndicator } from "./McpIndicator";
 import { MessageItem, MessagePart } from "./MessageItem";
+import "./TurnTokens";
 import { PendingRequestsPanel } from "./PendingRequestsPanel";
 import { QueueStrip } from "./QueueStrip";
 import { RunsPanel } from "./RunsPanel";
@@ -45,6 +46,15 @@ import { SessionMenu } from "./SessionMenu";
 import { SubagentStrip } from "./SubagentStrip";
 import { ThemePicker } from "./ThemePicker";
 import { WorkspacePicker } from "./WorkspacePicker";
+import { copyText } from "./markdown/clipboard";
+import { notify } from "../lib/notify";
+import {
+  collectRevertDetail,
+  lastAssistantResponseText,
+  turnSteps,
+  type RevertDetail,
+  type TurnTokenStep,
+} from "../lib/grouping";
 
 /** In-pane navigation: goes through the focused pane's surface. */
 type NavigateFn = (sessionID: string | null) => void;
@@ -161,6 +171,12 @@ export function Conversation({
   const kbOpen = useKeyboardOpen();
   const messages = useMemo(
     () => applyRevertView(allMessages, revertMarker),
+    [allMessages, revertMarker],
+  );
+  // R9 — staged-revert detail: how many messages the cut drops and which
+  // files they touched (derived from the FULL history, not the cut view).
+  const revertDetail = useMemo(
+    () => collectRevertDetail(allMessages, revertMarker),
     [allMessages, revertMarker],
   );
 
@@ -314,26 +330,13 @@ export function Conversation({
       {!isDraftSession(sessionID) && <SubagentStrip sessionID={sessionID} onNavigate={onNavigate} />}
 
       <MessageScrollerProvider defaultScrollPosition="end" autoScroll>
-        <div className="relative flex flex-1 flex-col overflow-hidden">
-          <MessageScroller className="flex-1">
-            <MessageScrollerViewport>
-              {/* The 2s poll (mergeFetchedMessages) replaces the messages array
-                  even when content is identical; without this guard every poll
-                  re-renders the whole transcript, re-runs the scroller's stick
-                  logic and toggles its data-autoscrolling attribute — the
-                  flicker the user sees as data-autoscroll appearing/disappearing. */}
-              <TranscriptList
-                sessionID={sessionID}
-                messages={messages}
-                live={live}
-                running={running}
-              />
-            </MessageScrollerViewport>
-            <MessageScrollerButton direction="end" />
-            <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
-          </MessageScroller>
-          <UserMessageRail messages={messages} />
-        </div>
+        <TranscriptScroller
+          sessionID={sessionID}
+          messages={messages}
+          live={live}
+          running={running}
+          revertDetail={revertDetail}
+        />
       </MessageScrollerProvider>
 
       {/* Mobile keyboard: every strip above the input box docks away while
@@ -426,6 +429,287 @@ function ScrollToEndOnUserSend({
     if (last?.type === "user") scrollToEnd({ behavior: "smooth" });
   }, [sessionID, messages, scrollToEnd]);
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// R9 — tail-mount + backfill + per-session scroll anchor
+// ---------------------------------------------------------------------------
+
+/**
+ * Below this many rows the transcript mounts ALL rows (as before) — the
+ * scroller's `content-visibility:auto` already makes off-screen rows cheap, and
+ * a full DOM keeps search / rail / highlight navigation simple. At/above it the
+ * transcript mounts only the tail and backfills in chunks, so a very long
+ * session never carries thousands of live nodes.
+ */
+const WINDOW_THRESHOLD = 120;
+/** Rows mounted at the tail once windowing is engaged. */
+const WINDOW_TAIL = 40;
+/** Rows added per backfill step (both directions). */
+const WINDOW_BACKFILL = 60;
+/** How close (px) to an edge a scroll must get to trigger a backfill. */
+const WINDOW_EDGE = 700;
+
+interface ScrollWin {
+  start: number;
+  end: number;
+}
+
+/** Mounted row window per session (survives a split-pane remount). */
+const windowMemory = new Map<string, ScrollWin>();
+/** Topmost-visible row + at-end flag per session (the scroll anchor). */
+const anchorMemory = new Map<string, { topId: string | null; atEnd: boolean }>();
+
+function tailWindow(total: number): ScrollWin {
+  return { start: Math.max(0, total - WINDOW_TAIL), end: total };
+}
+
+function initialWindow(sessionID: string, total: number): ScrollWin {
+  const saved = windowMemory.get(sessionID);
+  if (saved) {
+    const start = Math.min(Math.max(0, saved.start), total);
+    const end = Math.min(Math.max(saved.end, start), total);
+    return { start, end };
+  }
+  return total > WINDOW_THRESHOLD ? tailWindow(total) : { start: 0, end: total };
+}
+
+/**
+ * Owns the transcript scroller: the mounted-row window (tail mount + backfill),
+ * the per-session scroll anchor (restore on switch-back) and the "Jump to
+ * latest ↓" control. Sits INSIDE `MessageScrollerProvider` so it can use the
+ * scroller hooks. Falls back to mounting everything under `WINDOW_THRESHOLD`.
+ */
+function TranscriptScroller({
+  sessionID,
+  messages,
+  live,
+  running,
+  revertDetail,
+}: {
+  sessionID: string;
+  messages: MessageInfo[];
+  live: LiveAssistant[];
+  running: boolean;
+  revertDetail: RevertDetail | null;
+}) {
+  const total = messages.length;
+  const { scrollToEnd, scrollToMessage } = useMessageScroller();
+  const scrollable = useMessageScrollerScrollable();
+  const { visibleMessageIds } = useMessageScrollerVisibility();
+  const [win, setWin] = useState<ScrollWin>(() => initialWindow(sessionID, total));
+
+  // Latest values for the stable handlers/effects below.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const totalRef = useRef(total);
+  totalRef.current = total;
+
+  useEffect(() => {
+    windowMemory.set(sessionID, win);
+  }, [sessionID, win]);
+
+  // Load the saved window on a session switch; keep following the tail while
+  // the window already reaches it, leave history rows alone otherwise.
+  const winSessionRef = useRef(sessionID);
+  const prevTotalRef = useRef(total);
+  useEffect(() => {
+    if (winSessionRef.current !== sessionID) {
+      winSessionRef.current = sessionID;
+      prevTotalRef.current = total;
+      setWin(initialWindow(sessionID, total));
+      return;
+    }
+    const prevTotal = prevTotalRef.current;
+    prevTotalRef.current = total;
+    // Mount / non-growth renders keep whatever window state already holds
+    // (including a restored saved window); only an actual row-count change
+    // re-derives it.
+    if (prevTotal === total) return;
+    setWin((w) => {
+      if (total <= WINDOW_THRESHOLD) {
+        return w.start === 0 && w.end === total ? w : { start: 0, end: total };
+      }
+      if (w.end >= prevTotal) {
+        const next = tailWindow(total);
+        return next.start === w.start && next.end === w.end ? w : next;
+      }
+      const start = Math.min(w.start, total);
+      const end = Math.min(Math.max(w.end, start), total);
+      return start === w.start && end === w.end ? w : { start, end };
+    });
+  }, [sessionID, total]);
+
+  // Backfill in 60-row chunks when a scroll nears either edge.
+  const onScroll = useCallback((vp: HTMLElement) => {
+    const count = totalRef.current;
+    const nearTop = vp.scrollTop < WINDOW_EDGE;
+    const nearBottom = vp.scrollTop + vp.clientHeight > vp.scrollHeight - WINDOW_EDGE;
+    setWin((w) => {
+      let start = w.start;
+      let end = w.end;
+      if (nearTop && start > 0) start = Math.max(0, start - WINDOW_BACKFILL);
+      if (nearBottom && end < count) end = Math.min(count, end + WINDOW_BACKFILL);
+      return start === w.start && end === w.end ? w : { start, end };
+    });
+  }, []);
+
+  // Expand the mounted window to include one message (rail jumps, search hits).
+  const reveal = useCallback((id: string) => {
+    const idx = messagesRef.current.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    setWin((w) => {
+      if (idx >= w.start && idx < w.end) return w;
+      return { start: Math.min(w.start, idx), end: Math.max(w.end, idx + 1) };
+    });
+  }, []);
+
+  // Search navigation (Sidebar/SearchPanel → store) must find its target even
+  // when it sits outside the mounted window — reveal before the retry loop runs.
+  const highlightID = useStore((s) => s.highlightMessageID);
+  const highlightSID = useStore((s) => s.highlightSessionID);
+  useEffect(() => {
+    if (!highlightID || highlightSID !== sessionID) return;
+    reveal(highlightID);
+  }, [highlightID, highlightSID, sessionID, total, reveal]);
+
+  // Scroll anchor: record the topmost visible row + at-end each time it moves.
+  useEffect(() => {
+    const topId = visibleMessageIds[0] ?? null;
+    const list = messagesRef.current;
+    if (topId && !list.some((m) => m.id === topId)) return; // stale observer
+    if (!topId && list.length > 0) return; // pending first measure
+    anchorMemory.set(sessionID, { topId, atEnd: scrollable.end && win.end >= list.length });
+  }, [sessionID, visibleMessageIds, scrollable.end, win.end]);
+
+  // Restore a saved mid-history anchor when the session changes (an at-end
+  // anchor needs nothing — the scroller's defaultScrollPosition handles it).
+  const restoreSessionRef = useRef(sessionID);
+  const pendingRestoreRef = useRef<{ topId: string | null; atEnd: boolean } | null>(null);
+  if (restoreSessionRef.current !== sessionID) {
+    restoreSessionRef.current = sessionID;
+    pendingRestoreRef.current = anchorMemory.get(sessionID) ?? null;
+  }
+  useEffect(() => {
+    const saved = pendingRestoreRef.current;
+    pendingRestoreRef.current = null;
+    if (!saved) return;
+    let raf = 0;
+    let tries = 0;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const list = messagesRef.current;
+      if (list.length === 0) {
+        if (++tries >= 180) return;
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      if (saved.atEnd) {
+        // Restore "pinned to the bottom": mount the tail + land at the end.
+        setWin(list.length > WINDOW_THRESHOLD ? tailWindow(list.length) : { start: 0, end: list.length });
+        raf = requestAnimationFrame(() => {
+          if (!cancelled) scrollToEnd({ behavior: "auto" });
+        });
+        return;
+      }
+      if (!saved.topId) return;
+      if (list.some((m) => m.id === saved.topId)) {
+        reveal(saved.topId);
+        raf = requestAnimationFrame(() => {
+          if (!cancelled) scrollToMessage(saved.topId!, { align: "start" });
+        });
+        return;
+      }
+      if (++tries >= 180) return;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionID]);
+
+  const atTail = win.end >= total;
+  const showJump = !atTail || !scrollable.end;
+  const jumpToLatest = () => {
+    setWin(total > WINDOW_THRESHOLD ? tailWindow(total) : { start: 0, end: total });
+    scrollToEnd({ behavior: "smooth" });
+  };
+
+  return (
+    <div className="relative flex flex-1 flex-col overflow-hidden">
+      <MessageScroller className="flex-1">
+        <MessageScrollerViewport
+          preserveScrollOnPrepend
+          onScroll={(e) => onScroll(e.currentTarget)}
+        >
+          {/* The 2s poll (mergeFetchedMessages) replaces the messages array
+              even when content is identical; without the TranscriptList memo
+              guard every poll re-renders the whole transcript, re-runs the
+              scroller's stick logic and toggles its data-autoscrolling
+              attribute — the flicker the user sees as data-autoscroll
+              appearing/disappearing. */}
+          <TranscriptList
+            sessionID={sessionID}
+            messages={messages}
+            live={live}
+            running={running}
+            win={win}
+            revertDetail={revertDetail}
+          />
+        </MessageScrollerViewport>
+        <ScrollToEndOnUserSend sessionID={sessionID} messages={messages} />
+        {showJump && (
+          <button
+            type="button"
+            data-oc-jump-latest
+            onClick={jumpToLatest}
+            className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 cursor-pointer rounded-full border border-[var(--border-base)] bg-[var(--background-base)] px-3 py-1 text-xs text-[var(--text-weak)] shadow-md transition-colors hover:text-[var(--text-strong)]"
+          >
+            Jump to latest ↓
+          </button>
+        )}
+      </MessageScroller>
+      <UserMessageRail messages={messages} onReveal={reveal} />
+    </div>
+  );
+}
+
+/** R9 — the staged-revert detail banner: a message count + affected files. */
+function RevertDetailBanner({ detail }: { detail: RevertDetail }) {
+  const shown = detail.files.slice(0, 12);
+  const extra = detail.files.length - shown.length;
+  return (
+    <div
+      data-oc-revert-detail
+      data-oc-revert-count={detail.count}
+      className="w-full rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-warning-weak)] px-3 py-2 text-xs text-[var(--text-weak)]"
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <span className="font-medium text-[var(--text-strong)]">
+          Reverting {detail.count} message{detail.count === 1 ? "" : "s"}
+        </span>
+        {detail.files.length > 0 && (
+          <span className="text-[var(--text-weaker)]">
+            · {detail.files.length} file{detail.files.length === 1 ? "" : "s"} affected
+          </span>
+        )}
+      </div>
+      {shown.length > 0 && (
+        <ul className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[10px] text-[var(--text-weaker)]">
+          {shown.map((file) => (
+            <li key={file} className="max-w-full truncate">
+              {file}
+            </li>
+          ))}
+          {extra > 0 && <li>+{extra} more</li>}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -552,6 +836,12 @@ function transcriptFingerprint(messages: MessageInfo[], live: LiveAssistant[]): 
     if (m.type === "assistant") {
       push(m.content.length);
       push(m.finish ?? "");
+      // Per-turn token line (R9) must invalidate when usage lands.
+      if (m.tokens) {
+        push(`${m.tokens.input}:${m.tokens.cache.read}:${m.tokens.cache.write}:${m.tokens.output}:${m.tokens.reasoning}`);
+      } else {
+        push("");
+      }
       for (const p of m.content) {
         if (p.type === "tool") {
           push(`t${p.id}:${p.state.status}`);
@@ -610,12 +900,25 @@ interface TranscriptProps {
   messages: MessageInfo[];
   live: LiveAssistant[];
   running: boolean;
+  /** Mounted-row window (R9 tail mount + backfill). */
+  win: ScrollWin;
+  /** Staged-revert detail banner data, or null. */
+  revertDetail: RevertDetail | null;
+}
+
+/** Value identity for the revert banner (avoids re-render on a new object). */
+function revertKey(detail: RevertDetail | null): string {
+  if (!detail) return "";
+  return `${detail.count}:${detail.files.join(",")}`;
 }
 
 function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
   return (
     a.sessionID === b.sessionID &&
     a.running === b.running &&
+    a.win.start === b.win.start &&
+    a.win.end === b.win.end &&
+    revertKey(a.revertDetail) === revertKey(b.revertDetail) &&
     transcriptFingerprint(a.messages, a.live) === transcriptFingerprint(b.messages, b.live)
   );
 }
@@ -625,7 +928,9 @@ function areTranscriptsEqual(a: TranscriptProps, b: TranscriptProps): boolean {
  * polls must not touch the DOM at all, so the scroller's MutationObserver
  * never fires and its autoscroll/stick cycle stays quiescent.
  */
-const TranscriptList = React.memo(function TranscriptList({ sessionID, messages, live, running }: TranscriptProps) {
+const TranscriptList = React.memo(function TranscriptList({ sessionID, messages, live, running, win, revertDetail }: TranscriptProps) {
+  const start = Math.min(win.start, messages.length);
+  const end = Math.min(win.end, messages.length);
   return (
     <MessageScrollerContent className="mx-auto w-full max-w-3xl px-3 py-4 sm:px-4 sm:py-6" data-oc-transcript>
       {messages.length === 0 && live.length === 0 && !running && (
@@ -642,13 +947,13 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
         </>
       )}
       {(() => {
-        let prevAssistant = false;
+        let prevAssistant = start > 0 && messages[start - 1]?.type === "assistant";
         const rows: ReactNode[] = [];
 
         // Model-switched notes render like their agent/location
         // siblings (muted one-liner in MessageItem); dropping them
         // hid real history events.
-        for (let i = 0; i < messages.length; i++) {
+        for (let i = start; i < end; i++) {
           const message = messages[i]!;
           const isAssistant = message.type === "assistant";
           const compact = isAssistant && prevAssistant;
@@ -656,13 +961,17 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
           const next = messages[i + 1] as MessageInfo | undefined;
           const isTail = isAssistant && next?.type !== "assistant";
           let responseText: string | undefined;
+          let turnTokens: TurnTokenStep[] | undefined;
           if (isTail) {
             // Walk backwards to collect the whole consecutive assistant block
-            // so the copy at its tail copies the entire response, not just the final chunk.
+            // so the copy at its tail copies the entire response, not just the
+            // final chunk; the same block is the turn for its token line (R9).
             const parts: string[] = [];
+            const block: AssistantMessage[] = [];
             for (let j = i; j >= 0; j--) {
               const m = messages[j] as MessageInfo;
               if (m.type !== "assistant") break;
+              block.unshift(m);
               const textParts = (m as { content?: { type: string; text?: string }[] }).content
                 ?.filter((p) => p.type === "text" && p.text?.trim())
                 .map((p) => p.text!.trim());
@@ -670,10 +979,21 @@ const TranscriptList = React.memo(function TranscriptList({ sessionID, messages,
             }
             const combined = parts.join("\n\n");
             if (combined) responseText = combined;
+            const steps = turnSteps(block);
+            if (steps.length > 0) turnTokens = steps;
           }
           rows.push(
             <MessageScrollerItem key={message.id} messageId={message.id} id={`msg-${message.id}`}>
-              <MessageItem message={message} compact={compact} sessionID={sessionID} isTail={isTail} responseText={responseText} />
+              <MessageItem message={message} compact={compact} sessionID={sessionID} isTail={isTail} responseText={responseText} turnTokens={turnTokens} />
+            </MessageScrollerItem>,
+          );
+        }
+
+        // R9 — the staged-revert detail sits at the cut (end of the view).
+        if (revertDetail) {
+          rows.push(
+            <MessageScrollerItem key="revert-detail">
+              <RevertDetailBanner detail={revertDetail} />
             </MessageScrollerItem>,
           );
         }
@@ -743,6 +1063,12 @@ function Header({
   // instead of a title/id pair.
   const isDraft = isDraftSession(sessionID);
   const draftWorkspace = useStore((s) => s.draftWorkspace);
+  // R9 copy variants: the last assistant response's prose + the session id.
+  const sessionMessages = useStore((s) => s.messages[sessionID] ?? []);
+  const lastResponse = useMemo(
+    () => lastAssistantResponseText(sessionMessages),
+    [sessionMessages],
+  );
   return (
     <div className="sticky top-0 z-10 flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-base)] bg-[var(--background-base)] px-2.5 py-2 sm:px-4 sm:py-2.5" data-oc-session-header>
       <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
@@ -785,9 +1111,7 @@ function Header({
             {draftWorkspace ? workspaceLabel(draftWorkspace) : "default workspace"}
           </span>
         ) : (
-          <span className="hidden font-mono text-xs text-[var(--text-weaker)] lg:inline">
-            {sessionID.slice(0, 12)}
-          </span>
+          <CopySessionID id={sessionID} />
         )}
         {queued && !running && (
           <Badge
@@ -817,10 +1141,60 @@ function Header({
         <McpIndicator />
         <WorkspacePicker sessionID={sessionID} />
         <ThemePicker />
+        {lastResponse.trim() !== "" && <CopyLastResponse text={lastResponse} />}
         <SessionMenu sessionID={sessionID} />
         <Slot id="conversation.header.actions" sessionID={sessionID} />
       </div>
     </div>
+  );
+}
+
+/** Shared copy-with-feedback hook for the header's two copy variants (R9). */
+function useCopy(): [boolean, (text: string) => void] {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback((text: string) => {
+    void copyText(text).then((ok) => {
+      if (!ok) {
+        notify({ title: "Copy failed", variant: "destructive" });
+        return;
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    });
+  }, []);
+  return [copied, copy];
+}
+
+/** R9 — copy the session id (the header's id label becomes the affordance). */
+function CopySessionID({ id }: { id: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <button
+      type="button"
+      data-oc-copy-session-id
+      onClick={() => copy(id)}
+      title={copied ? "Session ID copied" : `Copy session ID: ${id}`}
+      className="hidden cursor-pointer font-mono text-xs text-[var(--text-weaker)] transition-colors hover:text-[var(--text-strong)] lg:inline"
+    >
+      {copied ? "copied" : id.slice(0, 12)}
+    </button>
+  );
+}
+
+/** R9 — copy the last assistant response's prose. */
+function CopyLastResponse({ text }: { text: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <button
+      type="button"
+      data-oc-copy-last-response
+      onClick={() => copy(text)}
+      title={copied ? "Copied" : "Copy last response"}
+      aria-label="Copy last response"
+      className="flex size-6 cursor-pointer items-center justify-center rounded-md text-[var(--text-weaker)] transition-colors hover:bg-[color:var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+    >
+      {copied ? <Check className="size-3.5 text-[var(--text-on-success-base)]" /> : <Copy className="size-3.5" />}
+    </button>
   );
 }
 
@@ -891,12 +1265,12 @@ function LiveAssistantView({
  *   not mounted still navigates via a proportional fallback, and the exact
  *   placement is re-asserted once the layout settles.
  */
-function UserMessageRail({ messages }: { messages: MessageInfo[] }) {
+function UserMessageRail({ messages, onReveal }: { messages: MessageInfo[]; onReveal?: (id: string) => void }) {
   const userMsgs = useMemo(() => messages.filter((m) => m.type === "user"), [messages]);
   // A single turn is not navigation — one dot is noise. Two or more is where
   // the rail starts earning its space.
   if (userMsgs.length < 2) return null;
-  return <MessageRail messages={messages} userMsgs={userMsgs} />;
+  return <MessageRail messages={messages} userMsgs={userMsgs} onReveal={onReveal} />;
 }
 
 interface RailDotProps {
@@ -956,9 +1330,11 @@ const RailDot = React.memo(function RailDot({ id, index, total, active, text, on
 function MessageRail({
   messages,
   userMsgs,
+  onReveal,
 }: {
   messages: MessageInfo[];
   userMsgs: MessageInfo[];
+  onReveal?: (id: string) => void;
 }) {
   const { scrollToMessage } = useMessageScroller();
   const { visibleMessageIds } = useMessageScrollerVisibility();
@@ -974,8 +1350,8 @@ function MessageRail({
 
   // Latest values for the stable click handler (below), so dot props stay
   // referentially stable and memoization holds.
-  const latest = useRef({ messages, order, scrollToMessage });
-  latest.current = { messages, order, scrollToMessage };
+  const latest = useRef({ messages, order, scrollToMessage, onReveal });
+  latest.current = { messages, order, scrollToMessage, onReveal };
 
   // Active = the last user turn at or above the topmost visible message.
   // Deriving it from viewport visibility (not `getElementById`) keeps it
@@ -1021,35 +1397,47 @@ function MessageRail({
 
   const jumpTo = useCallback((id: string) => {
     cancelJump.current();
-    const { messages: list, order: idxOf, scrollToMessage: scroll } = latest.current;
-    const pane = railRef.current?.closest(".pane-surface") as HTMLElement | null;
-    const viewport =
-      pane?.querySelector<HTMLElement>('[data-slot="message-scroller-viewport"]') ?? null;
-    const selector = `[data-message-id="${CSS.escape(id)}"]`;
+    // R9: the transcript may be windowed — ask it to mount the target first,
+    // then scroll on the next frame (the reveal is a React state update).
+    latest.current.onReveal?.(id);
+    const raf = requestAnimationFrame(() => {
+      const { messages: list, order: idxOf, scrollToMessage: scroll } = latest.current;
+      const pane = railRef.current?.closest(".pane-surface") as HTMLElement | null;
+      const viewport =
+        pane?.querySelector<HTMLElement>('[data-slot="message-scroller-viewport"]') ?? null;
+      const selector = `[data-message-id="${CSS.escape(id)}"]`;
 
-    if (pane?.querySelector(selector)) {
-      // Mounted (always today): let the scroller own the landing — it also
-      // grows the end spacer so even the last turn can reach the top.
-      scroll(id, { align: "start", behavior: "smooth" });
-    } else {
-      // Not mounted (a future virtualized transcript): land proportionally so
-      // the click still moves, then converge below once the item mounts.
-      const idx = idxOf.get(id);
-      if (viewport && idx != null && list.length > 1) {
-        const max = viewport.scrollHeight - viewport.clientHeight;
-        if (max > 0) viewport.scrollTo({ top: (idx / (list.length - 1)) * max, behavior: "smooth" });
+      if (pane?.querySelector(selector)) {
+        // Mounted: let the scroller own the landing — it also grows the end
+        // spacer so even the last turn can reach the top.
+        scroll(id, { align: "start", behavior: "smooth" });
+      } else {
+        // Still not mounted: land proportionally so the click still moves,
+        // then converge below once the item mounts.
+        const idx = idxOf.get(id);
+        if (viewport && idx != null && list.length > 1) {
+          const max = viewport.scrollHeight - viewport.clientHeight;
+          if (max > 0) viewport.scrollTo({ top: (idx / (list.length - 1)) * max, behavior: "smooth" });
+        }
       }
-    }
 
-    // Converge onto the exact position: a far target's measured offset is only
-    // a content-visibility estimate, so one jump can miss (the "click once,
-    // wait, click again" bug). Starting immediately takes over from the
-    // scroller's smooth animation and holds the target through the buffer
-    // settling.
-    if (!viewport) return;
-    const el = pane?.querySelector<HTMLElement>(selector) ?? null;
-    const cancelConverge = el ? convergeScroll(viewport, el, { align: "start" }) : null;
-    cancelJump.current = () => cancelConverge?.();
+      // Converge onto the exact position: a far target's measured offset is
+      // only a content-visibility estimate, so one jump can miss (the "click
+      // once, wait, click again" bug). Starting immediately takes over from
+      // the scroller's smooth animation and holds the target through the
+      // buffer settling.
+      if (!viewport) {
+        cancelJump.current = () => cancelAnimationFrame(raf);
+        return;
+      }
+      const el = pane?.querySelector<HTMLElement>(selector) ?? null;
+      const cancelConverge = el ? convergeScroll(viewport, el, { align: "start" }) : null;
+      cancelJump.current = () => {
+        cancelAnimationFrame(raf);
+        cancelConverge?.();
+      };
+    });
+    cancelJump.current = () => cancelAnimationFrame(raf);
   }, []);
 
   return (

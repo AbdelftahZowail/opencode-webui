@@ -7,8 +7,8 @@
  * spellings (`js`, `ts`, `py`, `c++`, `c#`, `sh`) reach the right grammar.
  *
  * This module is intentionally tiny and dependency-free: the markdown pipeline
- * imports `resolveLanguage`/`specialBlockKind` from the main bundle, while the
- * shiki engine itself stays behind `./shiki` (dynamic import).
+ * imports `resolveLanguage` from the main bundle, while the shiki engine
+ * itself stays behind `./shiki` (dynamic import).
  */
 export const LANGUAGE_LOADERS = {
   javascript: () => import("shiki/langs/javascript.mjs").then((m) => m.default),
@@ -134,21 +134,4 @@ export function resolveLanguage(lang: string | undefined): KnownLanguage | null 
   if (!key) return null;
   const canonical = ALIASES[key] ?? key;
   return canonical in LANGUAGE_LOADERS ? (canonical as KnownLanguage) : null;
-}
-
-/** Block renderers keyed by fence info-string (R2), separate from highlighting. */
-export type SpecialBlock = "mermaid" | "latex";
-
-const SPECIAL_BLOCKS: Record<string, SpecialBlock> = {
-  mermaid: "mermaid",
-  mmd: "mermaid",
-  latex: "latex",
-  tex: "latex",
-  math: "latex",
-  katex: "latex",
-};
-
-export function specialBlockKind(lang: string | undefined): SpecialBlock | null {
-  if (!lang) return null;
-  return SPECIAL_BLOCKS[lang.trim().toLowerCase()] ?? null;
 }

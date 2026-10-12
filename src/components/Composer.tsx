@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ListTree, Paperclip, Pencil, Send, Square, Terminal, X } from "lucide-react";
+import { Archive, ClipboardPaste, ListTree, Paperclip, Pencil, Send, Square, Terminal, X } from "lucide-react";
 import { api } from "../api/client";
-import type { FsEntry, LocationInfo, ProjectInfo, PromptFile, PtyInfo, ShellInfo } from "../api/client";
+import type { PromptFile, PtyInfo, ShellInfo } from "../api/client";
 import type { AgentInfo, CommandInfo, ModelInfo, SkillInfo, UserMessage } from "../api/types";
 import {
   attachmentPromptFile,
@@ -27,13 +27,14 @@ import {
   isDraftSession,
   loadSessionDetail,
   materializeDraft,
+  moveSessionToDirectory,
   newSession,
   closeRunsPanel,
   openDiffViewer,
   openRunsPanel,
   openStashPanel,
+  openTimeline,
   redoSession,
-  refreshSessions,
   refreshStash,
   renameSession,
   requestInterrupt,
@@ -43,6 +44,8 @@ import {
   sendPromptWithFiles,
   sendShell,
   signalUI,
+  startDraftSession,
+  stashPopEntry,
   stashPromptText,
   switchAgent,
   switchModel,
@@ -56,12 +59,29 @@ import { loadDraft, saveDraft } from "../lib/drafts";
 import { recordModelUsed, resolveNewSessionModel } from "../lib/modelMemory";
 import { notify } from "../lib/notify";
 import { hasCoarsePointer } from "../lib/platform";
+import { findHome } from "../lib/workspaces";
+import { contractHome, resolveDirectory } from "../lib/dirRecents";
+import {
+  clearPasteBlocks,
+  expandAllPastes,
+  expandPlaceholder,
+  loadPasteBlocks,
+  makePasteBlock,
+  pasteLabel,
+  removePlaceholder,
+  savePasteBlocks,
+  shouldCollapsePaste,
+  type PasteBlock,
+} from "../lib/paste";
 import { STREAM_MODE_SHORT, getPrefs, nextStreamMode, setPref, subscribePrefs, type Prefs } from "../prefs";
 import { Target, autoRegister, getContributions, subscribeRegistry, type SlashContribution } from "../extensions/registry";
 import { Slot } from "../extensions/slots";
 import { openConnect } from "./ConnectDialog";
 import { AgentPicker, ModelPicker, VariantPicker } from "./Pickers";
-import { FilePicker } from "./FilePicker";
+import { FilePicker, type MentionPick } from "./FilePicker";
+// Side-effect import: registers the `directory.picker` target rendered via
+// <Target> below (autoRegister runs on module load).
+import "./DirectoryPicker";
 import { downloadTranscript, formatTranscript } from "./SessionMenu";
 import { Spinner } from "./ui";
 import { Button } from "@/components/ui/button";
@@ -297,6 +317,8 @@ export function Composer({
   const [dragDepth, setDragDepth] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [shellMode, setShellMode] = useState(false);
+  /** R8: pasted blocks collapsed to `[Pasted ~N lines]` placeholders. */
+  const [pasteBlocks, setPasteBlocks] = useState<PasteBlock[]>(() => loadPasteBlocks(sessionID));
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const running = useStore((s) => s.running[sessionID] ?? false);
@@ -312,6 +334,10 @@ export function Composer({
   useEffect(() => subscribeRegistry(() => setRegistryVersion((v) => v + 1)), []);
   const slashExtensions = useMemo(() => getContributions<SlashContribution>("slash"), [registryVersion]);
   const sessionLocation = useStore((s) => s.sessions.find((x) => x.id === sessionID)?.location?.directory);
+  const sessions = useStore((s) => s.sessions);
+  // Home directory for `~` expansion (derived from known workspaces, the same
+  // helper the sidebar uses). R8 directory completion + `/cd`.
+  const home = useMemo(() => findHome(sessions.map((s) => s.location?.directory)), [sessions]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /** Hidden `<input type=file>` behind the attachment (paperclip) button. */
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -351,6 +377,7 @@ export function Composer({
     if (textSessionRef.current === sessionID) return;
     textSessionRef.current = sessionID;
     setText(loadDraft(sessionID));
+    setPasteBlocks(loadPasteBlocks(sessionID));
   }, [sessionID]);
 
   // Persist the buffer whenever it changes — but never attribute a stale
@@ -359,6 +386,13 @@ export function Composer({
     if (textSessionRef.current !== sessionID) return;
     saveDraft(sessionID, text);
   }, [sessionID, text]);
+
+  // Collapsed pastes ride with the draft (R8) so a reload never sends the
+  // literal `[Pasted ~N lines]` placeholder instead of the pasted text.
+  useEffect(() => {
+    if (textSessionRef.current !== sessionID) return;
+    savePasteBlocks(sessionID, pasteBlocks);
+  }, [sessionID, pasteBlocks]);
 
   // Meta-row run indicators: child/subagent sessions of this session plus
   // live shells (backgrounded / currently-running commands) and PTYs.
@@ -391,7 +425,7 @@ export function Composer({
   const runsPanelOpen = useStore((s) => s.runsPanelOpen);
   const [skillsMenu, setSkillsMenu] = useState(false);
   const skillsMenuRef = useDismiss(skillsMenu, () => setSkillsMenu(false));
-  const [movePickerOpen, setMovePickerOpen] = useState(false);
+  const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const pendingEdit = useStore((s) => s.pendingEdit);
   const isEditingThisSession = pendingEdit?.sessionID === sessionID;
 
@@ -490,6 +524,7 @@ export function Composer({
   // runs panel — see composerHandoff.ts.
   const stashOpen = useStore((s) => s.stashPanelOpen);
   const stashCount = useStore((s) => s.stashEntries.length);
+  const stashEntries = useStore((s) => s.stashEntries);
 
   // The slash menu keys off the ACTIVE REGION — the buffer from index 0 up to
   // the caret. Typing "/" at position 0 of a longer buffer ("/" into "explain
@@ -509,6 +544,35 @@ export function Composer({
     dismissedAt !== slashRegion;
   const slashQuery = slashRegion.slice(1);
 
+  /**
+   * R8 `session.cd`: resolve a typed directory (`~`, `~/`, `../`, absolute are
+   * all handled by `resolveDirectory`) and move the session there — or, for a
+   * draft, set the home workspace new sessions open in. With no argument,
+   * open the directory picker. `/move` shares this exactly.
+   */
+  function applyDirectory(dir: string) {
+    if (isDraftSession(sessionID)) {
+      startDraftSession(dir);
+      notify({ title: `New sessions open in ${contractHome(dir, home)}` });
+      return;
+    }
+    void moveSessionToDirectory(sessionID, dir)
+      .then(() => notify({ title: `Moved to ${contractHome(dir, home)}` }))
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        notify({ title: `Move failed: ${msg}`, variant: "destructive" });
+      });
+  }
+
+  function runDirectory(args: string) {
+    const dir = resolveDirectory(args.trim(), { home, base: sessionLocation });
+    if (!dir) {
+      setDirPickerOpen(true);
+      return;
+    }
+    applyDirectory(dir);
+  }
+
   const slashActions = useMemo<SlashAction[]>(
     () => [
       {
@@ -524,31 +588,16 @@ export function Composer({
         run: () => go(null),
       },
       {
+        name: "cd",
+        aliases: ["chdir"],
+        description: "Change this session's directory",
+        run: (args) => runDirectory(args),
+      },
+      {
         name: "move",
+        aliases: ["workspace"],
         description: "Move session to another workspace",
-        run: (args) => {
-          const dir = args.trim();
-          if (isDraftSession(sessionID)) {
-            notify({ title: "Create a session first", variant: "destructive" });
-            return;
-          }
-          if (dir) {
-            void api
-              .moveSession(sessionID, dir)
-              .then(() => {
-                notify({ title: `Moved to ${dir}` });
-                void loadSessionDetail(sessionID);
-                void refreshSessions();
-              })
-              .catch((err: unknown) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                notify({ title: `Move failed: ${msg}`, variant: "destructive" });
-              });
-            return;
-          }
-          // No args → open the TUI-style directory picker dialog.
-          setMovePickerOpen(true);
-        },
+        run: (args) => runDirectory(args),
       },
       {
         name: "undo",
@@ -645,12 +694,26 @@ export function Composer({
         run: () => openDiffViewer(sessionID),
       },
       {
+        name: "timeline",
+        aliases: ["messages"],
+        description: "Jump to a message",
+        run: () => openTimeline(sessionID),
+      },
+      {
+        name: "stats",
+        description: "Open stats",
+        run: () => {
+          window.history.pushState({}, "", "/stats");
+          window.dispatchEvent(new Event("webui:navigate"));
+        },
+      },
+      {
         name: "help",
         description: "Help",
         run: () => signalUI("help"),
       },
     ],
-    [sessionID, prefs.showReasoning, prefs.showTimestamps, prefs.streamMode],
+    [sessionID, home, sessionLocation, prefs.showReasoning, prefs.showTimestamps, prefs.streamMode],
   );
 
   // Skills the engine also exposes as commands accept upstream's
@@ -848,36 +911,66 @@ export function Composer({
       );
   }
 
-  function handleFilePick(entry: FsEntry) {
+  /**
+   * `@`-mention pick (R8). Files keep their two existing flows (engine images
+   * become attachments; everything else stages file content). Agents, skills,
+   * MCP resources and reference aliases insert their mention token — the same
+   * contract the TUI's autocomplete uses for non-file references.
+   */
+  function handleMentionPick(pick: MentionPick) {
     const idx = text.lastIndexOf("@");
     if (idx === -1) return;
-    const imageMime = entry.type === "file" ? engineImageMimeFromName(entry.path) : undefined;
-    if (imageMime) {
-      // Engine-supported images can't ride the @file text-content flow —
-      // attach them as real image attachments and remove the "@query" token
-      // from the buffer. Unsupported "image" files (svg/avif/bmp/…) fall
-      // through to the normal @-file path so we never stage something the
-      // engine would silently drop.
-      setText(text.slice(0, idx) + text.slice(idx + 1 + (mentionQuery?.length ?? 0)));
+    const queryLen = mentionQuery?.length ?? 0;
+    const tail = text.slice(idx + 1 + queryLen);
+    if (pick.kind === "file" && pick.entry) {
+      const entry = pick.entry;
+      const imageMime = entry.type === "file" ? engineImageMimeFromName(entry.path) : undefined;
+      if (imageMime) {
+        // Engine-supported images can't ride the @file text-content flow —
+        // attach them as real image attachments and remove the "@query" token
+        // from the buffer. Unsupported "image" files (svg/avif/bmp/…) fall
+        // through to the normal @-file path so we never stage something the
+        // engine would silently drop.
+        setText(text.slice(0, idx) + tail);
+        refocusComposer();
+        api
+          .fsReadBytes(entry.path, sessionLocation)
+          .then((buf) => attachImageBytes(entry.path, buf))
+          .catch(() => notify({ title: "Could not read image", description: entry.path, variant: "destructive" }));
+        return;
+      }
+      const token = `@${entry.path}`;
+      setText(text.slice(0, idx) + token + " " + tail);
+      setPickedFiles((prev) => [...prev, { path: entry.path }]);
+      if (sessionLocation) {
+        void api
+          .fsRead(entry.path, sessionLocation)
+          .then((content) =>
+            setPickedFiles((prev) => prev.map((f) => (f.path === entry.path ? { path: f.path, content } : f))),
+          )
+          .catch(() => undefined);
+      }
       refocusComposer();
-      api
-        .fsReadBytes(entry.path, sessionLocation)
-        .then((buf) => attachImageBytes(entry.path, buf))
-        .catch(() => notify({ title: "Could not read image", description: entry.path, variant: "destructive" }));
       return;
     }
-    const token = `@${entry.path}`;
-    setText(text.slice(0, idx) + token + " ");
-    setPickedFiles((prev) => [...prev, { path: entry.path }]);
-    if (sessionLocation) {
-      void api
-        .fsRead(entry.path, sessionLocation)
-        .then((content) =>
-          setPickedFiles((prev) => prev.map((f) => (f.path === entry.path ? { path: f.path, content } : f))),
-        )
-        .catch(() => undefined);
-    }
+    // Agent / skill / MCP resource / reference alias: insert the mention token.
+    setText(text.slice(0, idx) + `${pick.mention} ` + tail);
     refocusComposer();
+  }
+
+  /** R8: expand a collapsed `[Pasted ~N lines]` block back into the buffer. */
+  function expandPaste(block: PasteBlock) {
+    const next = expandPlaceholder(text, pasteLabel(block.lines), block.text);
+    setText(next);
+    setCaret(next.length);
+    setPasteBlocks((prev) => prev.filter((b) => b.id !== block.id));
+    requestAnimationFrame(() => refocusComposer());
+  }
+
+  /** Drop a collapsed block and its placeholder without expanding it. */
+  function removePaste(block: PasteBlock) {
+    setText(removePlaceholder(text, pasteLabel(block.lines)));
+    setPasteBlocks((prev) => prev.filter((b) => b.id !== block.id));
   }
 
   /**
@@ -904,6 +997,10 @@ export function Composer({
     // Image-only sends (empty text) are allowed — the engine takes {text,
     // files} and a bare attachment prompt is meaningful.
     if ((!value && attachments.length === 0) || busy) return;
+    // R8: expand collapsed pastes back to their full text before anything goes
+    // out. Classification above stays on the compact `value`; the wire payload
+    // (and mention offsets) use the expanded text.
+    const outgoing = expandAllPastes(value, pasteBlocks);
     setBusy(true);
     setHistIdx(null);
     try {
@@ -972,9 +1069,9 @@ export function Composer({
         stBefore.sessionDetails[sid]?.model ??
         stBefore.sessions.find((s) => s.id === sid)?.model;
       if (shellMode) {
-        await sendShell(value.startsWith("!") ? value.slice(1) : value);
+        await sendShell(outgoing.startsWith("!") ? outgoing.slice(1) : outgoing);
       } else if (value.startsWith("!")) {
-        await sendShell(value.slice(1));
+        await sendShell(outgoing.slice(1));
       } else if (isEngineCommand) {
         await sendCommand(slashName, slashArgs || undefined);
       } else if (pickedFiles.length > 0 || attachments.length > 0) {
@@ -986,7 +1083,7 @@ export function Composer({
         for (const picked of pickedFiles) {
           if (!fileBase) continue;
           const token = `@${picked.path}`;
-          const idx = value.indexOf(token);
+          const idx = outgoing.indexOf(token);
           files.push({
             uri: `file://${encodeURI(`${fileBase.replace(/\/+$/, "")}/${picked.path}`)}`,
             name: picked.path,
@@ -999,12 +1096,12 @@ export function Composer({
           files.push(attachmentPromptFile(att));
         }
         if (files.length > 0) {
-          await sendPromptWithFiles(value, files, opts);
+          await sendPromptWithFiles(outgoing, files, opts);
         } else {
-          await sendPromptTo(sid, value, opts);
+          await sendPromptTo(sid, outgoing, opts);
         }
       } else {
-        await sendPromptTo(sid, value, opts);
+        await sendPromptTo(sid, outgoing, opts);
       }
       // lastUsed/recents: only a COMMITTED send counts (a dirty pick switched
       // back never reaches here), and subagents are excluded — the engine owns
@@ -1013,6 +1110,8 @@ export function Composer({
       setText("");
       setPickedFiles([]);
       setAttachments([]);
+      setPasteBlocks([]);
+      clearPasteBlocks(sessionID);
     } catch {
       // Send failed (SendErrorStrip shows the reason) — put the text back so
       // the user can retry without retyping. Attachments are deliberately
@@ -1140,6 +1239,38 @@ export function Composer({
                   </button>
                 </div>
               )}
+              {pasteBlocks.length > 0 && (
+                <div
+                  data-oc-composer-pastes
+                  className="mb-1.5 flex flex-wrap items-center gap-2 border-b border-[color:var(--border-weak-base)] pb-1.5"
+                >
+                  {pasteBlocks.map((block) => (
+                    <span
+                      key={block.id}
+                      data-oc-composer-paste
+                      className="inline-flex items-center gap-1 rounded-md border border-[color:var(--border-weak-base)] bg-[color:var(--surface-inset-base)] px-1.5 py-0.5 text-[11px] text-[color:var(--text-weak)]"
+                    >
+                      <ClipboardPaste className="size-3" />
+                      <button
+                        type="button"
+                        onClick={() => expandPaste(block)}
+                        title="Click to expand into the composer"
+                        className="cursor-pointer font-mono transition-colors hover:text-[color:var(--text-strong)]"
+                      >
+                        {pasteLabel(block.lines)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removePaste(block)}
+                        title="Remove pasted text"
+                        className="flex cursor-pointer items-center justify-center rounded transition-colors hover:text-[color:var(--text-strong)]"
+                      >
+                        <X className="size-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               {attachments.length > 0 && (
                 <div
                   data-oc-composer-attachments
@@ -1176,7 +1307,7 @@ export function Composer({
                 query={mentionQuery ?? ""}
                 location={sessionLocation}
                 onOpenChange={setMentionDismissed}
-                onPick={handleFilePick}
+                onPick={handleMentionPick}
               >
                 <div className="flex items-end gap-2">
                   <Textarea
@@ -1206,21 +1337,38 @@ export function Composer({
                         const file = item.getAsFile();
                         if (file) files.push(file);
                       }
-                      if (files.length === 0) return;
-                      if (!files.some(isEngineImageFile)) {
-                        // Keep a paste that also carries text (some apps add
-                        // both); only swallow when there's nothing else.
-                        if ((e.clipboardData?.getData("text/plain") ?? "").length > 0) return;
+                      if (files.length > 0) {
+                        if (!files.some(isEngineImageFile)) {
+                          // Keep a paste that also carries text (some apps add
+                          // both); only swallow when there's nothing else.
+                          if ((e.clipboardData?.getData("text/plain") ?? "").length > 0) return;
+                          e.preventDefault();
+                          notify({
+                            title: "Unsupported paste",
+                            description: "The engine only accepts PNG, JPEG, GIF and WebP images.",
+                            variant: "destructive",
+                          });
+                          return;
+                        }
                         e.preventDefault();
-                        notify({
-                          title: "Unsupported paste",
-                          description: "The engine only accepts PNG, JPEG, GIF and WebP images.",
-                          variant: "destructive",
-                        });
+                        void stageImageFiles(files);
                         return;
                       }
+                      // R8: collapse a large TEXT paste to `[Pasted ~N lines]`.
+                      const pasted = e.clipboardData?.getData("text/plain") ?? "";
+                      if (!shouldCollapsePaste(pasted)) return;
                       e.preventDefault();
-                      void stageImageFiles(files);
+                      const el = e.currentTarget;
+                      const current = el.value;
+                      const start = el.selectionStart ?? current.length;
+                      const end = el.selectionEnd ?? start;
+                      const block = makePasteBlock(pasted);
+                      const placeholder = pasteLabel(block.lines);
+                      setPasteBlocks((prev) => [...prev, block]);
+                      setText(current.slice(0, start) + placeholder + current.slice(end));
+                      const caretNext = start + placeholder.length;
+                      setCaret(caretNext);
+                      requestAnimationFrame(() => el.setSelectionRange(caretNext, caretNext));
                     }}
                     onKeyDown={(e) => {
                       if (isSlash) {
@@ -1341,6 +1489,18 @@ export function Composer({
                           }
                           return;
                         }
+                      }
+                      if (e.key.toLowerCase() === "s" && e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
+                        // R8: `prompt.stash.pop` — a DISTINCT binding that
+                        // pops the newest stashed prompt straight into the
+                        // composer (no panel). Ctrl+S pushes, Ctrl+Shift+S pops.
+                        if (!isSlash) {
+                          e.preventDefault();
+                          const newest = stashEntries[stashEntries.length - 1];
+                          if (newest) stashPopEntry(newest);
+                          else notify({ title: "Stash is empty" });
+                        }
+                        return;
                       }
                       if (e.key.toLowerCase() === "s" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
                         // P6: Ctrl+S stashes the current prompt (v2's
@@ -1579,78 +1739,20 @@ export function Composer({
           {cwd && <p className="hidden truncate font-mono sm:block">{cwd}</p>}
         </div>
       </div>
-      {movePickerOpen && (
-        <MovePickerDialog
-          sessionID={sessionID}
+      {dirPickerOpen && (
+        <Target
+          id="directory.picker"
+          location={sessionLocation}
+          home={home}
+          project={sessionLocation}
           currentDirectory={sessionLocation}
-          onClose={() => setMovePickerOpen(false)}
-          onMoved={(dir) => {
-            setMovePickerOpen(false);
-            notify({ title: `Moved to ${dir}` });
-            void loadSessionDetail(sessionID);
-            void refreshSessions();
+          onPick={(dir: string) => {
+            setDirPickerOpen(false);
+            applyDirectory(dir);
           }}
+          onClose={() => setDirPickerOpen(false)}
         />
       )}
-    </div>
-  );
-}
-
-function MovePickerDialog({ sessionID, currentDirectory, onClose, onMoved }: { sessionID: string; currentDirectory?: string; onClose: () => void; onMoved: (dir: string) => void }) {
-  const [dirs, setDirs] = useState<string[]>([]);
-  const [custom, setCustom] = useState("");
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [projects, loc] = await Promise.all([api.projectList().catch(() => [] as ProjectInfo[]), api.location().catch(() => null as LocationInfo | null)]);
-        if (cancelled) return;
-        const set = new Set<string>();
-        for (const p of projects as ProjectInfo[]) {
-          const d = (p as ProjectInfo).directory;
-          if (d) set.add(d);
-        }
-        if ((loc as LocationInfo | null)?.directory) set.add((loc as LocationInfo).directory);
-        if (currentDirectory) set.add(currentDirectory);
-        setDirs([...set].sort());
-      } catch {}
-      if (!cancelled) setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [currentDirectory]);
-  const doMove = (dir: string) => {
-    const trimmed = dir.trim();
-    if (!trimmed) return;
-    void api.moveSession(sessionID, trimmed).then(() => onMoved(trimmed)).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      notify({ title: `Move failed: ${msg}`, variant: "destructive" });
-    });
-  };
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-lg border border-[var(--border-weak-base)] bg-[var(--surface-float-base)] p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-medium text-[var(--text-strong)]">Move session</h3>
-        <p className="mt-1 text-xs text-[var(--text-weaker)]">Pick a workspace or enter a path. Mirrors the TUI picker.</p>
-        {loading ? (
-          <p className="mt-4 text-xs text-[var(--text-weaker)]">Loading workspaces…</p>
-        ) : (
-          <div className="mt-3 max-h-56 overflow-y-auto rounded-md border border-[var(--border-weak-base)]">
-            {dirs.map((d) => (
-              <button key={d} type="button" onClick={() => doMove(d)} className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-[var(--surface-base-hover)] ${d === currentDirectory ? "bg-[var(--surface-raised-base-active)] font-medium" : ""}`}>
-                <span className="truncate font-mono text-[var(--text-strong)]">{d.replace(/^\/(home|Users)\/[^/]+/, "~")}</span>
-                {d === currentDirectory && <span className="ml-2 text-[10px] text-[var(--text-weaker)]">current</span>}
-              </button>
-            ))}
-            {dirs.length === 0 && <p className="px-3 py-2 text-xs text-[var(--text-weaker)]">No workspaces found</p>}
-          </div>
-        )}
-        <div className="mt-3 flex gap-2">
-          <input value={custom} onChange={(e) => setCustom(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doMove(custom); if (e.key === "Escape") onClose(); }} placeholder="Custom path — e.g. /home/z/projects/foo" className="flex-1 rounded-md border border-[var(--border-base)] bg-[var(--input-base)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--border-selected)]" autoFocus />
-          <button type="button" onClick={() => doMove(custom)} disabled={!custom.trim()} className="rounded-md bg-[var(--surface-brand-base)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">Move</button>
-          <button type="button" onClick={onClose} className="rounded-md border border-[var(--border-weak-base)] px-3 py-1.5 text-xs">Cancel</button>
-        </div>
-      </div>
     </div>
   );
 }

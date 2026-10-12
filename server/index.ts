@@ -989,6 +989,7 @@ const SETUP_ACTIONS = new Set([
   "stop",
   "restart",
   "config",
+  "testkit",
   "internal:setup",
   "help",
   "--help",
@@ -1033,6 +1034,94 @@ function readVersion(): string {
   }
 }
 const PKG_VERSION = readVersion();
+
+// ---------------------------------------------------------------------------
+// R11b — update check + channel detection
+//
+// The engine has no update route, so the proxy owns this locally: ask the npm
+// registry for the latest PUBLISHED version and report which channel we're on.
+// The install step meanwhile rides the existing `update` CLI (which resolves
+// the latest version and restarts). `isDevCheckout` mirrors server/setup.ts's
+// unexported helper; a compiled binary is detected via the `bunfs` scheme.
+// ---------------------------------------------------------------------------
+
+const UPDATE_REGISTRY_URL = "https://registry.npmjs.org/opencode-webui/latest";
+
+/** Repo checkout detection — the in-repo `vite.config.ts` is the tell. */
+function isDevCheckout(): boolean {
+  try {
+    return existsSync(fileURLToPath(new URL("../vite.config.ts", import.meta.url)));
+  } catch {
+    return false;
+  }
+}
+
+type UpdateChannel = "dev" | "binary" | "published";
+
+function updateChannel(): UpdateChannel {
+  if (import.meta.url.includes("bunfs")) return "binary";
+  return isDevCheckout() ? "dev" : "published";
+}
+
+/**
+ * Numeric compare of `x.y.z` versions; a prerelease sorts BELOW its release.
+ * Dependency-free (a full semver lib is not worth it for "is there a newer
+ * one?"). Ignores build metadata.
+ */
+function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const [core = "", pre = ""] = v.split("-", 2);
+    const nums = core.split(".").map((n) => Number.parseInt(n, 10) || 0);
+    return { nums, pre };
+  };
+  const A = parse(a);
+  const B = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const d = (A.nums[i] ?? 0) - (B.nums[i] ?? 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  if (A.pre === B.pre) return 0;
+  if (!A.pre) return 1; // release > prerelease
+  if (!B.pre) return -1;
+  return A.pre > B.pre ? 1 : -1;
+}
+
+interface UpdateCheck {
+  current: string;
+  latest?: string | null;
+  updateAvailable: boolean;
+  channel: UpdateChannel;
+  /** The registry could not be reached — a soft state, never an error status. */
+  unavailable?: boolean;
+  error?: string;
+}
+
+async function checkWebuiUpdate(): Promise<UpdateCheck> {
+  const channel = updateChannel();
+  try {
+    const res = await fetch(UPDATE_REGISTRY_URL, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) throw new Error(`registry responded ${res.status}`);
+    const body = (await res.json()) as { version?: unknown };
+    const latest = typeof body?.version === "string" ? body.version : null;
+    return {
+      current: PKG_VERSION,
+      latest,
+      updateAvailable: !!latest && compareVersions(latest, PKG_VERSION) > 0,
+      channel,
+    };
+  } catch (err) {
+    return {
+      current: PKG_VERSION,
+      updateAvailable: false,
+      unavailable: true,
+      channel,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Build identity for the footer badge (`GET /api/webui/config` → `build`).
@@ -1299,6 +1388,22 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       const launch = resolveLaunchCommand(import.meta.url);
       setTimeout(() => spawnDetached({ cmd: [...launch.cmd, "restart"], display: "restart" }), 300);
       return Response.json({ ok: true, restarting: true });
+    }
+    // R11b update check — proxy-local (no engine route). Probes the npm registry
+    // for the latest published version and reports the running channel. A failed
+    // probe answers HTTP 200 with `unavailable:true` so the UI shows a soft
+    // state rather than an error (a checkout behind a firewall is normal).
+    if (method === "GET" && path === "/api/webui/update/check") {
+      return Response.json(await checkWebuiUpdate());
+    }
+    // R11b update install — spawn the detached `update` (resolve latest version
+    // + restart), mirroring the restart handler above. Dev/binary channels log
+    // and no-op inside the CLI (see server/setup.ts runUpdate); the response is
+    // fire-and-forget either way. Restart to apply stays the route above.
+    if (method === "POST" && path === "/api/webui/update") {
+      const launch = resolveLaunchCommand(import.meta.url);
+      setTimeout(() => spawnDetached({ cmd: [...launch.cmd, "update"], display: "update" }), 300);
+      return Response.json({ ok: true, updating: true });
     }
 
     if (method === "POST" && path === "/api/debug") {
