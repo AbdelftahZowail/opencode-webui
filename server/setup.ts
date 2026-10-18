@@ -11,11 +11,12 @@
  *      mirrored to `<state>/entry/<version>/` (hardlinks — no disk, no
  *      network) and the shim + plugin launch from the mirror;
  *   2. the built-in OpenCode plugins in
- *      `<config>/opencode/plugins/opencode-webui{,-shelf}/`: the lifecycle
- *      plugin (engine auto-discovers it and activates on use: it starts the
- *      webui detached, so the webui comes up whenever you use OpenCode) and
- *      the shelf tools plugin (`shelf_share` / `shelf_list` / `shelf_remove`
- *      + the shelf system hint);
+ *      `<config>/opencode/plugins/opencode-webui{,-shelf,-preview}/`: the
+ *      lifecycle plugin (engine auto-discovers it and activates on use: it
+ *      starts the webui detached, so the webui comes up whenever you use
+ *      OpenCode), the shelf tools plugin (`shelf_share` / `shelf_list` /
+ *      `shelf_remove` + the shelf system hint) and the preview plugin (the
+ *      tilde-fence inline-preview system hint — hint-only, no tools);
  *   3. `launch.json` in the state dir — the stable handoff the plugin reads;
  *   4. a pidfile so `stop` / `restart` / `update` can find the running server.
  *
@@ -28,9 +29,11 @@
  *
  * This is a deliberate, documented exception to the "webui never installs
  * engine plugins" rule in docs/reference/engine-payload-convention.md: the webui installs
- * *its own* plugins (lifecycle + shelf tools), opt-out — the lifecycle one
- * because the user asked the webui to follow OpenCode's lifecycle, the shelf
- * one because the shelf's agent tools are a core webui feature.
+ * *its own* plugins (lifecycle + shelf tools + preview hint), opt-out — the
+ * lifecycle one because the user asked the webui to follow OpenCode's
+ * lifecycle, the shelf one because the shelf's agent tools are a core webui
+ * feature, and the preview one because the tilde-fence inline previews are too
+ * (nothing else tells the model the `~~~` convention exists).
  */
 
 import {
@@ -56,6 +59,11 @@ import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
   LIFECYCLE_PLUGIN_SOURCE,
 } from "./lifecyclePlugin";
+import {
+  PREVIEW_ENGINE_PLUGIN_ID,
+  PREVIEW_ENGINE_PLUGIN_PACKAGE_JSON,
+  PREVIEW_ENGINE_PLUGIN_SOURCE,
+} from "./previewEnginePlugin";
 import {
   SHELF_ENGINE_PLUGIN_ID,
   SHELF_ENGINE_PLUGIN_PACKAGE_JSON,
@@ -459,6 +467,10 @@ function shelfPluginDir(): string {
   return join(configDir(), "plugins", SHELF_ENGINE_PLUGIN_ID);
 }
 
+function previewPluginDir(): string {
+  return join(configDir(), "plugins", PREVIEW_ENGINE_PLUGIN_ID);
+}
+
 /** Install one marker-gated managed engine-plugin dir (contents compared byte-for-byte). */
 function installManagedPluginDir(
   dir: string,
@@ -494,9 +506,9 @@ function installManagedPluginDir(
 
 /**
  * Install the webui's OWN managed engine plugins: the lifecycle plugin
- * (starts the proxy) and the shelf plugin (shelf_* tools + system hint).
- * Separate marker-gated dirs, engine-discovered at boot; never touches a
- * dir we don't own.
+ * (starts the proxy), the shelf plugin (shelf_* tools + system hint) and the
+ * preview plugin (the ~~~ inline-preview system hint). Separate marker-gated
+ * dirs, engine-discovered at boot; never touches a dir we don't own.
  */
 function installPlugin(version: string): InstallResult {
   const lifecycle = installManagedPluginDir(
@@ -511,10 +523,16 @@ function installPlugin(version: string): InstallResult {
     SHELF_ENGINE_PLUGIN_PACKAGE_JSON,
     version,
   );
+  const preview = installManagedPluginDir(
+    previewPluginDir(),
+    PREVIEW_ENGINE_PLUGIN_SOURCE,
+    PREVIEW_ENGINE_PLUGIN_PACKAGE_JSON,
+    version,
+  );
   return {
     path: lifecycle.path,
-    changed: lifecycle.changed || shelf.changed,
-    detail: [lifecycle.detail, shelf.detail].filter(Boolean).join("; ") || undefined,
+    changed: lifecycle.changed || shelf.changed || preview.changed,
+    detail: [lifecycle.detail, shelf.detail, preview.detail].filter(Boolean).join("; ") || undefined,
   };
 }
 
@@ -688,7 +706,7 @@ function setupMessage(result: {
   const at = result.wrapper.path ? ` at ${result.wrapper.path}` : "";
   lines.push(
     result.first
-      ? `[webui] setup: installed the \`${SERVICE_NAME}\` command${at} and the OpenCode plugins (lifecycle + shelf tools).`
+      ? `[webui] setup: installed the \`${SERVICE_NAME}\` command${at} and the OpenCode plugins (lifecycle + shelf tools + preview hint).`
       : `[webui] setup: refreshed the \`${SERVICE_NAME}\` command and OpenCode plugins.`,
   );
   lines.push(`[webui]   the webui now starts with OpenCode · undo: ${SERVICE_NAME} uninstall`);
@@ -769,7 +787,7 @@ export function uninstallSetup(): UninstallResult {
       problems.push(errorText(err));
     }
   }
-  for (const dir of [pluginDir(), shelfPluginDir()]) {
+  for (const dir of [pluginDir(), shelfPluginDir(), previewPluginDir()]) {
     if (existsSync(join(dir, PLUGIN_MARKER))) {
       try {
         rmSync(dir, { recursive: true, force: true });
@@ -808,7 +826,9 @@ export function setupStatus(): SetupStatusInfo {
     wrapperPresent: wrapper !== null && existsSync(wrapper),
     wrapperOnPath: wrapper !== null ? pathHasDir(dirname(wrapper)) : false,
     plugin,
-    pluginPresent: existsSync(join(plugin, PLUGIN_MARKER)),
+    pluginPresent: [plugin, shelfPluginDir(), previewPluginDir()].every((dir) =>
+      existsSync(join(dir, PLUGIN_MARKER)),
+    ),
     launch: launchFile ? { cmd: launchFile.cmd, display: launchFile.display } : null,
     declined: marker.declined === true,
     pid: info && isAlive(info.pid) ? info.pid : null,

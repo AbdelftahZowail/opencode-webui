@@ -10,9 +10,9 @@
  *
  * Install story (wired by `server/setup.ts`, reported separately): the webui
  * writes this source to `<config>/opencode/plugins/opencode-webui-shelf/`
- * next to the lifecycle plugin, marker-gated so an unrelated directory is never
- * clobbered, and removed by `opencode-webui uninstall` like the lifecycle
- * plugin. `WEBUI_NO_PLUGIN=1` skips both.
+ * next to the lifecycle and preview plugins, marker-gated so an unrelated
+ * directory is never clobbered, and removed by `opencode-webui uninstall` like
+ * the other managed plugins. `WEBUI_NO_PLUGIN=1` skips all three.
  *
  * The plugin talks to no webui code — it reads/writes the shelf directory
  * directly and returns links under the FROZEN `/api/shelf/file/` prefix (see

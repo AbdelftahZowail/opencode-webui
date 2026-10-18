@@ -650,7 +650,8 @@ export default {
 ## Engine payload (`engine/`)
 
 An extension folder may carry `engine/` — a valid opencode plugin directory
-(tools the model calls, `experimental.chat.system.transform` prompt hints).
+(a **v2 definition object** `{ id, setup }`: tools the model calls, prompt hints
+pushed via `ctx.session.hook("context", …)` as `{ type: "text", text }` parts).
 The webui neither loads nor hot-reloads it; the engine's rules apply
 (boot-time load, restart on edit unless the plugin implements its own shell
 pattern — a stable `index.js` that require-cache-busts a `definitions.cjs`

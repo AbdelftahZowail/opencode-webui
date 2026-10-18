@@ -215,8 +215,9 @@ for external scripts/cron; uniform response rewriting and rate limiting.
 
 ## 9. Engine payload (boundary respected)
 
-An extension folder may carry `engine/` — a valid opencode plugin directory (tools the
-model calls, `experimental.chat.system.transform` prompt hints, commands). The webui
+An extension folder may carry `engine/` — a valid opencode plugin directory (a
+**v2 definition object** `{ id, setup }`: tools the model calls, prompt hints pushed
+via `ctx.session.hook("context", …)` as `{ type: "text", text }` parts, commands). The webui
 neither loads nor hot-reloads it; the engine's rules apply (boot-time load, restart on
 edit unless the plugin implements its own shell pattern). The engine's `PluginInput`
 already provides a client and a Bun shell, so plugins need no HTTP self-RPC.

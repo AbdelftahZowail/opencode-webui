@@ -49,6 +49,7 @@ instead of bricking the proxy. The API-sync scripts share that module. Explicit
 | `server/engineDiscovery.ts` | Spawn-free discovery + the registration fallback (shared by the proxy and the API-sync scripts) |
 | `server/shelf.ts` | Core file shelf: read-only, auth-gated, traversal-proof serving + listing (`/api/shelf/*`) |
 | `server/shelfEnginePlugin.ts` | Embedded engine payload installing the `shelf_share`/`shelf_list`/`shelf_remove` tools + system hint |
+| `server/previewEnginePlugin.ts` | Embedded engine payload installing the `~~~` tilde-fence inline-preview system hint (hint-only, no tools) |
 | `src/api/types.ts` | All API schemas — copy from the service's `/openapi.json` (the contract) |
 | `src/api/client.ts` | Typed REST client (one function per endpoint) |
 | `src/api/events.ts` | SSE parser for `/api/event` + reconnection + watchdog |
@@ -232,7 +233,7 @@ trust (same model as host plugins) — no sandboxing of extension code.
   driven through a real Chromium page and a real tmux TUI (`opencode-webui
   testkit example|run|list`; runbook `docs/runbooks/agent-testing.md`)
 - `bun run check:setup` — global-wrapper + lifecycle-plugin + CLI contract, and a
-  real plugin `setup()` spawn, in an isolated HOME/XDG tree; expect 51/0
+  real plugin `setup()` spawn, in an isolated HOME/XDG tree; expect 61/0
 - `bun run check:config` — serve/security config: resolution precedence,
   validation, password hashing/redaction, exposure, and the `config` CLI
 - `bun run check:telemetry` — anonymous-telemetry contract: the payload

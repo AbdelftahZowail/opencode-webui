@@ -30,6 +30,15 @@ import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
   LIFECYCLE_PLUGIN_SOURCE,
 } from "../../server/lifecyclePlugin";
+import {
+  PREVIEW_ENGINE_PLUGIN_ID,
+  PREVIEW_ENGINE_PLUGIN_PACKAGE_JSON,
+  PREVIEW_ENGINE_PLUGIN_SOURCE,
+} from "../../server/previewEnginePlugin";
+import {
+  SHELF_ENGINE_PLUGIN_ID,
+  SHELF_ENGINE_PLUGIN_SOURCE,
+} from "../../server/shelfEnginePlugin";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -159,6 +168,72 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
 }
 
 // ---------------------------------------------------------------------------
+// preview plugin source — the hint-only payload that teaches the ~~~ convention
+// ---------------------------------------------------------------------------
+{
+  let parses = true;
+  try {
+    new Function("module", "exports", "require", "__dirname", PREVIEW_ENGINE_PLUGIN_SOURCE);
+  } catch {
+    parses = false;
+  }
+  check("preview: source parses as a CJS module", parses);
+  check("preview: no `${` leaked from the TS template", !PREVIEW_ENGINE_PLUGIN_SOURCE.includes("${"));
+  check("preview: package.json is valid JSON", (() => {
+    try {
+      JSON.parse(PREVIEW_ENGINE_PLUGIN_PACKAGE_JSON);
+      return true;
+    } catch {
+      return false;
+    }
+  })());
+
+  const mod: { exports: { id?: string; setup?: (ctx: unknown) => Promise<void> } } = { exports: {} };
+  if (parses) {
+    new Function("module", "exports", "require", "__dirname", PREVIEW_ENGINE_PLUGIN_SOURCE)(
+      mod,
+      mod.exports,
+      () => {
+        throw new Error("the preview payload requires nothing");
+      },
+    );
+  }
+  check(
+    "preview: exports { id, setup }",
+    mod.exports.id === PREVIEW_ENGINE_PLUGIN_ID && typeof mod.exports.setup === "function",
+    String(mod.exports.id),
+  );
+
+  // Run setup against a stub engine ctx: the hint must land as ONE `{ type:
+  // "text" }` part (a bare string fails the session drain on the live engine).
+  const pushed: { type?: string; text?: string }[] = [];
+  let hooks = 0;
+  await mod.exports.setup?.({
+    session: {
+      hook: async (name: string, cb: (m: unknown) => void) => {
+        if (name === "context") hooks++;
+        cb({ system: pushed });
+      },
+    },
+  });
+  check("preview: registers the context hook", hooks === 1, String(hooks));
+  check(
+    'preview: pushes one { type: "text", text } part that teaches ~~~',
+    pushed.length === 1 && pushed[0]?.type === "text" && /~~~html/.test(pushed[0]?.text ?? ""),
+    JSON.stringify(pushed[0])?.slice(0, 60),
+  );
+
+  // An engine with no session.hook must be a quiet no-op, never a throw.
+  let threw = false;
+  try {
+    await mod.exports.setup?.({});
+  } catch {
+    threw = true;
+  }
+  check("preview: an engine with no session.hook is a no-op", !threw);
+}
+
+// ---------------------------------------------------------------------------
 // the plugin actually runs: setup() spawns the launch command detached
 // ---------------------------------------------------------------------------
 {
@@ -237,6 +312,14 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
         check("install: wrapper written", existsSync(wrapper), wrapper);
         check("install: wrapper execs the entry", readFileSync(wrapper, "utf8").includes("/opt/app/server/index.ts"));
         check("install: plugin written verbatim", existsSync(pluginIndex) && readFileSync(pluginIndex, "utf8") === LIFECYCLE_PLUGIN_SOURCE);
+        const shelfIndex = join(config, "opencode", "plugins", SHELF_ENGINE_PLUGIN_ID, "index.js");
+        const previewIndex = join(config, "opencode", "plugins", PREVIEW_ENGINE_PLUGIN_ID, "index.js");
+        check("install: shelf plugin written verbatim", existsSync(shelfIndex) && readFileSync(shelfIndex, "utf8") === SHELF_ENGINE_PLUGIN_SOURCE);
+        check(
+          "install: preview plugin written verbatim",
+          existsSync(previewIndex) && readFileSync(previewIndex, "utf8") === PREVIEW_ENGINE_PLUGIN_SOURCE,
+        );
+        check("install: every managed plugin carries the marker", [pluginIndex, shelfIndex, previewIndex].every((p) => existsSync(join(dirname(p), ".opencode-webui.json"))));
         check("install: launch handoff written", readLaunchConfig()?.version === "9.9.9" && readLaunchConfig()?.port === 4097);
         check("install: status reports present", setupStatus().wrapperPresent && setupStatus().pluginPresent);
 
@@ -280,13 +363,19 @@ async function withEnv(overrides: EnvOverrides, fn: () => void | Promise<void>):
         check("bunx: mirror survives the temp dir being wiped", existsSync(mirrorEntry));
 
         const un = uninstallSetup();
-        check("uninstall: removed wrapper + plugin", un.removed.includes(wrapper) && un.removed.includes(join(config, "opencode", "plugins", "opencode-webui")));
-        check("uninstall: files gone", !existsSync(wrapper) && !existsSync(pluginIndex) && !existsSync(launch));
+        check(
+          "uninstall: removed wrapper + every managed plugin dir",
+          un.removed.includes(wrapper) &&
+            un.removed.includes(join(config, "opencode", "plugins", "opencode-webui")) &&
+            un.removed.includes(join(config, "opencode", "plugins", SHELF_ENGINE_PLUGIN_ID)) &&
+            un.removed.includes(join(config, "opencode", "plugins", PREVIEW_ENGINE_PLUGIN_ID)),
+        );
+        check("uninstall: files gone", !existsSync(wrapper) && !existsSync(pluginIndex) && !existsSync(shelfIndex) && !existsSync(previewIndex) && !existsSync(launch));
         check("uninstall: mirror gone", !existsSync(join(state, "opencode-webui", "entry")));
         check("uninstall: decline recorded", setupStatus().declined);
 
         await runSetupCli("setup", "file:///opt/app/server/index.ts");
-        check("setup: re-enables after uninstall", existsSync(wrapper) && existsSync(pluginIndex) && !setupStatus().declined);
+        check("setup: re-enables after uninstall", existsSync(wrapper) && existsSync(pluginIndex) && existsSync(previewIndex) && !setupStatus().declined);
       },
     );
   } finally {

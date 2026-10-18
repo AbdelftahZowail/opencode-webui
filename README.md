@@ -153,10 +153,10 @@ chmod +x opencode-webui-linux-x64
 
 ## It starts with OpenCode (first-run setup)
 
-First boot self-installs three things so the webui comes up with OpenCode and you never pay for `bunx` on every start:
+First boot self-installs four things so the webui comes up with OpenCode and you never pay for `bunx` on every start:
 
 1. **A global `opencode-webui` command** (`~/.local/bin/opencode-webui`) that launches the installed entry directly.
-2. **Two built-in OpenCode plugins** in `~/.config/opencode/plugins/`: a **lifecycle plugin** (`opencode-webui/`) that starts the webui in the background whenever you use OpenCode — detached, fire-and-forget, never a second copy — and a **shelf tools plugin** (`opencode-webui-shelf/`) that gives the agent the `shelf_share` / `shelf_list` / `shelf_remove` tools behind the read-only file shelf.
+2. **Three built-in OpenCode plugins** in `~/.config/opencode/plugins/`: a **lifecycle plugin** (`opencode-webui/`) that starts the webui in the background whenever you use OpenCode — detached, fire-and-forget, never a second copy — a **shelf tools plugin** (`opencode-webui-shelf/`) that gives the agent the `shelf_share` / `shelf_list` / `shelf_remove` tools behind the read-only file shelf, and a **preview hint plugin** (`opencode-webui-preview/`) that teaches the model the `~~~` live-fence syntax the chat renders inline (hint only, no tools).
 
 ```sh
 opencode-webui            # start (starts the opencode service first if needed)
@@ -182,7 +182,7 @@ Serve/security settings work as env vars or durably in `~/.config/opencode/webui
 | `WEBUI_PROXY_PORT` | `4097` | Port for the UI and `/api/*`. |
 | `WEBUI_EXTENSION_DIR` | the global + project dirs | Adds a higher-precedence source shadowing both (the sandbox uses this to keep WIP isolated; shipped extensions still load underneath). |
 | `WEBUI_NO_SETUP` | unset | `1` skips first-run setup for this run (CI, one-offs). |
-| `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode engine plugins (lifecycle + shelf tools). |
+| `WEBUI_NO_PLUGIN` | unset | `1` installs the global command but not the OpenCode engine plugins (lifecycle + shelf tools + preview hint). |
 | `WEBUI_SETUP` | unset | `1` forces setup even in a repo checkout (testing). |
 
 ```sh

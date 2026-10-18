@@ -1,8 +1,9 @@
 # Engine payload convention (spec §9)
 
 An extension folder MAY carry `engine/` — a valid opencode plugin directory
-(tools the model calls, `experimental.chat.system.transform` prompt hints,
-commands). This is a **convention, not machinery**: the webui neither loads
+(a **v2 definition object** `{ id, setup }` that registers tools the model
+calls and prompt hints through `ctx.session.hook("context", …)`, commands).
+This is a **convention, not machinery**: the webui neither loads
 nor hot-reloads it. Engine rules apply, full stop.
 
 ```
@@ -24,17 +25,22 @@ my-extension/
    path to their opencode plugin config); the webui never installs, enables,
    or configures *extension* engine plugins on the user's behalf. The
    exception is the webui's **own built-in plugins**
-   (`server/lifecyclePlugin.ts` and `server/shelfEnginePlugin.ts`): on first
+   (`server/lifecyclePlugin.ts`, `server/shelfEnginePlugin.ts` and
+   `server/previewEnginePlugin.ts`): on first
    run the webui writes them to
-   `<config>/opencode/plugins/opencode-webui/` and
-   `…/plugins/opencode-webui-shelf/`, where the engine auto-discovers them —
+   `<config>/opencode/plugins/opencode-webui/`,
+   `…/plugins/opencode-webui-shelf/` and
+   `…/plugins/opencode-webui-preview/`, where the engine auto-discovers them —
    the lifecycle plugin so the proxy starts when OpenCode activates its
    plugins (lazily, on use), the shelf plugin so the `shelf_*` tools and
-   system hint exist with no extension involved. They install only
+   system hint exist with no extension involved, and the preview plugin so the
+   model learns the core `~~~` tilde-fence inline-preview convention (hint
+   only). They install only
    themselves (separate marker-gated dirs), are announced in the boot banner,
    and are removed by `opencode-webui uninstall` (or skipped with
    `WEBUI_NO_PLUGIN=1`). This exception exists because the webui's own
-   lifecycle and core tools are legitimately the webui's concern; it does not
+   lifecycle, core tools and core rendering hints are legitimately the webui's
+   concern; it does not
    generalize to extension payloads.
 3. **No webui loading, no webui hot reload.** The webui serves/carries the
    folder's other strata only. Editing `engine/` follows engine semantics:

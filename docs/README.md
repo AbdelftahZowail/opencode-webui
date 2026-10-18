@@ -39,7 +39,7 @@ it. `skills/webui/SKILL.md` and `skills/testkit/SKILL.md` are generated from
 | `reference/extension-system-spec.md` | The extension-system contract (strata, kinds, precedence, deletions, acceptance). |
 | `reference/engine-payload-convention.md` | The `engine/` stratum convention + the verified minimal fixture + the agent-testing runbook. |
 | `reference/frontend.md` | How the chat UI works: streaming/robustness, rendering, tool cards, keys, debug logging. |
-| `reference/setup.md` | First-run setup: the global command + the two managed engine plugins. |
+| `reference/setup.md` | First-run setup: the global command + the three managed engine plugins. |
 | `reference/telemetry.md` | Anonymous usage telemetry: privacy posture, wire contract, gating, the hub dependency. |
 | `reference/notices.md` | Product notices: the hub announcement + version feeds, the transient card + the permanent Settings › About home, fail-open, dismissal. |
 | `reference/openapi.json` | Generated OpenAPI snapshot. **Path is hard-coded in `scripts/*-openapi.ts` — do not move.** |
