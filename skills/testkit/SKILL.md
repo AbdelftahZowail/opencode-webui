@@ -13,7 +13,7 @@ interactive client in a real tmux terminal. It asserts on what those clients
 **rendered** — DOM text, the terminal buffer, screenshots — not on API responses.
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 3.4.1 (matches the `v3.4.1` tag; the file
+- **This skill's version**: 3.4.2 (matches the `v3.4.2` tag; the file
   links below are pinned to it)
 - **Run it** (npm / bunx install — works from any directory):
   ```sh
@@ -136,10 +136,10 @@ four-strata fixture is a copy-paste starting point:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/docs/runbooks/agent-testing.md | The full runbook — harness API, isolation model, gotchas |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/harness.ts | `start()`, the API client, `Reporter`, `expect`, `waitFor`, isolation helpers |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/browser.ts | Browser resolution — points at the environment's browser; never bundles one |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/ui.ts | The real-Chromium driver (optional; FAILS SOFT without a browser) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/tui.ts | The real tmux + `opencode` driver (`renderPng()` needs a browser; the text grid does not) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/example.test.ts | The worked example |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.1/scripts/testkit/fixtures/testkit-echo/manifest.json | The four-strata fixture (`manifest.json` + `index.tsx`/`dom.ts`/`server.ts`/`engine/`) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/docs/runbooks/agent-testing.md | The full runbook — harness API, isolation model, gotchas |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/harness.ts | `start()`, the API client, `Reporter`, `expect`, `waitFor`, isolation helpers |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/browser.ts | Browser resolution — points at the environment's browser; never bundles one |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/ui.ts | The real-Chromium driver (optional; FAILS SOFT without a browser) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/tui.ts | The real tmux + `opencode` driver (`renderPng()` needs a browser; the text grid does not) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/example.test.ts | The worked example |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.2/scripts/testkit/fixtures/testkit-echo/manifest.json | The four-strata fixture (`manifest.json` + `index.tsx`/`dom.ts`/`server.ts`/`engine/`) |

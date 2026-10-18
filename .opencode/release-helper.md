@@ -58,10 +58,10 @@ From the repo root, on `master`, with a clean release scope:
    - `bun run build`
    - the four batteries **sequentially and alone** (see gotchas):
      `bun run scripts/uitest/ext-battery-browser.ts`,
-     `…-dom.ts`, `…-proxy.ts`, `…-acceptance.ts` → expect **76/0**
+     `…-dom.ts`, `…-proxy.ts`, `…-acceptance.ts` → expect **77/0**
    - `bun run check:setup` → expect **61/0**
    - `bun run check:notices` → expect **47/0** and `bun run check:telemetry`
-     → expect **52/0** (both offline; the `:live` variants read the real hub)
+     → expect **63/0** (both offline; the `:live` variants read the real hub)
    - `npm pack --dry-run` for the packed file list
 3. **Commits** split by workstream (see the `git log` style: conventional
    subject + a body that enumerates the change and the gates). Keep
@@ -77,8 +77,16 @@ From the repo root, on `master`, with a clean release scope:
    what makes the skill's pinned raw links resolve — **never publish without
    the tag**.
 8. **Publish:** `npm publish`. `prepublishOnly` runs
-   `bun run typecheck && bun run gen:skill && bun run build`, so `dist/` is
-   rebuilt fresh before packing.
+   `bun run typecheck && bun run gen:skill && bun run build && bun run gen:telemetry-key`,
+   so `dist/` is rebuilt fresh AND the telemetry ingest key is baked into
+   `dist/telemetry-key.json` before packing. **`WEBUI_TELEMETRY_KEY` must be set
+   in the publishing shell** (the hub's `HUB_WRITE_KEY`, from
+   `/home/ubuntu/quickly-hub/.env`) or the publish ABORTS. That guard is
+   deliberate — 3.4.0/3.4.1 shipped with no key and collected nothing while every
+   gate stayed green. Put it in the **shell or a CI secret**, not in a `.env`:
+   Bun auto-loads `.env` and this repo does not gitignore it. Note
+   `npm publish --ignore-scripts` skips `prepublishOnly` and would ship inert
+   silently — never publish with it here.
 9. **Verify it landed:** `npm view opencode-webui version` shows the new version;
    the GitHub tag page resolves; a couple of the skill's `v{version}` raw links
    return 200.
@@ -181,17 +189,20 @@ the GitHub Release is the source of truth.
   reintroduce the bug, watch the check go red, restore it.
 - Scratch lives in `/tmp/opencode/`. Do not touch
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
-- **Telemetry ships INERT — a published install sends nothing until a key is
-  baked.** `server/telemetry.ts` has `DEFAULT_TELEMETRY_KEY = ""`, the hub's
-  `/v1/telemetry` requires its `HUB_WRITE_KEY` via `X-Quickly-Key`, and
-  `telemetryActive()` needs `url && key`. So `Settings › About › Usage data`
-  reads `configured:false` and no heartbeat is ever sent from an npm/binary
-  install (the 3.4.0/3.4.1 tarballs included) unless the runner sets
-  `WEBUI_TELEMETRY_KEY` (or a key is baked in). Consequence: **the hub will show
-  zero installs for a release even with real users** — do not read "0
-  opencode-webui instances" as "nobody installed it". The offline checks pass a
-  key explicitly; `scripts/uitest/telemetry-live.ts` does too, which is how the
-  two mock rows below reached the production hub.
+- **Telemetry is inert without a BAKED key — and that failure is invisible.**
+  `3.4.0`/`3.4.1` collected **zero** installs: `DEFAULT_TELEMETRY_KEY = ""`, the
+  hub's `/v1/telemetry` gates on `X-Quickly-Key` (= its `HUB_WRITE_KEY`), and
+  `telemetryActive()` needs `url && key` — so no install ever sent, while every
+  gate (including `check:telemetry`, which passes a key explicitly) stayed green
+  and `Settings › About › Usage data` read `configured:false`. **Fixed in 3.4.2:**
+  `prepublishOnly` runs `bun run gen:telemetry-key`, which writes
+  `dist/telemetry-key.json` (packed + gitignored) and **aborts the publish when
+  `WEBUI_TELEMETRY_KEY` is unset**. `server/telemetry.ts` resolves
+  `env → dist/telemetry-key.json → ""` (fail-open on a missing/corrupt file).
+  Compiled binaries are inert by channel (`updateChannel() → "binary"`), so they
+  never send and need no key — this is npm-only. **When reading the hub, a 0 is
+  still not a download count** (everyone may have opted out); npm's per-version
+  stats are the download number, and they lag ~1–2 days.
 - **Hub hygiene:** the production hub's `instance` table is the product's real
   telemetry. Two mock instances created by live telemetry testing during the
   3.4.0 build (`product=quickly` + `app_version=3.4.0` — impossible for Quickly,
@@ -206,6 +217,45 @@ the GitHub Release is the source of truth.
   2026-10-18), so a fresh tag cannot be counted there yet; re-check ~48h later.
 
 ## Entries
+
+### 3.4.2 — 2026-10-18
+- **Type:** patch (fixes; no extension-contract change).
+- **Shipped:** **telemetry actually reports now.** 3.4.0/3.4.1 shipped the feature
+  with `DEFAULT_TELEMETRY_KEY = ""` and no key in the artifact, so
+  `telemetryActive()` was false everywhere and the hub collected nothing — while
+  every gate (including `check:telemetry`, which passes a key explicitly) stayed
+  green. `server/telemetry.ts` now resolves the key
+  `WEBUI_TELEMETRY_KEY` → `dist/telemetry-key.json` (baked at publish) →
+  `DEFAULT_TELEMETRY_KEY` (still empty, so a checkout never sends; a missing or
+  corrupt baked file is fail-open). New `scripts/gen-telemetry-key.ts` writes that
+  file from the env with mode 0600 and **refuses to produce an artifact without a
+  key**; `prepublishOnly` runs it, so `npm publish` fails loudly instead of
+  shipping inert. The key never enters git (`dist/` is packed and gitignored) —
+  the same shape Quickly uses (`QUICKLY_TELEMETRY_KEY` at build time). Compiled
+  binaries stay inert by channel (`updateChannel() → "binary"`): npm-only. The
+  static handler now 404s `GET /telemetry-key.json` (it is server-side data, not
+  a browser asset), the generator's `--out` is fenced to tests and cannot write
+  the key to a tracked path, and an existing file is chmodded to 0600.
+  `check:telemetry` grew 11 checks — deterministic in BOTH states (a published
+  checkout's key file is stashed and restored, so the suite no longer goes red
+  after a publish): no key in git; the env override wins; the baked key is used
+  and makes the release ACTIVE; a corrupt file is fail-open; and the generator's
+  refusal (+ why), its 0600 output, and that it never echoes the key → **63/0**.
+- **Docs:** `docs/reference/telemetry.md` ("Opt-out, on by default in a release",
+  the bake step, the resolution order, the key's public/global nature),
+  `docs/operations.md`, `AGENTS.md` (packaging/CI), `README.md` (its "no
+  telemetry" line was no longer true — and the README ships inside the tarball
+  that now sends), and this file's publish step + the inert-telemetry gotcha.
+- **Publish:** requires `WEBUI_TELEMETRY_KEY` in the publishing shell (the hub's
+  `HUB_WRITE_KEY`); `prepublishOnly` aborts without it.
+- **Verified:** typecheck 0, build 0, `check:telemetry` **63/0** (with AND without
+  a published key file present), extension battery **35/10/17/15 = 77/0**,
+  `check:setup` **61/0**, `check:notices` **47/0**, a real `npm pack` extracted to
+  scratch resolves `""` with no baked key and the key with one (the packed-install
+  layout, not just the repo), the static handler now 404s
+  `/telemetry-key.json`, and a 6-assertion probe showed the resolution flipping
+  `telemetryActive()` **false → true** (checkout ⇒ inert, baked ⇒ active, env
+  override wins, corrupt file ⇒ fail-open).
 
 ### 3.4.1 — 2026-10-18
 - **Type:** patch (a fix + one small shipped hint + a doc sweep; no

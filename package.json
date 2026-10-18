@@ -3,7 +3,7 @@
   "description": "Web UI for the OpenCode coding agent \u2014 chat, streaming, tool cards, and extensions over the OpenCode engine's HTTP API.",
   "private": false,
   "type": "module",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -38,6 +38,7 @@
     "start": "NODE_ENV=production bun run server/index.ts",
     "typecheck": "tsc --noEmit",
     "gen:skill": "bun run scripts/gen-skill.ts",
+    "gen:telemetry-key": "bun run scripts/gen-telemetry-key.ts",
     "check:ext": "bun run scripts/check-ext.ts",
     "check:setup": "bun run scripts/uitest/setup-check.ts",
     "check:setup:engine": "bun run scripts/uitest/setup-engine-check.ts",
@@ -51,7 +52,7 @@
     "check:engine-guard": "bun run scripts/uitest/engine-guard-check.ts",
     "check:swap": "bun run scripts/uitest/swap-ready.ts",
     "testkit:example": "bun run scripts/testkit/example.test.ts",
-    "prepublishOnly": "bun run typecheck && bun run gen:skill && bun run build"
+    "prepublishOnly": "bun run typecheck && bun run gen:skill && bun run build && bun run gen:telemetry-key"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
