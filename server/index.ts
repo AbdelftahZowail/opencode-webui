@@ -60,6 +60,21 @@ import { createEngineResolver } from "./engineResolver";
 import { discoverEngine } from "./engineDiscovery";
 import { handleShelfRequest } from "./shelf";
 import {
+  appVersionString,
+  enabled as telemetryEnabled,
+  envDisabled as telemetryEnvDisabled,
+  initTelemetry,
+  instanceId as telemetryInstanceId,
+  releaseVersion,
+  setEnabled as setTelemetryEnabled,
+  startTelemetryHeartbeat,
+  telemetryActive,
+  telemetryKey,
+  telemetryUrl,
+  type TelemetryFacts,
+} from "./telemetry";
+import { getNotices } from "./notices";
+import {
   clearPidFile,
   ensureSetup,
   resolveLaunchCommand,
@@ -1389,6 +1404,36 @@ const server: Server<Record<string, unknown>> = Bun.serve({
       setTimeout(() => spawnDetached({ cmd: [...launch.cmd, "restart"], display: "restart" }), 300);
       return Response.json({ ok: true, restarting: true });
     }
+    // Anonymous usage telemetry (Settings › Telemetry). Reads/writes the
+    // durable opt-out toggle; `WEBUI_TELEMETRY=false` is a hard kill that wins
+    // over it (reported as `envDisabled` so the UI can lock the switch). Sits
+    // behind the same session auth as every other /api/webui route.
+    if (method === "GET" && path === "/api/webui/telemetry") {
+      return Response.json(telemetryStatus());
+    }
+    if (method === "PUT" && path === "/api/webui/telemetry") {
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json({ error: "invalid JSON body" }, { status: 400 });
+      }
+      if (typeof (body as { enabled?: unknown } | null)?.enabled !== "boolean") {
+        return Response.json({ error: "enabled (boolean) required" }, { status: 400 });
+      }
+      setTelemetryEnabled((body as { enabled: boolean }).enabled);
+      dbg("telemetry:", (body as { enabled: boolean }).enabled ? "enabled" : "disabled");
+      return Response.json(telemetryStatus());
+    }
+    // Product notices — the hub's product-scoped version ("What's New") and
+    // announcement feeds, proxied so the browser never talks to the hub (CORS)
+    // and every tab shares one cached, fail-open read (server/notices.ts).
+    // Public hub reads: no key is sent and nothing about this install leaves
+    // the machine. Never gated on the telemetry opt-out (a security notice must
+    // reach a telemetry-off user).
+    if (method === "GET" && path === "/api/webui/notices") {
+      return Response.json(await getNotices());
+    }
     // R11b update check — proxy-local (no engine route). Probes the npm registry
     // for the latest published version and reports the running channel. A failed
     // probe answers HTTP 200 with `unavailable:true` so the UI shows a soft
@@ -1829,6 +1874,78 @@ function settingsPayload() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Anonymous usage telemetry (`/api/webui/telemetry`).
+//
+// The status is safe to send to the browser: it exposes only whether sending
+// is currently possible, never the key. `envDisabled` lets the UI lock the
+// toggle when WEBUI_TELEMETRY=false pins it off. The telemetry module itself
+// (server/telemetry.ts) owns the wire format and the allowlist.
+// ---------------------------------------------------------------------------
+
+function telemetryStatus() {
+  return {
+    enabled: telemetryEnabled(),
+    envDisabled: telemetryEnvDisabled(),
+    /** Would a heartbeat actually be sent right now (release + configured + on)? */
+    active: telemetryActive(),
+    /** A real release version is running (dev/binary/sandbox are inert). */
+    release: releaseVersion() !== null,
+    configured: Boolean(telemetryUrl() && telemetryKey()),
+    url: telemetryUrl(),
+    version: appVersionString(),
+    instanceId: telemetryInstanceId(),
+  };
+}
+
+/**
+ * Coarse, non-identifying facts for the next heartbeat. Extension counts come
+ * from folder discovery; the session count is a best-effort engine probe that
+ * degrades to null. Nothing here is user content — counts and capability flags
+ * only.
+ */
+async function telemetryFacts(): Promise<TelemetryFacts> {
+  let entries: UIEntry[] = [];
+  try {
+    entries = discoverUserUIEntries();
+  } catch {
+    /* discovery is TTL-cached and never throws, but stay defensive */
+  }
+  let domExtensions = 0;
+  let proxyExtensions = 0;
+  for (const entry of entries) {
+    if (entry.domEntry) domExtensions++;
+    const dir = entry.entry
+      ? dirname(entry.entry)
+      : entry.domEntry
+        ? dirname(entry.domEntry)
+        : null;
+    if (dir && existsSync(join(dir, "server.ts"))) proxyExtensions++;
+  }
+  return {
+    sessionsCount: await countEngineSessions(),
+    extensionsCount: entries.length,
+    domExtensions,
+    proxyExtensions,
+  };
+}
+
+/** Best-effort session count (a count only — never titles or content). */
+async function countEngineSessions(): Promise<number | null> {
+  try {
+    const ep = await serviceEndpoint();
+    const res = await fetch(`${ep.url}/api/session`, {
+      headers: Service.headers(ep),
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { data?: unknown };
+    return Array.isArray(body.data) ? body.data.length : null;
+  } catch {
+    return null;
+  }
+}
+
 // First-run setup: the global command + OpenCode lifecycle plugin. A matching
 // install is a no-op; the first install (and a refresh after an upgrade) shows
 // a one-time notice with the undo.
@@ -1856,6 +1973,11 @@ const SETUP = ensureSetup({
 // First-boot banner — the entire onboarding. The generated password is
 // printed exactly once and never logged anywhere else.
 const displayHost = isLoopbackHostname(HOST === "localhost" ? "localhost" : HOST) ? "localhost" : HOST;
+const TELEMETRY_LINE = telemetryEnvDisabled()
+  ? "[webui] telemetry: disabled by WEBUI_TELEMETRY"
+  : telemetryActive()
+    ? `[webui] telemetry: anonymous usage on (${telemetryUrl()}) — turn off in Settings`
+    : "[webui] telemetry: off (not a published release, or not configured)";
 console.log(
   [
     `[webui] ready → ${CONFIG.publicUrl ?? `http://${displayHost}:${server.port}`}`,
@@ -1869,6 +1991,7 @@ console.log(
           }`,
     ENGINE_LINE,
     ...(EXPOSURE.level === "ok" ? [] : [`[webui] exposed: ${EXPOSURE.message}`]),
+    TELEMETRY_LINE,
     `[webui] hosts: ${describeHosts()}`,
     `[webui] same sessions as your opencode TUI — it's the same engine`,
     `[webui] extensions: drop folders in ${globalUserExtensionsDir()}/<name>/ (index.tsx + manifest.json)`,
@@ -1881,6 +2004,18 @@ console.log(
 void startEventRecorder();
 startExtensionWatcher();
 void startExtModules();
+
+// Anonymous usage telemetry (server/telemetry.ts): opt-out, release-gated and
+// fail-open. `initTelemetry` pins the boot version/channel; the heartbeat fires
+// once ~45s after boot and every 12h. A dev checkout, a compiled binary and a
+// sandbox are all inert by design (see releaseVersion).
+initTelemetry({
+  version: PKG_VERSION,
+  channel: updateChannel(),
+  sandbox: SANDBOX(),
+  facts: telemetryFacts,
+});
+startTelemetryHeartbeat((message) => console.log(`[webui] ${message}`));
 
 // Crash-log boot note: if a previous proxy died fatally, its reason is the
 // last line of CRASH_LOG — surface it so the next boot (or an agent reading

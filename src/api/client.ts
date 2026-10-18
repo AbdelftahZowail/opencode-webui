@@ -615,6 +615,24 @@ export type WebuiUpdateResult =
   | { ok: false; error: string };
 
 /**
+ * `GET/PUT /api/webui/telemetry` — anonymous-usage opt-out state (proxy-owned;
+ * server/telemetry.ts). `envDisabled` means `WEBUI_TELEMETRY=false` pins it off
+ * (the UI locks the switch); `active` is whether a heartbeat would actually be
+ * sent right now (enabled + configured + a published release). The key is never
+ * exposed — only the public hub `url`.
+ */
+export interface WebuiTelemetry {
+  enabled: boolean;
+  envDisabled: boolean;
+  active: boolean;
+  release: boolean;
+  configured: boolean;
+  url: string;
+  version: string;
+  instanceId: string;
+}
+
+/**
  * `GET /api/webui/update/check` — proxy-local update probe (the engine has no
  * update route; the proxy fetches the npm registry). `channel` distinguishes a
  * repo checkout (`dev`), a compiled binary, and a published install, because the
@@ -629,6 +647,60 @@ export interface WebuiUpdateCheck {
   channel: "dev" | "binary" | "published";
   unavailable?: boolean;
   error?: string;
+}
+
+/**
+ * `GET /api/webui/config` — proxy metadata: the running app version, where to
+ * report issues, and the build identity. `build.tree` is a content hash of the
+ * served tree (prod badges show the shipped version only; dev appends this
+ * hash). Proxy-local, no engine route; the version badge and Settings › About
+ * both read it.
+ */
+export interface WebuiBuildInfo {
+  tree: string | null;
+  rev: string | null;
+  dirty: boolean;
+  changedAt?: number | null;
+}
+
+export interface WebuiConfig {
+  version: string;
+  reportRepo?: string;
+  build: WebuiBuildInfo;
+}
+
+/**
+ * `GET /api/webui/notices` — the hub's product-scoped feeds, proxied (the
+ * browser never calls the hub; see `server/notices.ts`). `announcements` are
+ * ad-hoc product messages; `versions` are release notes ("What's New"). Both
+ * are public hub reads with no key. Fail-open: an unreachable hub resolves with
+ * `unavailable: true` and empty lists, never a throw.
+ */
+export interface WebuiAnnouncement {
+  id: number;
+  title: string;
+  body: string;
+  level: "info" | "warning" | "security";
+  product: string;
+  published_at?: string | null;
+  expires_at?: string | null;
+}
+
+export interface WebuiRelease {
+  name: string;
+  tag?: string;
+  title?: string;
+  body?: string;
+  published_at?: string | null;
+  prerelease?: boolean;
+  security?: boolean;
+}
+
+export interface WebuiNotices {
+  announcements: WebuiAnnouncement[];
+  versions: WebuiRelease[];
+  unavailable: boolean;
+  fetchedAt?: string | null;
 }
 
 const apiRaw = {
@@ -652,12 +724,29 @@ const apiRaw = {
   webuiRestart: () =>
     request<{ ok: boolean; restarting: boolean }>("/api/webui/settings/restart", { method: "POST" }),
 
+  // anonymous usage telemetry — read the opt-out state, set the toggle
+  webuiTelemetry: () => request<WebuiTelemetry>("/api/webui/telemetry"),
+  webuiTelemetryUpdate: (enabled: boolean) =>
+    request<WebuiTelemetry>("/api/webui/telemetry", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+      headers: { "content-type": "application/json" },
+    }),
+
   /**
    * Proxy-local update check (no engine route): the proxy asks the npm
    * registry for the latest published version and reports the running
    * `channel`. A failed probe resolves with `unavailable: true`, not a throw.
    */
   checkWebuiUpdate: () => request<WebuiUpdateCheck>("/api/webui/update/check"),
+  /** Proxy metadata: the running app version + build identity (Settings › About). */
+  webuiConfig: () => request<WebuiConfig>("/api/webui/config"),
+  /**
+   * Product notices: the hub's announcement + version (release note) feeds,
+   * proxied and cached by the proxy. Fail-open — an unreachable hub resolves
+   * with `unavailable: true`, not a throw.
+   */
+  webuiNotices: () => request<WebuiNotices>("/api/webui/notices"),
   /**
    * Proxy-local update install: spawns the detached `update` CLI and returns
    * immediately. The running version only changes on the published channel —

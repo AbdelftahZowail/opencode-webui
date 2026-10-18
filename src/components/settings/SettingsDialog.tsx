@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { Blocks, Bell, ChevronLeft, ChevronRight, Palette, Puzzle, ShieldCheck, Smartphone, Terminal, XIcon } from "lucide-react";
+import { Blocks, Bell, ChevronLeft, ChevronRight, Info, Palette, Puzzle, ShieldCheck, Smartphone, Terminal, XIcon } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogHeader, DialogOverlay, DialogPortal, DialogTitle } from "../ui/dialog";
@@ -31,6 +31,8 @@ import { PermissionSection } from "./PermissionSection";
 // below), so their modules must evaluate here.
 import "./PluginsSection";
 import "./ShellSection";
+import "./TelemetrySection";
+import "./AboutSection";
 import "../../theme/AppearanceSection";
 import { Empty, SectionHeader, inputCls } from "./shared";
 import { checkPlugins, loadPlugins, updatePlugins, useStore } from "../../store";
@@ -112,6 +114,7 @@ export function SettingsDialog() {
       { id: "plugins", label: "Plugins", icon: Puzzle },
       { id: "notifications", label: "Notifications", icon: Bell },
       { id: "security", label: "Security", icon: ShieldCheck },
+      { id: "about", label: "About", icon: Info },
       { id: "appearance", label: "Appearance", icon: Palette },
       { id: "shell", label: "Shell", icon: Terminal },
       ...(phone ? [{ id: "app", label: "App", icon: Smartphone }] : []),
@@ -150,7 +153,7 @@ export function SettingsDialog() {
           <DialogHeader className="pr-8">
             <DialogTitle>Settings</DialogTitle>
             <p className="text-xs text-[var(--text-weaker)]">
-              Extensions · plugins · notifications · security · appearance · shell{phone ? " · app" : ""}
+              Extensions · plugins · notifications · security · about · appearance · shell{phone ? " · app" : ""}
             </p>
           </DialogHeader>
 
@@ -178,6 +181,9 @@ export function SettingsDialog() {
                   <PermissionSection />
                   <AccessSection />
                 </div>
+              </TabsContent>
+              <TabsContent value="about">
+                <Target id="settings.about" />
               </TabsContent>
               <TabsContent value="appearance">
                 <Target id="settings.appearance" />

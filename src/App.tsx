@@ -11,6 +11,7 @@ import { Toasts } from "./components/Toasts";
 import { ImageViewer } from "./components/ImageViewer";
 import { ConnectDialog } from "./components/ConnectDialog";
 import { ShelfPage } from "./components/shelf/ShelfPage";
+import { openSettings } from "./components/settings/SettingsDialog";
 import { copyText } from "./components/markdown/clipboard";
 import { api } from "./api/client";
 import type { MessageInfo } from "./api/types";
@@ -18,6 +19,7 @@ import { Target, getContributions, subscribeRegistry, type PageContribution } fr
 import { handCharToComposer, setupPasteHandoff } from "./lib/composerHandoff";
 import { OPEN_SEARCH_EVENT } from "./lib/uiEvents";
 import { log } from "./lib/log";
+import { notify } from "./lib/notify";
 import { useHotkeys } from "./hooks/useHotkeys";
 import { useKeyboardOpen } from "./hooks/useKeyboardOpen";
 import {
@@ -80,6 +82,12 @@ import {
 } from "./store";
 import { filterSessionsToProject } from "./lib/sessionSearch";
 import { getDismissedUpdateVersion, setDismissedUpdateVersion } from "./lib/updateNotice";
+import {
+  dismissAnnouncement,
+  getDismissedAnnouncementIds,
+  matchingRelease,
+  pickAnnouncement,
+} from "./lib/notices";
 import type { ProjectInfo } from "./api/client";
 
 /** Extension page routes: /ext/{id} (id auto-derived from the extension id). */
@@ -449,6 +457,29 @@ export default function App() {
 }
 
 /**
+ * R3 tab→pins switch notice. The in-app pin button flips `session.tabs.enabled`;
+ * the pins rail is deliberately empty (and absent) when nothing is pinned, so
+ * this one-time, dismissible toast is the pointer back. Guarded by both an
+ * in-memory flag and `localStorage` so it appears once — never per render.
+ */
+const PINS_HINT_KEY = "webui.tabs.pinsHint";
+let pinsHintShown = false;
+function showPinsModeNoticeOnce(): void {
+  if (pinsHintShown) return;
+  try {
+    if (localStorage.getItem(PINS_HINT_KEY) === "1") {
+      pinsHintShown = true;
+      return;
+    }
+    localStorage.setItem(PINS_HINT_KEY, "1");
+  } catch {
+    /* private mode — fall back to the in-memory guard alone */
+  }
+  pinsHintShown = true;
+  notify({ title: "Pins mode — switch back anytime in Settings › Appearance." });
+}
+
+/**
  * R3 session-tab rail host: reads the resolved tab view model + the open
  * slice's enabled/closed state and renders the registered `session.tabs`
  * target, so extensions can wrap or replace the rail without touching App.
@@ -471,7 +502,12 @@ function SessionTabsHost() {
       onReorder={moveSessionTab}
       onCloseOthers={closeOtherSessionTabs}
       onCloseAll={closeAllSessionTabs}
-      onToggleTabs={() => setTabsEnabled(!enabled)}
+      onToggleTabs={() => {
+        const next = !enabled;
+        setTabsEnabled(next);
+        // Tab→pins only: point at the Settings switch, once.
+        if (!next) showPinsModeNoticeOnce();
+      }}
     />
   );
 }
@@ -575,14 +611,33 @@ function PairHost() {
  * R11 update-notice host: renders the registered `update.notice` only while the
  * store carries a notice. R11b wires the real check/install/restart actions; the
  * dismissed version is persisted via `lib/updateNotice` and Skip records it.
+ *
+ * Product notices share this one surface: when the hub has an announcement, the
+ * card shows it (highest severity first, dismissals persisted via
+ * `lib/notices`), and an offered update is enriched with its release note. An
+ * install/restart the user must act on outranks a passive announcement.
  */
 function UpdateNoticeHost() {
   const notice = useStore((s) => s.updateNotice);
-  if (!notice) return null;
+  const notices = useStore((s) => s.notices);
+  const [dismissedIds, setDismissedIds] = useState<string[]>(() => getDismissedAnnouncementIds());
+
+  const announcement = pickAnnouncement(notices?.announcements ?? [], dismissedIds);
+  const mustAct = notice?.state === "installing" || notice?.state === "installed";
+  const showAnnouncement = announcement !== null && !mustAct;
+  const release =
+    notice?.state === "available"
+      ? matchingRelease(notices?.versions ?? [], notice.version)
+      : null;
+
+  if (!notice && !announcement) return null;
+
   return (
     <Target
       id="update.notice"
-      {...notice}
+      {...(notice ?? { state: "current" as const })}
+      announcement={showAnnouncement ? announcement : null}
+      release={release}
       dismissedVersion={getDismissedUpdateVersion()}
       onSkip={(version: string) => {
         setDismissedUpdateVersion(version);
@@ -592,6 +647,8 @@ function UpdateNoticeHost() {
       onRestart={() => void restartUpdate()}
       onRetry={() => void checkForUpdate()}
       onClose={() => setUpdateNotice(null)}
+      onDismissAnnouncement={(id: number) => setDismissedIds(dismissAnnouncement(id))}
+      onDetails={() => openSettings("about")}
     />
   );
 }

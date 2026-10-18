@@ -14,6 +14,8 @@ import {
   type PromptDelivery,
   type PromptFile,
   type VcsBase,
+  type WebuiNotices,
+  type WebuiUpdateCheck,
   type WorktreeCreateInput,
   type WorktreeDirectory,
   type WorktreeRemoveInput,
@@ -546,6 +548,20 @@ export interface State {
     channel?: "dev" | "binary" | "published";
   } | null;
   /**
+   * R11b — the raw result of the last update probe (current/latest/channel/
+   * updateAvailable), kept independently of the `updateNotice` state machine so
+   * a surface that is NOT the notice card (Settings › About) can show the
+   * running version, channel and update status at any time — including when the
+   * card is silent. Populated by `checkForUpdate`; null until the first probe.
+   */
+  updateCheck: WebuiUpdateCheck | null;
+  /**
+   * Product notices from the hub (announcements + release notes), proxied by
+   * the proxy. `null` = not fetched yet; an unreachable hub yields
+   * `{ announcements: [], versions: [], unavailable: true }`, never an error.
+   */
+  notices: WebuiNotices | null;
+  /**
    * R11a — server-side session-search state for the session-list dialog. The
    * engine's search is GLOBAL, so `allProjects` only picks whether the DISPLAY
    * is scoped to the focused session's project subtree client-side.
@@ -674,6 +690,8 @@ const initialState: State = {
   statsError: null,
   errorDetails: null,
   updateNotice: null,
+  updateCheck: null,
+  notices: null,
   sessionSearch: { query: "", allProjects: false, results: null, searching: false },
 };
 
@@ -3177,6 +3195,9 @@ export function startStore() {
   // R11b: best-effort update probe at boot — non-blocking, never throws, and
   // SILENT unless a real update is offered (no recurring toast on reload).
   void checkForUpdate({ silent: true });
+  // Product notices (announcements + release notes) from the hub, once at boot.
+  // Fail-open and silent: nothing renders when the hub is unreachable.
+  void checkNotices();
   void api
     .health()
     .then((h) => setState({ serviceOK: h.ok }))
@@ -3442,6 +3463,10 @@ export async function checkForUpdate(opts: { silent?: boolean } = {}) {
   setState({ updateNotice: { state: "checking" } });
   try {
     const res = await api.checkWebuiUpdate();
+    // Record the raw probe for surfaces that are not the notice card
+    // (Settings › About): one machine, one source of truth. It survives the
+    // `silent` null-out below because it is a separate slice.
+    setState({ updateCheck: res });
     if (res.unavailable) {
       // A failed probe is normal behind a firewall; at boot keep it SILENT so
       // an unreachable registry never raises a toast on every reload.
@@ -3471,15 +3496,22 @@ export async function checkForUpdate(opts: { silent?: boolean } = {}) {
       updateNotice: silent ? null : { state: "current", currentVersion: res.current, channel: res.channel },
     });
   } catch (err) {
-    setState({ updateNotice: silent ? null : { state: "failed", error: parityError(err) } });
+    setState({
+      updateCheck: null,
+      updateNotice: silent ? null : { state: "failed", error: parityError(err) },
+    });
   }
 }
 
 /** Install the offered version (detached CLI), then prompt for a restart. */
 export async function installUpdate() {
-  const version = state.updateNotice?.version;
-  const currentVersion = state.updateNotice?.currentVersion;
-  const channel = state.updateNotice?.channel;
+  // Prefer the notice's own values; fall back to the last raw probe so a
+  // surface that is NOT the card (Settings › About) can offer Update after the
+  // card was dismissed or the boot probe was silent.
+  const check = state.updateCheck;
+  const version = state.updateNotice?.version ?? check?.latest ?? undefined;
+  const currentVersion = state.updateNotice?.currentVersion ?? check?.current;
+  const channel = state.updateNotice?.channel ?? check?.channel;
   // The detached CLI `update` only applies on a PUBLISHED install; a dev
   // checkout / compiled binary logs and exits without changing the running
   // version. Say so instead of claiming an install that did not happen.
@@ -3510,6 +3542,22 @@ export async function restartUpdate() {
     await api.webuiRestart();
   } catch {
     /* the socket drops during a restart — a dropped response is the expected result */
+  }
+}
+
+// ---- Product notices (announcements + release notes) ----------------------
+//
+// One best-effort fetch at boot of the proxy's cached hub read (announcements +
+// the product's release notes). Fail-open: an unreachable hub leaves an empty,
+// `unavailable` slice; a notice is a nicety, never a dependency, so nothing here
+// ever throws or surfaces an error.
+
+/** Refresh the product-notices slice. Never throws. */
+export async function checkNotices() {
+  try {
+    setState({ notices: await api.webuiNotices() });
+  } catch {
+    setState({ notices: { announcements: [], versions: [], unavailable: true } });
   }
 }
 

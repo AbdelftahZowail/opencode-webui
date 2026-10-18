@@ -78,6 +78,9 @@ server {
 | `WEBUI_PASSWORD` | generated on first boot, printed once | Shared login passphrase. Set it before exposing the UI beyond localhost. |
 | `WEBUI_DEBUG` | unset | `1` — server/proxy debug logs to stdout. |
 | `WEBUI_DEBUG_LOG` | `/tmp/webui-debug.log` | File the frontend log sink (`POST /api/debug`) appends to. |
+| `WEBUI_TELEMETRY` | unset (on) | `false` (or `0`/`no`/`off`) hard-disables the anonymous usage heartbeat; wins over the Settings toggle. |
+| `WEBUI_TELEMETRY_URL` | `https://telemetry.shortformfunnels.com` | Telemetry hub base URL. |
+| `WEBUI_TELEMETRY_KEY` | empty | Telemetry ingest key. Empty ⇒ nothing is sent. See `docs/reference/telemetry.md`. |
 
 If you must expose the port directly (LAN, no proxy), set `WEBUI_PASSWORD` —
 a passwordless wildcard bind is refused at startup.
