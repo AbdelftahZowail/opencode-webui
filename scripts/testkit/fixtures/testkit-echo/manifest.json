@@ -1,0 +1,6 @@
+{
+  "id": "testkit-echo",
+  "name": "Testkit Echo",
+  "version": "1.0.0",
+  "description": "Minimal four-strata fixture for the agent test harness: engine tool, proxy route, browser bundle, DOM marker."
+}

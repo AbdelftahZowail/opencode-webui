@@ -50,10 +50,12 @@ files.forEach((full, i) => {
   const rel = relative(distDir, full).split("\\").join("/");
   lines.push(`import f${i} from "../../dist/${rel}" with { type: "file" };`);
 });
-// The agent skill rides along so compiled binaries can still sync it to
-// ~/.config/opencode/skills/webui/ (node:fs cannot read the binary's virtual FS).
+// The agent skills ride along so compiled binaries can still sync them to
+// ~/.config/opencode/skills/<id>/ (node:fs cannot read the binary's virtual FS).
 const hasSkill = existsSync(join(repoRoot, "skills", "webui", "SKILL.md"));
 if (hasSkill) lines.push(`import skill from "../../skills/webui/SKILL.md" with { type: "file" };`);
+const hasTestkitSkill = existsSync(join(repoRoot, "skills", "testkit", "SKILL.md"));
+if (hasTestkitSkill) lines.push(`import testkitSkill from "../../skills/testkit/SKILL.md" with { type: "file" };`);
 lines.push("");
 lines.push("/** dist-relative path (\"/index.html\") -> embedded asset URL inside the binary. */");
 lines.push("export const embeddedDist: Record<string, string> = {");
@@ -64,6 +66,8 @@ lines.push("};");
 lines.push("");
 lines.push("/** Embedded copy of skills/webui/SKILL.md, or null when it was missing at build time. */");
 lines.push(`export const embeddedSkill: string | null = ${hasSkill ? "skill" : "null"};`);
+/** Embedded copy of skills/testkit/SKILL.md, or null when it was missing at build time. */
+lines.push(`export const embeddedTestkitSkill: string | null = ${hasTestkitSkill ? "testkitSkill" : "null"};`);
 lines.push("");
 
 const content = lines.join("\n");

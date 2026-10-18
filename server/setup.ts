@@ -50,7 +50,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   LIFECYCLE_PLUGIN_PACKAGE_JSON,
@@ -830,7 +830,8 @@ const USAGE = `${SERVICE_NAME} [command]
   restart     restart the running webui
   uninstall   remove the global command + OpenCode plugins (remembered; no auto-reinstall)
   sandbox     start an isolated second instance (loopback, no password, port 4099)
-  --install-skill   copy the agent skill and exit
+  testkit     run the real-client test harness: example | run <spec> | list
+  --install-skill   copy the agent skills and exit
 
 Environment:
   WEBUI_NO_SETUP=1    skip first-run setup for one run (CI, one-offs)
@@ -940,10 +941,99 @@ function runInternalSetup(entryUrl: string): number {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// testkit CLI — a launch surface over the shipped real-client test harness
+// ---------------------------------------------------------------------------
+
+/** The shipped testkit dir (this package's `scripts/testkit/`). */
+function testkitDir(): string {
+  return fileURLToPath(new URL("../scripts/testkit/", import.meta.url));
+}
+
+/**
+ * `opencode-webui testkit example|run <spec>|list`.
+ *
+ * SPAWNS the harness with bun; it never imports it. The harness pulls
+ * playwright-core, which must stay OUT of the server's static import graph —
+ * importing it here would drag playwright-core (and the whole harness) into the
+ * compiled binary. A binary therefore reports how to run testkit from an install.
+ */
+function runTestkitCli(rest: string[]): number {
+  const dir = testkitDir();
+  if (dir.includes("bunfs") || !existsSync(dir)) {
+    console.error(
+      `${SERVICE_NAME}: testkit is not available in a compiled binary — it needs the shipped source.\n` +
+        `  install it, then run:  bunx ${SERVICE_NAME} testkit example`,
+    );
+    return 1;
+  }
+  const spawnSpec = (entry: string, args: string[] = []): number => {
+    const res = Bun.spawnSync([process.execPath, "run", entry, ...args], {
+      stdio: ["inherit", "inherit", "inherit"],
+      cwd: process.cwd(),
+      env: { ...process.env },
+    });
+    return res.exitCode ?? 1;
+  };
+
+  switch (rest[0] ?? "help") {
+    case "example":
+      console.log(`[webui] testkit: running the worked example (from ${dir})`);
+      return spawnSpec(join(dir, "example.test.ts"));
+    case "run": {
+      const spec = rest[1];
+      if (!spec) {
+        console.error(`usage: ${SERVICE_NAME} testkit run <spec.ts>`);
+        return 1;
+      }
+      const path = isAbsolute(spec) ? spec : resolve(process.cwd(), spec);
+      if (!existsSync(path)) {
+        console.error(`${SERVICE_NAME}: spec not found: ${path}`);
+        return 1;
+      }
+      return spawnSpec(path);
+    }
+    case "list":
+      console.log(
+        `${SERVICE_NAME} testkit — shipped files:
+  ${dir}
+    harness.ts             start(), the API client, Reporter, expect, waitFor
+    browser.ts             resolves the environment's Chromium (or degrades)
+    ui.ts                  real Chromium driver
+    tui.ts                 real tmux + opencode driver
+    tuiRender.ts           xterm.js → PNG renderer (human-facing)
+    example.test.ts        the worked example
+    fixtures/testkit-echo/ four-strata fixture
+
+Run:    ${SERVICE_NAME} testkit example | run <spec.ts> | list
+Import: ${SERVICE_NAME}/scripts/testkit/harness  (from a spec file)
+Manual: ${resolve(dir, "..", "..", "skills", "testkit", "SKILL.md")}`,
+      );
+      return 0;
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(
+        `${SERVICE_NAME} testkit <command>
+
+  example        run the shipped worked example (boots an isolated engine + webui)
+  run <spec.ts>  run your own spec file against the shipped harness
+  list           show the shipped testkit files and the harness import path`,
+      );
+      return 0;
+    default:
+      console.error(`unknown testkit command: ${rest[0]}\n`);
+      console.error(`usage: ${SERVICE_NAME} testkit example | run <spec.ts> | list`);
+      return 1;
+  }
+}
+
 export async function runSetupCli(action: string | undefined, entryUrl: string, rest: string[] = []): Promise<number> {
   switch (action) {
     case "config":
       return runConfigCli(rest);
+    case "testkit":
+      return runTestkitCli(rest);
     case "internal:setup":
       return runInternalSetup(entryUrl);
     case "update":
