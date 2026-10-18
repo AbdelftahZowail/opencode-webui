@@ -1723,6 +1723,10 @@ const server: Server<Record<string, unknown>> = Bun.serve({
           return new Response("bad request", { status: 400 });
         }
         if (filePath === "/") filePath = "/index.html";
+        // The release-baked telemetry ingest key lives in dist/ for the SERVER to
+        // read. It is packed into the tarball by design, but it is not a browser
+        // asset — never hand it out over HTTP.
+        if (filePath === "/telemetry-key.json") return new Response("not found", { status: 404 });
         // Confine to dist/: a decoded "/..%2f" must not escape the static
         // root (arbitrary file read = secret.key = cookie forgery).
         const resolved = resolve(DIST_DIR, "." + filePath);

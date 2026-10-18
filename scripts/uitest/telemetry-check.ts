@@ -14,10 +14,11 @@
  *
  *   bun run check:telemetry
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  DEFAULT_TELEMETRY_KEY,
   MAX_CPU_COUNT,
   MAX_RAM_GB,
   PAYLOAD_KEYS,
@@ -33,6 +34,7 @@ import {
   setEnabled,
   storedSeq,
   telemetryActive,
+  telemetryKey,
   telemetryStatePath,
 } from "../../server/telemetry";
 
@@ -197,10 +199,27 @@ try {
   // --- env hard-kill + unset url/key ---------------------------------------
   configure({ envKill: true });
   check("WEBUI_TELEMETRY=false is a hard kill", envDisabled() === true && telemetryActive() === false);
-  // The hub URL has a public baked default; the KEY has none (release
-  // automation may bake one). An unset key therefore makes telemetry inert.
+  // The hub URL has a public baked default; the KEY may be baked into the
+  // artifact at release time (`dist/telemetry-key.json`). So "unset env" alone
+  // no longer means inert — assert the documented resolution order here, and
+  // prove the inert/active pair deterministically further down (the block that
+  // stashes any real baked file).
   configure({ key: null });
-  check("unset key prevents sending", telemetryActive() === false);
+  const bakedNow = (() => {
+    try {
+      const raw = JSON.parse(
+        readFileSync(join(import.meta.dir, "..", "..", "dist", "telemetry-key.json"), "utf8"),
+      ) as { key?: unknown };
+      return typeof raw.key === "string" ? raw.key.trim() : "";
+    } catch {
+      return "";
+    }
+  })();
+  check(
+    "unset env falls through to the release-baked key (none in a checkout)",
+    telemetryKey() === bakedNow,
+    `env unset ⇒ ${telemetryKey().length} chars, baked file ${bakedNow.length}`,
+  );
   // And with no URL at all, a send is a no-op (never a network call).
   check("empty URL prevents a send", (await postPayload(await buildPayload(), { url: "", key: "k" })) === false);
 
@@ -347,6 +366,84 @@ try {
     else process.env[k] = v;
   }
   rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// The release-baked key: env → dist/telemetry-key.json → "" (never in git)
+//
+// Deterministic in BOTH states: any key file the working tree happens to carry
+// (a real publish leaves one behind) is stashed first and restored afterwards,
+// so this proves the fix AND does not fail merely because dist/ was published.
+// ---------------------------------------------------------------------------
+{
+  const savedKey = process.env.WEBUI_TELEMETRY_KEY;
+  const dir = mkdtempSync(join(tmpdir(), "webui-key-"));
+  const bakedFile = join(import.meta.dir, "..", "..", "dist", "telemetry-key.json");
+  const stashed = join(dir, "stashed.json");
+  const hadBaked = existsSync(bakedFile);
+  if (hadBaked) renameSync(bakedFile, stashed);
+  try {
+    check("no ingest key is committed in the source", DEFAULT_TELEMETRY_KEY === "");
+
+    delete process.env.WEBUI_TELEMETRY_KEY;
+    __setReleaseOverride(true);
+    check(
+      "checkout (no env, no baked file) ⇒ no key, and INERT — the 3.4.0/3.4.1 state",
+      telemetryKey() === "" && telemetryActive() === false,
+      `key=${telemetryKey().length} chars, active=${telemetryActive()}`,
+    );
+
+    mkdirSync(dirname(bakedFile), { recursive: true });
+    writeFileSync(bakedFile, `${JSON.stringify({ key: "CHECK-BAKED-KEY" })}\n`, { mode: 0o600 });
+    check("a release-baked key is used with no env", telemetryKey() === "CHECK-BAKED-KEY", telemetryKey());
+    check("…and the release is ACTIVE (the fix)", telemetryActive() === true);
+    process.env.WEBUI_TELEMETRY_KEY = "env-wins-key";
+    check("the env override still wins over the baked key", telemetryKey() === "env-wins-key", telemetryKey());
+    delete process.env.WEBUI_TELEMETRY_KEY;
+    writeFileSync(bakedFile, "{ not json");
+    check("a corrupt baked file is fail-open (no key, no throw)", telemetryKey() === "");
+    rmSync(bakedFile, { force: true });
+
+    // The generator is the guard that stops a release from silently shipping
+    // inert (exactly what 3.4.0/3.4.1 did): it MUST refuse an empty key.
+    const gen = join(import.meta.dir, "..", "gen-telemetry-key.ts");
+    const out = join(dir, "telemetry-key.json");
+    const bare = Bun.spawnSync([process.execPath, "run", gen, "--out", out], {
+      env: { ...process.env, WEBUI_TELEMETRY_KEY: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    check(
+      "gen:telemetry-key REFUSES to bake without a key",
+      bare.exitCode !== 0 && !existsSync(out),
+      `exit ${bare.exitCode}`,
+    );
+    check("…and says why", bare.stderr.toString().includes("WEBUI_TELEMETRY_KEY"));
+
+    const baked = Bun.spawnSync([process.execPath, "run", gen, "--out", out], {
+      env: { ...process.env, WEBUI_TELEMETRY_KEY: "baked-test-key" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    check(
+      "gen:telemetry-key writes the key when given one",
+      baked.exitCode === 0 && (JSON.parse(readFileSync(out, "utf8")) as { key?: string }).key === "baked-test-key",
+      `exit ${baked.exitCode}`,
+    );
+    check(
+      "the baked key file is 0600 (never world-readable)",
+      (statSync(out).mode & 0o777) === 0o600,
+      (statSync(out).mode & 0o777).toString(8),
+    );
+    check("the generator never echoes the key", !baked.stdout.toString().includes("baked-test-key"));
+  } finally {
+    rmSync(bakedFile, { force: true });
+    if (hadBaked) renameSync(stashed, bakedFile);
+    if (savedKey === undefined) delete process.env.WEBUI_TELEMETRY_KEY;
+    else process.env.WEBUI_TELEMETRY_KEY = savedKey;
+    __setReleaseOverride(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 async function grepRepo(dir: string, tokens: string[]): Promise<string[]> {

@@ -8,10 +8,13 @@ this page.
 
 ## Privacy posture
 
-- **Opt-out, default on.** The **Settings › About › Usage data** toggle (the
-  `settings.telemetry` target, at the bottom of the About page; persisted in the
-  proxy's state file) can turn it off; `WEBUI_TELEMETRY=false` is a hard kill
-  that wins over the toggle. An unset URL/key also prevents sending.
+- **Opt-out, on by default in a release.** The **Settings › About › Usage data**
+  toggle (the `settings.telemetry` target, at the bottom of the About page;
+  persisted in the proxy's state file) can turn it off; `WEBUI_TELEMETRY=false`
+  is a hard kill that wins over the toggle. "On" means the release you installed
+  **baked an ingest key at publish time** (`bun run gen:telemetry-key`); a
+  **source checkout has no key and sends nothing** until `WEBUI_TELEMETRY_KEY`
+  is set, and a compiled binary is inert by channel (see *Release-gated*).
 - **Server-side only.** The browser holds no telemetry credential and sends
   nothing itself — the toggle and the About "Usage data" block talk to a proxy
   route that owns the key.
@@ -93,15 +96,28 @@ reach a telemetry-off user). The page renders it on the `update.notice` surface
 | --- | --- | --- |
 | `WEBUI_TELEMETRY` | unset | `false` (or `0`/`no`/`off`) hard-disables telemetry; wins over the toggle. |
 | `WEBUI_TELEMETRY_URL` | `https://telemetry.shortformfunnels.com` | Hub base URL. |
-| `WEBUI_TELEMETRY_KEY` | empty | Ingest key. Empty ⇒ no sending. Release automation may bake one. |
+| `WEBUI_TELEMETRY_KEY` | empty | Ingest key **override** (a test/staging hub, a local run). Empty ⇒ fall through to the release-baked key, then to no sending. |
+
+The key a released install uses is **baked at publish time**: `prepublishOnly`
+runs `bun run gen:telemetry-key`, which writes `dist/telemetry-key.json` from
+`WEBUI_TELEMETRY_KEY` and **fails the publish when it is unset** — an artifact
+that would collect nothing must never ship silently (3.4.0/3.4.1 did, and every
+gate stayed green). `dist/` is packed into the tarball *and* gitignored, so the
+key travels in the release and never in git — the same shape Quickly uses
+(build-time `QUICKLY_TELEMETRY_KEY`). Runtime resolution order:
+`WEBUI_TELEMETRY_KEY` → `dist/telemetry-key.json` → `DEFAULT_TELEMETRY_KEY` (empty).
 
 ## Routes
 
 - `GET /api/webui/telemetry` → `{ enabled, envDisabled, active, release, configured, url, version, instanceId }`
 - `PUT /api/webui/telemetry` `{ enabled }` → same shape (the toggle).
 
-Both sit behind the same session auth as every other `/api/webui/*` route. The
-key is never exposed.
+Both sit behind the same session auth as every other `/api/webui/*` route, and
+neither ever returns the key; the static handler refuses
+`GET /telemetry-key.json` too. The key's real nature: it is **baked into the
+published tarball** (that is the point) and it is the hub's **global**
+`HUB_WRITE_KEY`, shared by every product on that hub. It is an ingestion filter,
+not a credential and not a security boundary.
 
 ## Checks
 

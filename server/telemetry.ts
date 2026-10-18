@@ -34,7 +34,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { arch as osArch, cpus, homedir, platform as osPlatform, totalmem } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const SCHEMA_VERSION = 1;
 /** Product discriminator — the hub separates installs of different apps by it. */
@@ -42,8 +43,9 @@ export const PRODUCT = "opencode-webui";
 
 /**
  * Public hub endpoint and the ingest key. The URL is public by design. The key
- * is a public ingestion filter, not an admin credential or a security boundary
- * (release automation may bake one); an empty key simply disables sending.
+ * is a public ingestion filter, not an admin credential or a security boundary:
+ * the release pipeline BAKES one into the artifact (see `telemetryKey`), and an
+ * empty key simply disables sending.
  */
 export const DEFAULT_TELEMETRY_URL = "https://telemetry.shortformfunnels.com";
 export const DEFAULT_TELEMETRY_KEY = "";
@@ -291,8 +293,33 @@ export function telemetryUrl(): string {
   return (process.env.WEBUI_TELEMETRY_URL || DEFAULT_TELEMETRY_URL).trim().replace(/\/+$/, "");
 }
 
+/**
+ * The ingest key baked into the artifact at release time, or "" in a checkout.
+ *
+ * `bun run gen:telemetry-key` (run by `prepublishOnly`) writes
+ * `dist/telemetry-key.json` from `WEBUI_TELEMETRY_KEY`, so the key travels in
+ * the released npm package and never in git. Compiled binaries never reach this
+ * code's sending path at all (`releaseVersion()` is null for the "binary"
+ * channel), so they carry no key. Fail-open: a missing or corrupt file is simply
+ * "no key" — and then nothing is sent.
+ */
+function bakedTelemetryKey(): string {
+  try {
+    const file = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "telemetry-key.json");
+    const raw = JSON.parse(readFileSync(file, "utf8")) as { key?: unknown };
+    return typeof raw.key === "string" ? raw.key.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The hub ingest key: `WEBUI_TELEMETRY_KEY` (an override — a test hub, a
+ * staging build) → the key baked into the release → `DEFAULT_TELEMETRY_KEY`
+ * (empty in git, so a checkout never sends). An empty result disables sending.
+ */
 export function telemetryKey(): string {
-  return (process.env.WEBUI_TELEMETRY_KEY || DEFAULT_TELEMETRY_KEY).trim();
+  return (process.env.WEBUI_TELEMETRY_KEY || bakedTelemetryKey() || DEFAULT_TELEMETRY_KEY).trim();
 }
 
 /**

@@ -80,7 +80,7 @@ server {
 | `WEBUI_DEBUG_LOG` | `/tmp/webui-debug.log` | File the frontend log sink (`POST /api/debug`) appends to. |
 | `WEBUI_TELEMETRY` | unset (on) | `false` (or `0`/`no`/`off`) hard-disables the anonymous usage heartbeat; wins over the Settings toggle. |
 | `WEBUI_TELEMETRY_URL` | `https://telemetry.shortformfunnels.com` | Telemetry hub base URL. |
-| `WEBUI_TELEMETRY_KEY` | empty | Telemetry ingest key. Empty ⇒ nothing is sent. See `docs/reference/telemetry.md`. |
+| `WEBUI_TELEMETRY_KEY` | empty | Telemetry ingest key override; a published release **bakes one at publish time and the publish fails without it**. See `docs/reference/telemetry.md`. |
 
 If you must expose the port directly (LAN, no proxy), set `WEBUI_PASSWORD` —
 a passwordless wildcard bind is refused at startup.

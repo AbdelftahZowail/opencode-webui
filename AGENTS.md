@@ -251,8 +251,8 @@ trust (same model as host plugins) — no sandboxing of extension code.
 - `bun run scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check)
 - Extension battery (release gate for anything touching extensions), run in this order:
-  `bun run scripts/uitest/ext-battery-browser.ts` (34) → `ext-battery-dom.ts` (10) →
-  `ext-battery-proxy.ts` (17) → `ext-battery-acceptance.ts` (15) = 76/0.
+  `bun run scripts/uitest/ext-battery-browser.ts` (35) → `ext-battery-dom.ts` (10) →
+  `ext-battery-proxy.ts` (17) → `ext-battery-acceptance.ts` (15) = 77/0.
 
 Run the batteries **sequentially and alone** (a concurrent agent floods
 `/api/event` and evicts the proxy tap ring → the `onEvent` test flakes). Any
@@ -273,6 +273,11 @@ the bug, watch the check go red, restore it — or the guard may be vacuous.
   `npm pack --dry-run`.
 - `.github/workflows/release.yml` runs on `v*` tags: typecheck + build gate, then
   per-target binaries via `scripts/build-binary.sh`, attached to a GitHub release.
+- A release **bakes the telemetry ingest key**: `prepublishOnly` runs
+  `bun run gen:telemetry-key`, which writes `dist/telemetry-key.json` and **fails
+  the publish when `WEBUI_TELEMETRY_KEY` is unset** (an artifact that collects
+  nothing must not ship silently — 3.4.0/3.4.1 did). Compiled binaries are inert
+  by channel (`updateChannel() → "binary"`), so they need no key.
 
 ## Release
 

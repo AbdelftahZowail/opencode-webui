@@ -234,7 +234,7 @@ The UI is daily-driven and the core is stable, but the product is still moving: 
 
 ### Is it free?
 
-Yes — MIT licensed, self-hosted, no telemetry, no account. Run it on your own machine.
+Yes — MIT licensed, self-hosted, no account. Run it on your own machine. A released build sends **one anonymous heartbeat** (opt-out, coarse install facts only — no hostnames, paths, prompts or message content; see `docs/reference/telemetry.md`). `WEBUI_TELEMETRY=false` turns it off.
 
 ## Development
 
