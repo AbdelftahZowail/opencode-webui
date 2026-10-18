@@ -76,7 +76,9 @@ instead of bricking the proxy. The API-sync scripts share that module. Explicit
 | `server/setup.ts` | First-run setup: global command, managed engine plugins, launch handoff, pidfile; CLI (`update`/`stop`/`restart`/`uninstall`) |
 | `server/lifecyclePlugin.ts` | The built-in OpenCode lifecycle plugin source — starts the proxy when the engine loads |
 | `server/config.ts` | Serve/security config + `config` CLI |
-| `src/components/settings/AccessSection.tsx` | Settings › Security UI. Settings has four tabs: Extensions, Plugins, Security, App (phone-only) |
+| `server/telemetry.ts` | Anonymous usage heartbeat: opt-out, release-gated, fail-open; the wire allowlist (see `docs/reference/telemetry.md`) |
+| `server/notices.ts` | Product notices: cached, fail-open proxy read of the hub's public announcement + version feeds (see `docs/reference/notices.md`) |
+| `src/components/settings/AccessSection.tsx` | Settings › Security UI. Settings has seven tabs: Extensions, Plugins, Notifications, Security, About, Appearance, Shell (+ App on phone) |
 | `webui-extensions/` | Shipped extensions (one folder per extension). Authoring guide: `webui-extensions/README.md` |
 | `docs/` | The docs tree — index in `docs/README.md` |
 
@@ -87,7 +89,17 @@ instead of bricking the proxy. The API-sync scripts share that module. Explicit
    `bun run scripts/diff-openapi.ts`; refresh with `bun run scripts/fetch-openapi.ts`
    (writes `docs/reference/openapi.json`). The full procedure is
    **`docs/runbooks/engine-update.md`**, and the route map is
-   `docs/reference/coverage.md`.
+   `docs/reference/coverage.md`. The snapshot was **re-synced on 2026-10-07** to
+   the live engine (2.0.22): 116 paths / 255 schemas, and
+   `bun run scripts/diff-openapi.ts --check` exits 0. Do NOT regenerate it as part
+   of an unrelated fix — a re-sync is its own workstream, because it desyncs
+   `types.ts` and every row of `coverage.md`. Prefer a narrow fix plus a dated
+   scope note in `docs/reference/coverage.md`.
+1a. **Generated files — don't hand-edit:** `docs/reference/openapi.json` (from
+   `fetch-openapi.ts`) and `skills/webui/SKILL.md` + `skills/testkit/SKILL.md`
+   (from `bun run gen:skill`, which extracts from `webui-extensions/README.md`
+   and the testkit runbook; both are pinned to the `package.json` version).
+   `dist/` and `release/` are gitignored build output.
 2. **Keep the store as the only place state lives.** Components read via
    `useStore((s) => ...)` and call actions; they never fetch directly except for
    one-shot catalog data (`models`, `agents`, `commands`, `skills`). Recurring
@@ -105,9 +117,10 @@ instead of bricking the proxy. The API-sync scripts share that module. Explicit
    components should not introduce new CSS.
 5. **Keep it dependency-light.** React, react-markdown, shadcn/ui (vendored),
    Radix (vendored), lucide-react, and the Tailwind stack are the intended
-   surface. Approved exceptions: `@shadcn/react` (headless MessageScroller) and
-   `@xterm/xterm` + addon-fit (PTY terminal emulator). A new dependency needs
-   justification.
+   surface. Approved exceptions: `@shadcn/react` (headless MessageScroller),
+   `@xterm/xterm` + addon-fit (PTY terminal emulator), and — for markdown
+   fidelity, R1/R2 — `shiki` + `@shikijs/*`, `mermaid`, and `katex` (all
+   lazy-loaded chunks). A new dependency needs justification.
 6. **Adding a component or target?** Follow **`docs/runbooks/add-ui-surface.md`** —
    every new component self-registers and renders through its `<Target>`.
 7. **Touching the extension system?** Follow **`docs/runbooks/add-extension.md`** —
@@ -209,33 +222,68 @@ trust (same model as host plugins) — no sandboxing of extension code.
 
 - `bun run dev` — proxy + Vite with HMR
 - `bun run sandbox` — isolated second instance: loopback-only, passwordless,
-  scratch extension dir; dev mode adds Vite on 5175. Replaced `bun run preview`.
-- `bun run typecheck` — `tsc --noEmit`
+  scratch extension dir; dev mode adds Vite on 5175.
+- `bun run typecheck` — `tsc --noEmit` (covers `src`, `server`, `scripts`, `webui-extensions`)
 - `bun run build && bun start` — production build, served on 4097
+- `bun run check:ext <extension-dir>` — no-browser pre-flight for an extension folder
+  (manifest, entries, engine payload shape, bridge imports)
+- `bun run gen:skill` — regenerate the shipped skills (`skills/*/SKILL.md`; runs in `prepublishOnly`)
+- `bun run testkit:example` — real-client test harness: isolated engine + proxy
+  driven through a real Chromium page and a real tmux TUI (`opencode-webui
+  testkit example|run|list`; runbook `docs/runbooks/agent-testing.md`)
 - `bun run check:setup` — global-wrapper + lifecycle-plugin + CLI contract, and a
-  real plugin `setup()` spawn, in an isolated HOME/XDG tree
+  real plugin `setup()` spawn, in an isolated HOME/XDG tree; expect 51/0
 - `bun run check:config` — serve/security config: resolution precedence,
   validation, password hashing/redaction, exposure, and the `config` CLI
+- `bun run check:telemetry` — anonymous-telemetry contract: the payload
+  allowlist, the forbidden-key/PII scan, release-gating, the `WEBUI_TELEMETRY`
+  hard-kill, idempotent `seq`, and a static no-device-identity scan
+  (`check:telemetry:live` POSTs a real payload to a hub)
+- `bun run check:notices` — product notices: the proxy's hub read, fail-soft on
+  an unreachable hub, the sanitizers, the pure selection/dismissal rules, and
+  the rendered announcement/release-note markup (`check:notices:live` reads the
+  real hub feeds)
 - `bun run check:engine-guard` — the engine resolver's guards (spawn-free)
 - `bun run check:swap` — is the engine's durable per-session log ready to replace
   the proxy recorder?
 - `bun run check:unseen` / `check:unseen:dom` — the unseen/settle-slop checks
 - `bun run scripts/uitest/*` — reusable UI/service checks (create/send/wait/messages,
   event-capture, catch-up proof, extension contract check)
-- `bun run scripts/uitest/ext-battery-browser.ts` (+ `-dom`, `-proxy`,
-  `-acceptance`) — the extension-system E2E battery, 76 checks total; the
-  release gate for anything touching extensions
+- Extension battery (release gate for anything touching extensions), run in this order:
+  `bun run scripts/uitest/ext-battery-browser.ts` (34) → `ext-battery-dom.ts` (10) →
+  `ext-battery-proxy.ts` (17) → `ext-battery-acceptance.ts` (15) = 76/0.
 
 Run the batteries **sequentially and alone** (a concurrent agent floods
 `/api/event` and evicts the proxy tap ring → the `onEvent` test flakes). Any
 assertion with a millisecond window must be proven **both ways** — reintroduce
 the bug, watch the check go red, restore it — or the guard may be vacuous.
 
+- Tests that start an engine: pin it with `WEBUI_ENGINE_URL` / `WEBUI_ENGINE_PASSWORD`
+  (from the live `service.json`) and `WEBUI_NO_SETUP=1`, plus an isolated
+  `XDG_CONFIG_HOME`/`XDG_STATE_HOME`, so nothing touches the global command or plugins.
+- Never restart or respawn the running engine or the production webui to test.
+- Scratch files: use the scratch dir the environment provides; `.uitest-*/` is gitignored.
+
+## Packaging & CI
+
+- npm tarball (`package.json` `files`) contains `dist/`, `server/`, `skills/`,
+  `scripts/testkit/`, and `webui-extensions/README.md` — **no `src/`**. The server
+  runs as TypeScript source under Bun. Verify packaging changes with
+  `npm pack --dry-run`.
+- `.github/workflows/release.yml` runs on `v*` tags: typecheck + build gate, then
+  per-target binaries via `scripts/build-binary.sh`, attached to a GitHub release.
+
 ## Release
 
 The release runbook is **`.opencode/release-helper.md`** (push + publish, every
 step in order, plus the hard-won gotchas) — the **super-vibe** ship skill reads
 that exact path. Follow it exactly — never publish without the tag.
+
+## Contributing
+
+`CONTRIBUTING.md` is the human entry point (dev setup, PR checklist). Keep
+extension-system changes and unrelated changes in separate commits, and stage
+explicit paths — never `git add -A`.
 
 ## Where to look (router — read before you act)
 
@@ -246,10 +294,14 @@ that exact path. Follow it exactly — never publish without the tag.
 | touch the extension system (kind/id/service/hook/slot) | `docs/runbooks/add-extension.md` + `docs/reference/extension-system-spec.md` |
 | plan or implement parity work | `docs/plans/parity.md` |
 | work on extension seams | `docs/plans/extensions.md` |
+| write an end-to-end test for a plugin/extension as a real user | `docs/runbooks/agent-testing.md` |
 | check a route's status (have / client-only / gap) | `docs/reference/coverage.md` |
 | understand the chat UI / streaming / rendering | `docs/reference/frontend.md` |
 | work on first-run setup / the managed plugins | `docs/reference/setup.md` |
 | deploy, reverse-proxy, auth/env, serve config | `docs/operations.md` |
+| touch anonymous usage telemetry | `docs/reference/telemetry.md` |
+| touch product notices / the notice surface | `docs/reference/notices.md` |
 | ask "did we decide to skip X, or defer it?" | `docs/when.md` |
+| check what the project is / isn't building | `docs/principles.md` |
 | cut a release | `.opencode/release-helper.md` |
 | orient in the docs at all | `docs/README.md` |

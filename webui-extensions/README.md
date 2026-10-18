@@ -114,7 +114,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | `conversation.header` | full `HeaderProps` |
 | `conversation.empty` | — |
 | `composer` | full `ComposerProps` |
-| `composer.contextReadout` | `parts: string[]`, `sessionID` |
+| `composer.usageBar` | `messages`, `model?`, `fallbackCost?` (R9 session usage bar — under the composer) |
 | `composer.sendActions` | `sessionID`, `appendDraft(text)` — space-joins onto the draft + refocuses; prefer over writing drafts directly |
 | `message.timestamp` | `time: number` (consults the `format.timestamp` service) |
 | `message.tokens` | `tokens` |
@@ -127,7 +127,7 @@ with rich props, so wraps and value-overrides stay surgical.
 | `tool:<name>` | replace-with-fall-through per tool name |
 | `stats.panel` | `data`, `loading`, `error`, `onRetry?` (R6 stats route) |
 | `timeline.dialog` | `messages`, `sessionID`, `onJump`, `onRevert`, `onCopy`, `onFork`, `onClose` (R4) |
-| `turn.tokens` | `steps` (R9 per-turn token line) |
+| `turn.tokens` | `steps` (R9 per-turn token line — quiet info affordance) |
 | `session.tabs` | `tabs`, `current`, `tabsEnabled`, orientation/compact, callbacks (R3) |
 | `sidebar.sessionPins` | `pins`, `tabsEnabled`, `selected`, `onSelectSlot`, `onUnpin`, `onToggleTabs` (R3) |
 | `form.review` | `fields`, `values`, `acked?`, `onClose?` (R13) |
@@ -135,17 +135,28 @@ with rich props, so wraps and value-overrides stay surgical.
 | `permission.reject` | `open`, `action?`, `onOpenChange`, `onReject` (R8) |
 | `errorDetails.dialog` | `open`, `message`, `source?`, `reference?`, `onCopy?`, `onInvestigate?`, `onClose` (R11) |
 | `reconnect.overlay` | `connected`, `serviceOK`, `onRetry?` (R11) |
-| `update.notice` | `state`, `version?`, `currentVersion?`, `error?`, `dismissedVersion?`, callbacks (R11) |
+| `update.notice` | `state`, `version?`, `currentVersion?`, `error?`, `dismissedVersion?`, `announcement?`, `release?`, callbacks (R11; also the product-notice surface — hub announcements + release notes) |
 | `debug.dialog` | `open`, `info`, `onCopy?`, `onClose` (R11) |
 | `pair.dialog` | `open`, `info` (URLs + masked password + QR URL), `onCopy?`, `onClose` (R11) |
 | `sessionList.dialog` | `open`, `sessions`, `currentSessionID?`, `live?`, `searchResults?`, `searching?`, `pinned?`, `allProjects?`, `onSearch?`, `onTogglePin?`, `onToggleAllProjects?`, `onSelect`, `onRename?`, `onDelete?`, `onClose` (R11 — mounted by `SessionListHost`; server search is **global**, "this project" scopes client-side) |
 | `open.picker` | `open`, `sessions`, `projects`, `currentSessionID?`, `currentDirectory?`, `live?`, `worktrees?`, `worktreesLoading?`, `onOpenSession`, `onOpenDirectory`, `onDrillProject?`, `onCreateWorktree?`, `onClose` (R11 — mounted by `OpenPickerHost`) |
-| `settings.appearance` / `settings.shell` | — (R12) |
+| `settings.appearance` / `settings.shell` / `settings.telemetry` | — (R12; `settings.telemetry` = the anonymous-usage opt-out, now the "Usage data" block of Settings › About; it also takes `heading` — pass `heading={false}` when the host supplies the header) |
+| `settings.about` / `settings.about.release` / `settings.about.announcement` | — (Settings › About page host); `settings.about.release` gets `release: WebuiRelease` (one What's New changelog row); `settings.about.announcement` gets `announcement: WebuiAnnouncement` (one hub announcement row) |
 
 Persisted-vs-live guarantee (streaming authors depend on this): persisted
 messages always carry a `[data-oc-message]` ancestor; live projections
 (`LiveAssistantView`) render `MessagePart` directly with none. Code that
 must never touch streaming output can rely on the distinction structurally.
+
+### Contract changes (migration notes)
+
+Target/collection/service ids, `data-oc-*` anchors, and manifest fields are
+contract: renaming or moving one is a version bump **plus a note here**. Newest
+first.
+
+| Version | Change | Migration |
+|---|---|---|
+| 3.4.0 | Target `composer.contextReadout` **removed** — the composer's context readout was rebuilt as the session usage bar (`composer.usageBar`). | Re-register against `composer.usageBar` (`messages`, `model?`, `fallbackCost?`). A `wrap`/`replace` on the old id no longer runs (the target is never rendered). |
 
 ### Entry hygiene (two rules that bite silently)
 
@@ -540,7 +551,7 @@ extensions break silently on every redesign.
 | --- | --- |
 | `data-oc-transcript` | MessageScroller content |
 | `data-oc-message` + `data-oc-message-id` + `data-oc-message-type` | MessageItem root per type branch |
-| `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` | Composer card, textarea, send button |
+| `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` + `data-oc-composer-usage` | Composer card, textarea, send button, session usage bar |
 | `data-oc-composer-attach` + `data-oc-composer-attach-input` + `data-oc-composer-attachments` | Composer paperclip button + hidden file input, staged attachment strip |
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
@@ -562,10 +573,14 @@ extensions break silently on every redesign.
 | `data-oc-timeline` / `data-oc-timeline-row` / `data-oc-timeline-action` | TimelineDialog root, one per user-message row, per action (R4) |
 | `data-oc-session-tabs` / `data-oc-tab` / `data-oc-tab-id` / `data-oc-tab-status` / `data-oc-tab-indicator` | Tab rail root, one per tab, per-tab status/indicator (R3) |
 | `data-oc-session-pins` / `data-oc-pin` / `data-oc-pin-slot` / `data-oc-pin-id` | Pins rail root, one per pinned session, its quick-slot number (R3) |
-| `data-oc-reasoning-group` / `data-oc-explore-group` / `data-oc-turn-tokens` / `data-oc-jump-latest` / `data-oc-revert-detail` | Transcript grouping, per-turn token line, jump-to-latest, revert detail (R9) |
+| `data-oc-reasoning-group` / `data-oc-explore-group` / `data-oc-turn-tokens` / `data-oc-turn-tokens-panel` / `data-oc-jump-latest` / `data-oc-revert-detail` | Transcript grouping, per-turn token chip, the token-details panel, jump-to-latest, revert detail (R9) |
+| `data-oc-update-notice` / `data-oc-update-state` / `data-oc-update-security` / `data-oc-update-whats-new` / `data-oc-update-details` | The `update.notice` card, its state, the security-update marker, the release-notes disclosure, the Details → Settings › About affordance |
+| `data-oc-announcement` / `data-oc-announcement-level` / `data-oc-announcement-dismiss` / `data-oc-announcement-details` | A hub announcement on the notice surface, its level (`info`/`warning`/`security`), its dismiss control, the Details → Settings › About affordance |
+| `data-oc-about` + `data-oc-about-version` + `data-oc-about-updates` + `data-oc-about-whats-new` + `data-oc-about-announcements` + `data-oc-about-usage` / `data-oc-about-release` (+ `data-oc-about-release-name`) / `data-oc-about-announcement` (+ `data-oc-about-announcement-level`) | Settings › About: the page, its version block, updates block, What's New disclosure, announcements block, and usage-data block; then one per release-note row (name exposed) and one per announcement row (level exposed) |
+| `data-oc-telemetry-section` + `data-oc-telemetry-toggle` | The Settings › About "Usage data" block — the relocated anonymous-usage opt-out |
 | `data-oc-tool-patch` / `data-oc-tool-question` / `data-oc-question-row` / `data-oc-tool-skill` / `data-oc-tool-diagnostics` / `data-oc-tool-denied` / `data-oc-tool-badge` | Tool-card patch/question/skill bodies, diagnostics, denied marker, badge (R10) |
 | `data-oc-diff-image` / `data-oc-diff-base` / `data-oc-diff-help` / `data-oc-diff-wrap` | Diff viewer image pane, base picker, shortcut help, wrap toggle (R7/R12) |
-| `data-oc-attention-section` / `data-oc-shell-section` / `data-oc-appearance-section` | Settings › Notifications / Shell / Appearance sections (R5/R12) |
+| `data-oc-attention-section` / `data-oc-shell-section` / `data-oc-appearance-section` / `data-oc-appearance-session-tabs` | Settings › Notifications / Shell / Appearance sections; the Appearance tabs-vs-pins toggle (R5/R12) |
 | `data-oc-directory-picker` / `data-oc-permission-reject` | Directory completion picker (R8) / permission reject dialog (R8) |
 | `data-oc-form-review` | Form Review tab (R13) |
 | `data-oc-session-list-dialog` / `data-oc-session-list-row` / `data-oc-open-picker` / `data-oc-open-session` / `data-oc-open-project` / `data-oc-open-worktree` | R11a session-list dialog + open/recents picker (mounted by `SessionListHost` / `OpenPickerHost`) |

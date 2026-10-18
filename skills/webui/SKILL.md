@@ -27,7 +27,7 @@ optional (`auth: none`) for private networks/proxies, but reachable-without-a-
 password changes need explicit confirmation.
 
 - **Repo**: https://github.com/AbdelftahZowail/opencode-webui
-- **This skill's version**: 3.3.0 (matches the `v3.3.0` git tag —
+- **This skill's version**: 3.4.0 (matches the `v3.4.0` git tag —
   the file links below are pinned to it, so they always describe the code
   this skill was generated with)
 - **A running instance exposes its version** at `GET /api/webui/config` →
@@ -40,20 +40,20 @@ fetch the exact file at the pinned tag instead of reading a local clone:
 
 | File | Purpose |
 | --- | --- |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/docs/reference/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
-| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.3.0/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/webui-extensions/README.md | Full authoring guide — the source of truth for strata/kinds/hooks/anchors |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/extensions/registry.tsx | The extension registry — exact register() shapes per kind |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/extensions/context.ts | Activation context — the `activate(ctx)` entry, disposal, and the full `ctx` surface |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/extensions/slots.tsx | Slot ids (placement contract) + the Slot renderer |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/extensions/manifest.ts | Manifest contract — settings schema + requires parsing/checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/extensions/hooks.ts | Shared fireHooks runner — how open hook events fire |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/lib/domKit.ts | DOM-stratum kit (foreign/watch/styles) + the data-oc-* anchor table |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/lib/storeFacade.ts | Curated store surface extensions get as `store` (raw module = `advanced.store`) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/lib/eventBus.ts | Event bus — raw engine events + derived lifecycle, frame-batched |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/lib/extSettings.ts | Per-extension declared settings — schema, resolve, persist, subscribe |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/lib/extBus.ts | Extension-to-extension peer bus (publish/subscribe) |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/server/ext/types.ts | Proxy-stratum types — server.ts routes/middleware/onEvent/pollers shapes |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/docs/reference/extension-system-spec.md | The v2 decision record — strata, precedence, deletions, acceptance checks |
+| https://raw.githubusercontent.com/AbdelftahZowail/opencode-webui/v3.4.0/src/store.ts | The raw store module (reachable as `advanced.store`; prefer the facade) |
 
 ## Environment
 
@@ -169,6 +169,7 @@ sync and an unmet reference is a visible warning, not a silent blank spot.
 Contribute collections (registry-owned lists — data, not new kinds):
 `palette`, `slash` (UI-only; engine commands win name clashes),
 `pages` (routed at `/ext/{id}`), `settings`,
+`markdown.codeBlock` (fenced-code renderers keyed by info-string — `markdown.registerCodeBlockRenderer` on the bridge; see the authoring guide),
 `contextMenu.message` / `contextMenu.session` / `contextMenu.file`, and
 `slot:<id>` (named placement points — `conversation.header.actions`,
 `conversation.empty`, `composer.above`, `composer.actions`,
@@ -210,7 +211,7 @@ own the fragility").
 | --- | --- |
 | `data-oc-transcript` | MessageScroller content |
 | `data-oc-message` + `data-oc-message-id` + `data-oc-message-type` | MessageItem root per type branch |
-| `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` | Composer card, textarea, send button |
+| `data-oc-composer` + `data-oc-composer-input` + `data-oc-composer-send` + `data-oc-composer-usage` | Composer card, textarea, send button, session usage bar |
 | `data-oc-composer-attach` + `data-oc-composer-attach-input` + `data-oc-composer-attachments` | Composer paperclip button + hidden file input, staged attachment strip |
 | `data-oc-tool-card` + `data-oc-tool-name` | ToolCard root + tool call name |
 | `data-oc-session-header` | Conversation header bar |
@@ -227,6 +228,23 @@ own the fragility").
 | `data-oc-permission-rules-editor` + `data-oc-permission-rule-row` + `data-oc-permission-rule-effect` | PermissionRulesEditor root, one per rule row, one per effect button |
 | `data-oc-mcp-server` + `data-oc-mcp-add` | McpIndicator: one per server row, and the add-server form |
 | `data-oc-slot` | Slot wrapper (`slot:<id>` — one per known slot id) |
+| `data-oc-code-block` / `data-oc-mermaid` / `data-oc-latex` / `data-oc-block-fallback` | Markdown code/mermaid/latex renderers and their plain fallback (R1/R2/R14 — an extension-rendered fence owns its own markup) |
+| `data-oc-stats` / `data-oc-stats-calendar` / `data-oc-stats-day` | StatsPanel root, calendar grid, one per day cell (R6) |
+| `data-oc-timeline` / `data-oc-timeline-row` / `data-oc-timeline-action` | TimelineDialog root, one per user-message row, per action (R4) |
+| `data-oc-session-tabs` / `data-oc-tab` / `data-oc-tab-id` / `data-oc-tab-status` / `data-oc-tab-indicator` | Tab rail root, one per tab, per-tab status/indicator (R3) |
+| `data-oc-session-pins` / `data-oc-pin` / `data-oc-pin-slot` / `data-oc-pin-id` | Pins rail root, one per pinned session, its quick-slot number (R3) |
+| `data-oc-reasoning-group` / `data-oc-explore-group` / `data-oc-turn-tokens` / `data-oc-turn-tokens-panel` / `data-oc-jump-latest` / `data-oc-revert-detail` | Transcript grouping, per-turn token chip, the token-details panel, jump-to-latest, revert detail (R9) |
+| `data-oc-update-notice` / `data-oc-update-state` / `data-oc-update-security` / `data-oc-update-whats-new` / `data-oc-update-details` | The `update.notice` card, its state, the security-update marker, the release-notes disclosure, the Details → Settings › About affordance |
+| `data-oc-announcement` / `data-oc-announcement-level` / `data-oc-announcement-dismiss` / `data-oc-announcement-details` | A hub announcement on the notice surface, its level (`info`/`warning`/`security`), its dismiss control, the Details → Settings › About affordance |
+| `data-oc-about` + `data-oc-about-version` + `data-oc-about-updates` + `data-oc-about-whats-new` + `data-oc-about-announcements` + `data-oc-about-usage` / `data-oc-about-release` (+ `data-oc-about-release-name`) / `data-oc-about-announcement` (+ `data-oc-about-announcement-level`) | Settings › About: the page, its version block, updates block, What's New disclosure, announcements block, and usage-data block; then one per release-note row (name exposed) and one per announcement row (level exposed) |
+| `data-oc-telemetry-section` + `data-oc-telemetry-toggle` | The Settings › About "Usage data" block — the relocated anonymous-usage opt-out |
+| `data-oc-tool-patch` / `data-oc-tool-question` / `data-oc-question-row` / `data-oc-tool-skill` / `data-oc-tool-diagnostics` / `data-oc-tool-denied` / `data-oc-tool-badge` | Tool-card patch/question/skill bodies, diagnostics, denied marker, badge (R10) |
+| `data-oc-diff-image` / `data-oc-diff-base` / `data-oc-diff-help` / `data-oc-diff-wrap` | Diff viewer image pane, base picker, shortcut help, wrap toggle (R7/R12) |
+| `data-oc-attention-section` / `data-oc-shell-section` / `data-oc-appearance-section` / `data-oc-appearance-session-tabs` | Settings › Notifications / Shell / Appearance sections; the Appearance tabs-vs-pins toggle (R5/R12) |
+| `data-oc-directory-picker` / `data-oc-permission-reject` | Directory completion picker (R8) / permission reject dialog (R8) |
+| `data-oc-form-review` | Form Review tab (R13) |
+| `data-oc-session-list-dialog` / `data-oc-session-list-row` / `data-oc-open-picker` / `data-oc-open-session` / `data-oc-open-project` / `data-oc-open-worktree` | R11a session-list dialog + open/recents picker (mounted by `SessionListHost` / `OpenPickerHost`) |
+| `data-oc-permission-fullscreen` / `data-oc-permission-fullscreen-toggle` / `data-oc-permission-settings` | R12 full-screen permission prompt, its per-request toggle, and the Settings › Security toggle |
 
 ## Sandbox (iterate without touching the user's webui)
 

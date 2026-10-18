@@ -21,7 +21,10 @@ the repo beats this file.
 
 ## Credentials
 
-- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`).
+- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`). If it
+  fails with `ENEEDAUTH`, the token is not on this host — publish from the
+  owner's laptop (which holds the token); everything up to and including the
+  tag push still completes here.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
 - No other secrets. `WEBUI_PASSWORD`/engine credentials are runtime-only.
 
@@ -44,10 +47,11 @@ From the repo root, on `master`, with a clean release scope:
    extension-contract work and unrelated work in separate commits.
 4. **Bump** `package.json` `version` (semver; a no-contract-change feature set
    is a minor bump).
-5. **Regen the skill:** `bun run scripts/gen-skill.ts`; verify
-   `skills/webui/SKILL.md` shows the new version and pins `v{version}`.
-6. **Release commit** containing `package.json` + `skills/webui/SKILL.md` (+ this
-   file). Tag it: `git tag v{version}`.
+5. **Regen the skills:** `bun run scripts/gen-skill.ts`; verify **both**
+   `skills/webui/SKILL.md` and `skills/testkit/SKILL.md` show the new version and
+   pin `v{version}`.
+6. **Release commit** containing `package.json` + `skills/webui/SKILL.md` +
+   `skills/testkit/SKILL.md` (+ this file). Tag it: `git tag v{version}`.
 7. **Push:** `git push origin master --tags` (never force). Pushing the tag is
    what makes the skill's pinned raw links resolve — **never publish without
    the tag**.
@@ -57,7 +61,35 @@ From the repo root, on `master`, with a clean release scope:
 9. **Verify it landed:** `npm view opencode-webui version` shows the new version;
    the GitHub tag page resolves; a couple of the skill's `v{version}` raw links
    return 200.
-10. **Update this file** (last version + a dated entry).
+10. **Write the "What's New" (release notes) — REQUIRED, not optional.** Pushing
+    the tag makes CI create the GitHub Release with `--generate-notes` (a raw
+    commit list). The hub version feed is sourced from those **GitHub Release
+    bodies**, and that feed is exactly what users see in the in-app **Update
+    notice** and **Settings › About → "What's new"**. Replace the auto notes with
+    a short, user-facing "What's New":
+    `gh release edit v{version} --notes-file /tmp/whats-new.md`
+    (or edit the release on github.com). 3–6 plain-language bullets: what's new,
+    what changed, anything breaking. See `## "What's New" is a release artifact`.
+    The release job `needs: binaries`, so the GitHub Release does not exist until
+    the 5-leg binary matrix finishes — wait for CI (or retry the `gh release
+    edit`) before step 11.
+11. **Update this file** (last version + a dated entry).
+
+## "What's New" is a release artifact (the hub feed)
+
+The in-app **Update notice** and **Settings › About → "What's new"** do **not**
+read a changelog file in this repo — they render the hub version feed
+(`GET /v1/versions?product=opencode-webui`). The hub sources that feed from
+**GitHub Releases** (`HUB_GITHUB_REPOS` in the hub's `.env`; the map must contain
+`opencode-webui=AbdelftahZowail/opencode-webui` or it falls back to the default
+repo). Release bodies with `<!-- security -->` are flagged security-critical and
+surfaced more loudly by both clients.
+
+Consequence: **the release's notes ARE the product announcement.** A tag whose
+notes are only the auto-generated "Full Changelog" line ships an empty What's
+New. So every release: write a short user-facing "What's New" into the GitHub
+Release body (step 10). There is no `CHANGELOG.md` and no repo file to maintain —
+the GitHub Release is the source of truth.
 
 ## Gotchas (learned the hard way)
 
@@ -67,7 +99,7 @@ From the repo root, on `master`, with a clean release scope:
   `ext-battery-proxy` test 8 (`onEvent tap headless`) flakes. Run alone and it
   is stable.
 - **The npm tarball does NOT contain `src/**`** (`package.json` `files` =
-  `["dist","server","skills","webui-extensions/README.md"]`). The frontend ships
+  `["dist","server","skills","scripts/testkit","webui-extensions/README.md"]`). The frontend ships
   compiled in `dist/`; the server ships as TypeScript source because the `bin`
   runs `server/index.ts` under Bun. So `server/shelf.ts`,
   `server/shelfEnginePlugin.ts`, etc. ARE packed, but `src/components/…` are not.

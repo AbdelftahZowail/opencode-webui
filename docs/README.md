@@ -12,7 +12,8 @@ This tree is organized by **kind of document**, not by feature. Five buckets:
 
 `AGENTS.md` (repo root) is the law and the router — architecture, the rules you
 must not break, and a "where to look" table. Everything here is subordinate to
-it. `skills/webui/SKILL.md` is generated from `scripts/gen-skill.ts`.
+it. `skills/webui/SKILL.md` and `skills/testkit/SKILL.md` are generated from
+`scripts/gen-skill.ts` and installed to `~/.config/opencode/skills/` on boot.
 
 ## Read order for a fresh agent
 
@@ -33,11 +34,14 @@ it. `skills/webui/SKILL.md` is generated from `scripts/gen-skill.ts`.
 | `runbooks/engine-update.md` | **When the engine/API changes.** Diagnose → regenerate → resync → re-verify → rewrite coverage. |
 | `runbooks/add-extension.md` | **When you touch the extension system.** Contract ids, version bump, docs/skill/battery sweep in one commit. |
 | `runbooks/add-ui-surface.md` | **When you add a core component.** Self-register, `<Target>` call site, anchors, slots, tokens, store-only-state. |
+| `runbooks/agent-testing.md` | **When you test a plugin/extension end-to-end.** Boot an isolated instance, drive the real webui + TUI, assert rendered evidence. |
 | `reference/coverage.md` | The route map: have / client-only (with reason) / genuine gap / experimental. |
 | `reference/extension-system-spec.md` | The extension-system contract (strata, kinds, precedence, deletions, acceptance). |
 | `reference/engine-payload-convention.md` | The `engine/` stratum convention + the verified minimal fixture + the agent-testing runbook. |
 | `reference/frontend.md` | How the chat UI works: streaming/robustness, rendering, tool cards, keys, debug logging. |
 | `reference/setup.md` | First-run setup: the global command + the two managed engine plugins. |
+| `reference/telemetry.md` | Anonymous usage telemetry: privacy posture, wire contract, gating, the hub dependency. |
+| `reference/notices.md` | Product notices: the hub announcement + version feeds, the transient card + the permanent Settings › About home, fail-open, dismissal. |
 | `reference/openapi.json` | Generated OpenAPI snapshot. **Path is hard-coded in `scripts/*-openapi.ts` — do not move.** |
 | `operations.md` | Deployment: reverse proxy (Caddy/nginx), env vars, auth/exposure, serve/security config. |
 | `when.md` | Conditional TODOs: trigger → task. |

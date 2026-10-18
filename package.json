@@ -3,7 +3,7 @@
   "description": "Web UI for the OpenCode coding agent \u2014 chat, streaming, tool cards, and extensions over the OpenCode engine's HTTP API.",
   "private": false,
   "type": "module",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "dist",
     "server",
     "skills",
+    "scripts/testkit",
     "webui-extensions/README.md"
   ],
   "scripts": {
@@ -41,10 +42,15 @@
     "check:setup": "bun run scripts/uitest/setup-check.ts",
     "check:setup:engine": "bun run scripts/uitest/setup-engine-check.ts",
     "check:config": "bun run scripts/uitest/config-check.ts",
+    "check:telemetry": "bun run scripts/uitest/telemetry-check.ts",
+    "check:telemetry:live": "bun run scripts/uitest/telemetry-live.ts",
+    "check:notices": "bun run scripts/uitest/notices-check.ts",
+    "check:notices:live": "bun run scripts/uitest/notices-live.ts",
     "check:unseen": "bun run scripts/uitest/unseen-badge-check.ts",
     "check:unseen:dom": "bun run scripts/uitest/unseen-badge-dom.ts",
     "check:engine-guard": "bun run scripts/uitest/engine-guard-check.ts",
     "check:swap": "bun run scripts/uitest/swap-ready.ts",
+    "testkit:example": "bun run scripts/testkit/example.test.ts",
     "prepublishOnly": "bun run typecheck && bun run gen:skill && bun run build"
   },
   "dependencies": {
@@ -74,6 +80,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "playwright-core": "1.58.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.1"
