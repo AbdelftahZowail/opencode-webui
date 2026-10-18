@@ -10,8 +10,10 @@ the repo beats this file.
 > docs layout at the time of that release.
 
 - **Last released version:** `3.4.1` (tag `v3.4.1`) — tag pushed, GitHub Release
-  Latest; `npm publish` **pending the owner's token** (no token is reachable in
-  the agent shell — see Credentials + the 3.4.1 entry).
+  Latest, and **published to npm from the owner's shell (`HOME=/home/zowail`,
+  where `npm whoami` → `zowail`)**. See Credentials — the *other* shell on this
+  box (`HOME=/home/ubuntu`, the one the cloud agent sessions run in) has no
+  token and reports `ENEEDAUTH`.
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -23,14 +25,18 @@ the repo beats this file.
 
 ## Credentials
 
-- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`) — verified
-  on this host at 3.4.0 (exit 0), so **`npm publish` does run here**. An
-  `ENEEDAUTH` almost always means the command ran under an *isolated* `HOME` /
-  `XDG_*` (what the check scripts and test harnesses pin), not that the host
-  lacks a token: re-run `npm whoami` in a plain shell before concluding the
-  token is missing. If it really does fail, publish from the owner's laptop
-  (which holds the token); everything up to and including the tag push still
-  completes here.
+- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`).
+  **On this box the answer depends on which shell you are in** — there are two
+  `HOME`s: the owner's (`/home/zowail`) holds the token (`npm whoami` → `zowail`,
+  exit 0; 3.4.0 *and* 3.4.1 were published from there), while the cloud agent
+  shell (`HOME=/home/ubuntu`) has no `_authToken`/`NPM_TOKEN` anywhere and
+  answers `ENEEDAUTH`. So an `ENEEDAUTH` does **not** mean the token is missing
+  from the machine: check `echo $HOME` / `ls -l ~/.npmrc` first, and if the
+  token only exists in the owner's home, either publish from there or ask the
+  owner to plant the token in the agent `~/.npmrc`. An *isolated* `HOME`/`XDG_*`
+  (what the check scripts and test harnesses pin) produces the same
+  `ENEEDAUTH` — re-run `npm whoami` in a plain shell before concluding anything.
+  Everything up to and including the tag push completes in either shell.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
 - **Counter-observation (3.4.1, agent shell):** `npm whoami` → `ENEEDAUTH` even
   with `HOME=/home/ubuntu` (not isolated), `npm config get userconfig` →
@@ -240,10 +246,29 @@ the GitHub Release is the source of truth.
   pushed, deleted and re-pushed during the rebase; both went green and the
   second's assets are the attached ones) → the GitHub Release is **Latest** with
   the 5 binaries + `SHA256SUMS.txt`, its auto body replaced by a user-facing
-  "What's New". **`npm publish` did NOT run here:** in the agent shell `npm whoami`
-  still answers `ENEEDAUTH` with `HOME=/home/ubuntu` (**not** isolated) and no
-  `_authToken`/`NPM_TOKEN` anywhere — so 3.4.1 is left for the owner to publish
-  (plant a token in `~/.npmrc` and it can run here too).
+  **`npm publish` DID run — from the owner's shell (`HOME=/home/zowail`), not the
+  agent one.** `npm whoami` → `zowail` there, exit 0; the agent shell
+  (`HOME=/home/ubuntu`) still answers `ENEEDAUTH`, which is why this entry first
+  recorded 3.4.1 as unpublished (see Credentials). Evidence (2026-10-18):
+  publish exited 0 with `prepublishOnly` clean (typecheck + `gen:skill` + build);
+  the registry lagged **~3 min** this time (doc 404 → 200, `latest` `3.4.0` →
+  `3.4.1`); then the packument matched the local pack exactly — `fileCount`
+  **296**, **5,158,409 B**, shasum
+  **`20f09a71cef733c791dc0676a7e85d59289e0f8a`**, integrity
+  `sha512-pVj12ToFIU0tXD4JD1GKUOm+cZhBATuxg0jw448Mw90YSA2Y57qVmfuQdmBsPjIQuIXAZbJ55D+eLzHyJQgclQ==`,
+  `time["3.4.1"] = 2026-10-18T02:18:26.717Z`. The tarball downloaded at that
+  size/sha1, and `dist/` (261 files) + `server/`, `skills/`, `scripts/testkit`,
+  `webui-extensions/README.md` are **byte-identical** to the repo at the tag; no
+  `src/`. Re-verified independently on the publishing host: typecheck ✅,
+  build ✅, `check:setup` **61/0**, `check:notices` **47/0**, `npm pack
+  --dry-run` **296** (post-build); the GitHub Release `v3.4.1` is **Latest**
+  (6 assets), the tag API is 200, and all six `v3.4.1` pinned raw links are 200;
+  a prod-shaped smoke from the *extracted tarball* (fresh `bun install
+  --production`, isolated `HOME`/`XDG_*`, `WEBUI_NO_SETUP=1`, dead
+  `WEBUI_ENGINE_URL`) bound `:4124`, `/login` 200, `/api/webui/status` 401,
+  skills auto-synced, engine-unreachable tolerated. The hub feed now answers
+  `repo: AbdelftahZowail/opencode-webui` and lists **3.4.1** first — the mapping
+  gap is closed (the 3.4.0 entry's defensive `repo` guard is still unshipped).
 
 ### 3.4.0 — 2026-10-18
 - **Type:** minor (features + fixes). One documented-subset change for wrappers:
