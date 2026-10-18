@@ -330,18 +330,33 @@ the GitHub Release is the source of truth.
   - **A fresh checkout can be behind even when the handoff says otherwise.**
     This one sat at `1e3bb4b` (`v3.3.0-2`) until `git pull --ff-only`; always
     confirm with `git rev-parse HEAD origin/master` + `git describe --tags`.
-- **⚠ Outstanding — hub-side, not this repo:** `GET
+- **✅ RESOLVED 2026-10-18 (hub-side, not this repo):** `GET
   https://telemetry.shortformfunnels.com/v1/versions?product=opencode-webui`
-  still answers **`repo: AbdelftahZowail/Quickly`** (a `&repo=` param is
-  ignored; `/v1/announcements` answers "Not found"), i.e. the hub's
-  `HUB_GITHUB_REPOS` has no `opencode-webui` mapping and falls back to the
-  default repo. Until that mapping exists (and the announcements route is
-  served), the in-app Update notice / Settings › About will show **Quickly's**
-  release notes to opencode-webui users. The proxy side is correct — it sends
-  `product=opencode-webui`, caches, and is fail-open. Consider (follow-up, not
-  in 3.4.0) having `server/notices.ts` discard a feed whose top-level `repo` is
-  not this repo, so a misconfigured hub yields *nothing* rather than another
-  product's notes.
+  answered **`repo: AbdelftahZowail/Quickly`** (and `/v1/announcements` → "Not
+  found") because the hub's `HUB_GITHUB_REPOS` had no `opencode-webui` mapping
+  and fell back to its default repo, so the in-app Update notice / Settings ›
+  About showed **Quickly's** release notes to opencode-webui users. The proxy
+  side was always correct (it sends `product=opencode-webui`, caches, fails
+  open). **Fix:** the hub lives at `/home/ubuntu/quickly-hub` (not a git
+  checkout; container `quickly-hub-hub-1`, `127.0.0.1:8099`, Caddy
+  `telemetry.shortformfunnels.com`). Its code ALREADY supported the plural map
+  (`app/config.py` `repo_for_product()` + `app/routers/announcements.py`), but
+  the deployed container was from **2026-10-12** (no announcements router, no
+  product validation) and `.env` (Sep 24) had only the singular
+  `HUB_GITHUB_REPO`. So: appended
+  `HUB_GITHUB_REPOS=quickly=AbdelftahZowail/Quickly,opencode-webui=AbdelftahZowail/opencode-webui`
+  (backup `.env.bak-1792289276`), `docker compose build hub` (no downtime),
+  smoke-tested the new image on :8598 against the compose network, then
+  `docker compose up -d hub`. Verified on the **public** host:
+  `?product=opencode-webui` → `repo: AbdelftahZowail/opencode-webui` with
+  `3.4.1/3.4.0/3.3.0`, `/v1/announcements` → 200 `[]`, and
+  `?product=quickly` still → `AbdelftahZowail/Quickly`. Rollback image:
+  `quickly-hub-hub` `dfb0f07cfa68`. **Gotcha:** `.env` is un-versioned, so a
+  hub redeploy must set `HUB_GITHUB_REPOS` again (`.env.example:18` and the
+  hub `README.md` document the format). Consider (optional, would be a 3.4.2 —
+  the tag is already cut) having `server/notices.ts` discard a feed whose
+  top-level `repo` is not this repo, so a future misconfigured hub yields
+  *nothing* rather than another product's notes.
   Re-confirmed live on 2026-10-18: the response is
   `{"source":"github","repo":"AbdelftahZowail/Quickly","versions":[… 2.5.0 …]}`.
   The top-level `repo` is **already in the documented shape** but ignored by
