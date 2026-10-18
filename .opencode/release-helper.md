@@ -266,21 +266,31 @@ before `npm publish`. The hub validates it (`X-Quickly-Key`) and answers
 `401 {"detail":"invalid write key"}` for anything else — so a *generated* key is
 useless; it must be the deployed one.
 
-**⚠ KNOWN GAP — `/v1/announcements` is not routed publicly.** The Caddy site
-block only has `handle` blocks for `/admin`, `/v1/versions*`, `/health*` and
-`/v1/telemetry*`, then falls through to `respond "Not found" 404`. The hub app
-itself serves the route (`curl http://localhost:8099/v1/announcements?product=opencode-webui`
-→ **200**), but `https://telemetry.shortformfunnels.com/v1/announcements?product=opencode-webui`
-→ **404**. Consequence: the in-app **notice card** has no announcements to show
-(the **versions** feed — Update notice / Settings › About → "What's new" — is
-unaffected and works). Fix is one block in that site:
+**`/v1/announcements` was NOT routed publicly — FIXED 2026-10-18.** The Caddy
+site block only had `handle` blocks for `/admin`, `/v1/versions*`, `/health*` and
+`/v1/telemetry*`, then fell through to `respond "Not found" 404`, while the hub
+app itself served the route (`localhost:8099` → 200). The in-app **notice card**
+therefore had no announcement source (the **versions** feed — Update notice /
+Settings › About → "What's new" — was never affected). Fix applied: a backup
+(`/etc/caddy/Caddyfile.bak-20261018-201118`), this block inserted before the
+fallback, `caddy validate` → *Valid configuration*, then `systemctl reload caddy`
+(graceful):
 
 ```
 	handle /v1/announcements* {
 		reverse_proxy 127.0.0.1:8099
 	}
 ```
-then `caddy reload --config /etc/caddy/Caddyfile` (graceful). Owner's call.
+
+Verified: from the VPS `https://telemetry.shortformfunnels.com/v1/announcements?product=opencode-webui`
+→ **200** `{"product":"opencode-webui","announcements":[]}`; `/health` and
+`/v1/versions` still 200. Note the **edge can lag a reload by seconds**: an
+immediate request from the laptop still answered the old `404 "Not found"`,
+while a retry a few seconds later returned `200` (`via: 1.1 Caddy`,
+`cf-cache-status: DYNAMIC`). The proxy side then flipped too: `/api/webui/notices`
+went `unavailable:true` (partial: announcements failing) → **`unavailable:false`**
+with a `fetchedAt` stamp, i.e. a complete, cached copy. Zero announcements exist
+yet, so the card stays quiet until one is published.
 
 **Hub facts worth knowing:** the hub carries the per-product enums for us already
 (`WEBUI_ACTIVATION_EVENTS = {"setup_completed"}`, `WEBUI_FEATURE_NAMES =
