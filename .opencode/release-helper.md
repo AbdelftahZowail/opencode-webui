@@ -9,9 +9,9 @@ the repo beats this file.
 > skill looks for exactly this path. The dated **Entries** below refer to the
 > docs layout at the time of that release.
 
-- **Last released version:** `3.4.0` (tag `v3.4.0`) — the tag is pushed;
-  **npm publish runs from the owner's laptop**, not this host (see the 3.4.0
-  entry + Credentials).
+- **Last released version:** `3.4.0` (tag `v3.4.0`) — tag pushed, GitHub Release
+  Latest, **published to npm from this host** (see the 3.4.0 entry +
+  Credentials).
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -23,10 +23,14 @@ the repo beats this file.
 
 ## Credentials
 
-- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`). If it
-  fails with `ENEEDAUTH`, the token is not on this host — publish from the
-  owner's laptop (which holds the token); everything up to and including the
-  tag push still completes here.
+- `npm whoami` must print `zowail` (npm auth via the user's `.npmrc`) — verified
+  on this host at 3.4.0 (exit 0), so **`npm publish` does run here**. An
+  `ENEEDAUTH` almost always means the command ran under an *isolated* `HOME` /
+  `XDG_*` (what the check scripts and test harnesses pin), not that the host
+  lacks a token: re-run `npm whoami` in a plain shell before concluding the
+  token is missing. If it really does fail, publish from the owner's laptop
+  (which holds the token); everything up to and including the tag push still
+  completes here.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
 - No other secrets. `WEBUI_PASSWORD`/engine credentials are runtime-only.
 
@@ -218,9 +222,38 @@ the GitHub Release is the source of truth.
   links are 200; CI `Release` run `39086046174` succeeded → the GitHub Release
   was created with `--generate-notes` and its auto body was then replaced with a
   user-facing "What's New" (`gh release edit v3.4.0 --notes-file …`).
-  **`npm publish` is NOT run from this host** — `npm whoami` → `ENEEDAUTH` and
-  there is no token in `~/.npmrc`/env — so it runs from the owner's laptop; the
-  registry therefore still reports `dist-tags.latest = 3.3.0`.
+  `npm publish` **was run from this host** (2026-10-18): `npm whoami` → `zowail`,
+  exit 0, and `prepublishOnly` re-ran typecheck + `gen:skill` + build clean. The
+  earlier `ENEEDAUTH` reading in this entry came from an isolated `HOME`/`XDG`
+  shell, not from a missing token — see Credentials.
+  Evidence: publish exited 0 ("being processed"); the registry lagged **~8 min**
+  (version doc 404 → 200 at 04:39Z, `dist-tags.latest` `3.3.0` → `3.4.0`); then
+  the packument matched the local pack exactly — `fileCount` **295**,
+  size **5,156,802 B**, shasum **`2720725dc215073a19a4a9b5b8dd417970b02d62`**,
+  integrity `sha512-uV5gkMie0MkAqzcFuHbUqRreu2jMbu/VI/KFCz2IQwnMz5BvUflZ47krIlyjHcH46DqR9pmTeTrZ4MutyyfmLA==`.
+  The tarball downloaded at that size/sha1 (after one `{"error":"Not found"}`
+  CDN blip — retry, do not call it missing) and `dist/` (261 files) + `server/`,
+  `skills/`, `scripts/testkit` are **byte-identical** to the repo at the tag;
+  no `src/`. GitHub Release `v3.4.0` is **Latest** with all five binaries +
+  `SHA256SUMS.txt` and a user-facing body (no "Full Changelog").
+  Prod-shaped smoke from the *extracted tarball* (fresh `bun install
+  --production`, then an isolated `HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`,
+  `WEBUI_NO_SETUP=1`, a deliberately dead `WEBUI_ENGINE_URL`): bound `:4123`,
+  `/login` 200, `/api/webui/status` 401 (auth gate live), skills auto-synced
+  into the isolated config, engine-unreachable logged and tolerated.
+- **Gotchas hit at 3.4.0 (worth remembering):**
+  - **A stale `node_modules` breaks the build.** The pre-3.4.0 tree had none of
+    the R1/R2 deps, so `bun run build` died with `[vite]: Rolldown failed to
+    resolve import "shiki/core"`. Run `bun install --frozen-lockfile` after any
+    pull that changes `package.json` *before* trusting a gate result.
+  - **`npm pack --dry-run` reflects an *unbuilt* `dist/`.** `npm pack` runs
+    `prepack`/`prepare`, not `prepublishOnly`, so without a prior build it
+    reported **51 files / 2.1 MB**; after `bun run build` (or via `npm publish`,
+    whose `prepublishOnly` builds) it is the real **295 files / 5.2 MB**. Never
+    publish off a dry-run count taken before a build.
+  - **A fresh checkout can be behind even when the handoff says otherwise.**
+    This one sat at `1e3bb4b` (`v3.3.0-2`) until `git pull --ff-only`; always
+    confirm with `git rev-parse HEAD origin/master` + `git describe --tags`.
 - **⚠ Outstanding — hub-side, not this repo:** `GET
   https://telemetry.shortformfunnels.com/v1/versions?product=opencode-webui`
   still answers **`repo: AbdelftahZowail/Quickly`** (a `&repo=` param is
@@ -233,6 +266,17 @@ the GitHub Release is the source of truth.
   in 3.4.0) having `server/notices.ts` discard a feed whose top-level `repo` is
   not this repo, so a misconfigured hub yields *nothing* rather than another
   product's notes.
+  Re-confirmed live on 2026-10-18: the response is
+  `{"source":"github","repo":"AbdelftahZowail/Quickly","versions":[… 2.5.0 …]}`.
+  The top-level `repo` is **already in the documented shape** but ignored by
+  `sanitizeVersions`, so the guard needs **no hub change and no new field** — the
+  expected value can come from `package.json` `repository`. Measured caveats: the
+  hub is slow/flaky from this host (one read ~1 s, later reads hung past 45–60 s)
+  and `/v1/announcements?product=opencode-webui` never answered, so a copy can be
+  `unavailable: true` *while still rendering a foreign product's notes*. Because
+  Quickly's rows top out at 2.5.0 (< 3.4.0), the "update available" card likely
+  will not fire — the visible damage is **Settings › About → "What's new"** (and
+  the announcements surface once it answers).
 
 ### 3.3.0 — 2026-10-07
 - **Type:** minor (features + fixes; no extension-contract break — no
