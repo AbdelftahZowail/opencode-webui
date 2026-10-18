@@ -72,7 +72,7 @@ export function SessionTabsRail({
       data-oc-orientation="vertical"
       role="tablist"
       aria-orientation="vertical"
-      className="flex w-full min-w-0 flex-col gap-0.5 border-r border-[var(--border-base)] p-1"
+      className="flex w-full min-w-0 flex-col gap-0.5 border-r border-[var(--border-weak-base)] p-1"
     >
       {tabs.map((tab) => (
         <div
@@ -118,12 +118,12 @@ export function SessionTabsRail({
             dragFrom.current = null;
             setDropIndex(null);
           }}
-          className={`group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs transition-colors ${
+          className={`group relative flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition-colors ${
             isCurrent(tab.sessionID)
-              ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
-              : "text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+              ? "bg-[var(--surface-base-hover)] text-[var(--text-strong)]"
+              : "text-[var(--text-weaker)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
           } ${dropIndex === tab.index ? "ring-1 ring-[var(--border-selected)]" : ""} ${
-            tab.indicators.attention ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)]" : ""
+            tab.indicators.attention ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_40%,transparent)]" : ""
           }`}
         >
           <span className="w-3 shrink-0 text-center font-mono text-[10px] text-[var(--text-weaker)]" data-oc-tab-number>

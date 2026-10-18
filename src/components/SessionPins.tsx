@@ -66,9 +66,11 @@ export function SessionPins({
   onToggleTabs,
   onPinCurrent,
 }: SessionPinsProps) {
-  // When tabs are on and nothing is pinned, there is nothing to show — the
-  // rail is additive, not a permanent header.
-  if (tabsEnabled && pins.length === 0) return null;
+  // Nothing pinned → render NOTHING at all: no "Pinned · quick switch" header
+  // and no "pin one" copy. The rail is additive, not a permanent chrome. When
+  // tabs are off with no pins, Settings › Appearance is the way back (the
+  // tab→pins switch shows a one-time pointer to it — see App).
+  if (pins.length === 0) return null;
 
   const isCurrent = (sessionID: string) => sessionID === selected;
 
@@ -107,51 +109,45 @@ export function SessionPins({
         </button>
       </div>
 
-      {pins.length === 0 ? (
-        <p className="px-0.5 py-1 text-[11px] text-[var(--text-weaker)]">
-          No pinned sessions — pin one to reach it by number.
-        </p>
-      ) : (
-        pins.map((pin) => (
-          <button
-            key={pin.sessionID}
-            type="button"
-            data-oc-pin
-            data-oc-pin-slot={pin.slot}
-            data-oc-pin-id={pin.sessionID}
-            data-oc-pin-status={pin.status}
-            title={`${pin.slot}. ${pin.title}`}
-            onClick={() => onSelectSlot(pin.slot)}
-            className={`group flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs transition-colors ${
-              isCurrent(pin.sessionID)
-                ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
-                : "text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
-            } ${
-              pin.indicators.attention
-                ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)]"
-                : ""
-            }`}
+      {pins.map((pin) => (
+        <button
+          key={pin.sessionID}
+          type="button"
+          data-oc-pin
+          data-oc-pin-slot={pin.slot}
+          data-oc-pin-id={pin.sessionID}
+          data-oc-pin-status={pin.status}
+          title={`${pin.slot}. ${pin.title}`}
+          onClick={() => onSelectSlot(pin.slot)}
+          className={`group flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs transition-colors ${
+            isCurrent(pin.sessionID)
+              ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
+              : "text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+          } ${
+            pin.indicators.attention
+              ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)]"
+              : ""
+          }`}
+        >
+          <span className="w-3 shrink-0 text-center font-mono text-[10px] text-[var(--text-weaker)]" data-oc-pin-number>
+            {pin.slot}
+          </span>
+          <span className="min-w-0 flex-1 truncate">{pin.title}</span>
+          <PinIndicators pin={pin} />
+          <span
+            role="button"
+            aria-label={`Unpin ${pin.title}`}
+            title="Unpin"
+            onClick={(e) => {
+              e.stopPropagation();
+              onUnpin(pin.sessionID);
+            }}
+            className="invisible shrink-0 cursor-pointer rounded-sm p-0.5 text-[var(--text-weaker)] transition-colors hover:text-[var(--text-strong)] group-hover:visible"
           >
-            <span className="w-3 shrink-0 text-center font-mono text-[10px] text-[var(--text-weaker)]" data-oc-pin-number>
-              {pin.slot}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{pin.title}</span>
-            <PinIndicators pin={pin} />
-            <span
-              role="button"
-              aria-label={`Unpin ${pin.title}`}
-              title="Unpin"
-              onClick={(e) => {
-                e.stopPropagation();
-                onUnpin(pin.sessionID);
-              }}
-              className="invisible shrink-0 cursor-pointer rounded-sm p-0.5 text-[var(--text-weaker)] transition-colors hover:text-[var(--text-strong)] group-hover:visible"
-            >
-              <PinOff className="size-3" />
-            </span>
-          </button>
-        ))
-      )}
+            <PinOff className="size-3" />
+          </span>
+        </button>
+      ))}
     </div>
   );
 }

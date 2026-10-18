@@ -20,7 +20,6 @@ import {
   EXECUTE_COLLAPSE_LINES,
   extractShellRef,
   getShellOutput,
-  shouldCollapseShell,
   subscribeShellOutput,
   type ShellOutputState,
 } from "../lib/toolOutput";
@@ -250,21 +249,26 @@ function ToolDiagnostics({ diagnostics }: { diagnostics: ToolDiagnostic[] }) {
 }
 
 /**
- * Shared background-shell output hook: the registry state lives in
- * `lib/toolOutput` and the scheduler owns the polling; this only re-renders on
- * change and releases the poller when the shell stops running / unmounts.
+ * Shared shell output hook: the registry state lives in `lib/toolOutput` and
+ * the scheduler owns the polling; this only re-renders on change and releases
+ * the poller when the shell stops running / unmounts. `location` is the
+ * session's directory — the shell store is resolved per location.
  */
-function useShellOutput(id: string | undefined, running: boolean): ShellOutputState | undefined {
+function useShellOutput(
+  id: string | undefined,
+  running: boolean,
+  location?: string,
+): ShellOutputState | undefined {
   const [, force] = useState(0);
   useEffect(() => {
     if (!id || !running) return;
-    const release = acquireShellOutput(id);
+    const release = acquireShellOutput(id, location);
     const unsubscribe = subscribeShellOutput(id, () => force((v) => v + 1));
     return () => {
       unsubscribe();
       release();
     };
-  }, [id, running]);
+  }, [id, running, location]);
   return id ? getShellOutput(id) : undefined;
 }
 
@@ -713,64 +717,144 @@ function WriteTool(props: ToolProps) {
   );
 }
 
+/**
+ * Shell: ONE frame for every state — foreground running, backgrounded, and
+ * finished. The header renders the command after a `$` with an in-flight
+ * spinner, the Background badge, and a non-zero exit code; the body is
+ * collapsed by default in EVERY state (the card reads as a single
+ * `$ <command>` line, like the old one-line row), and expanding it reveals the
+ * full command plus the output.
+ *
+ * Live output: the engine's SSE stream does NOT carry tool output, but every
+ * shell it runs — foreground included — is registered in the shell store, and
+ * `session.tool.progress` hands the tool call its `shellID` the moment the
+ * shell starts. So `GET /api/shell/{id}/output` is polled (byte cursor,
+ * through the shared scheduler) for ANY shell with an id while the call is in
+ * flight; the terminal `session.tool.success` (state.content) supersedes the
+ * accumulated buffer once the call lands. A failed run may carry partial
+ * content, shown under the error.
+ */
 function ShellTool(props: ToolProps) {
   const command = str(props.input.command);
   const exit = props.meta.exit;
   const shellRef = extractShellRef(props.input, props.meta);
   const inFlight = props.state.status === "running" || props.state.status === "streaming";
   const background = shellRef.background;
-  // Background shells: poll their output through the shared scheduler while
-  // the call is in flight, then freeze the accumulated buffer.
-  const shellState = useShellOutput(background && inFlight ? shellRef.id : undefined, background && inFlight);
+  // The shell store is per-location: query it with THIS session's directory
+  // (never the proxy's cwd) or a shell outside it answers ShellNotFoundError.
+  const location = useStore(
+    (s) => s.sessions.find((x) => x.id === s.currentSessionID)?.location?.directory,
+  );
+  // Poll the shell store for live output while the call runs. The engine emits
+  // the `shellID` from `session.tool.progress` for EVERY shell it runs, so a
+  // foreground call is pollable too — not just a backgrounded one. The final
+  // `state.content` supersedes the buffer once the call lands.
+  const shellState = useShellOutput(inFlight ? shellRef.id : undefined, inFlight, location);
   const liveOutput = shellState?.output;
   const output = liveOutput && liveOutput.length > 0 ? liveOutput : props.output;
-  const backgroundBadge = background ? <BackgroundBadge /> : null;
-
-  if (props.state.status === "completed" || background) {
-    return (
-      <BlockTool
-        title={
-          <>
-            <span className="font-mono">$</span>
-            <span className="min-w-0 flex-1 truncate font-mono text-[var(--text-base)]">{command}</span>
-            {inFlight && <Spinner className="size-3 shrink-0" />}
-            {backgroundBadge}
-            {typeof exit === "number" && exit !== 0 && (
-              <span className="ml-auto shrink-0 font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
-                exit {exit}
-              </span>
-            )}
-          </>
-        }
-        collapsible
-        collapsedByDefault={shouldCollapseShell(output)}
-        stateKey={props.stateKey}
-      >
-        {output ? (
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap px-2.5 py-2 font-mono text-xs leading-relaxed text-[var(--text-base)]">
-            {output}
-          </pre>
-        ) : (
-          <p className="px-2.5 py-2 text-xs text-[var(--text-weaker)]">
-            {background && inFlight ? "(running in the background…)" : "(no output)"}
-          </p>
-        )}
-      </BlockTool>
-    );
-  }
+  const error = props.state.status === "error" ? props.state.error : undefined;
+  // While args are still streaming the engine sends raw input text, not a
+  // parsed `command` — fall back to it so the header shows progress instead
+  // of a bare `$`.
+  const commandText = command ?? (props.streamingText ? oneLine(props.streamingText, 200) : undefined);
 
   return (
-    <InlineTool
-      {...props}
-      icon="$"
-      pending="Writing command…"
-      label={
-        <>
-          <span className="font-mono">{command}</span>
-          {backgroundBadge}
-        </>
-      }
+    <ShellCard
+      command={commandText}
+      inFlight={inFlight}
+      background={background}
+      exit={typeof exit === "number" ? exit : undefined}
+      error={error}
+      output={output}
+      stateKey={props.stateKey}
     />
+  );
+}
+
+/**
+ * The shared shell frame — running and finished are visually identical (same
+ * bordered block, same `$ <command>` header). Collapsed to a single line in
+ * every state by default; expanding reveals the full command and the output.
+ * The user's toggle is remembered per tool part and is never auto-changed
+ * when the call settles (running → completed no longer flips the disclosure).
+ */
+function ShellCard({
+  command,
+  inFlight,
+  background,
+  exit,
+  error,
+  output,
+  stateKey,
+}: {
+  command?: string;
+  inFlight: boolean;
+  background: boolean;
+  exit?: number;
+  error?: { type: string; message: string };
+  output?: string;
+  stateKey?: string;
+}) {
+  const [open, setOpen] = useState(() =>
+    stateKey ? toolDisclosureState.get(stateKey) ?? false : false,
+  );
+  // A failed shell reads red.
+  const accent = error ? "text-[color:var(--surface-critical-strong)]" : "text-[var(--text-base)]";
+
+  return (
+    <div className="my-1 overflow-hidden rounded-lg border border-[var(--border-weak-base)] bg-[var(--background-strong)]">
+      <button
+        type="button"
+        onClick={() => {
+          setOpen((prev) => {
+            const next = !prev;
+            if (stateKey) rememberToolDisclosure(stateKey, next);
+            return next;
+          });
+        }}
+        className="flex w-full cursor-pointer items-start gap-1.5 border-b border-[var(--border-weak-base)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-xs text-[var(--text-weak)]"
+      >
+        <ChevronRight
+          className={`mt-0.5 size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        {/* Collapsed = one truncated line; expanded = the whole command. */}
+        <span
+          className={`min-w-0 flex-1 font-mono ${accent} ${
+            open ? "whitespace-pre-wrap break-words" : "truncate"
+          }`}
+        >
+          <span className={`font-mono ${accent}`}>$ </span>
+          {command ?? "…"}
+        </span>
+        {inFlight && <Spinner className="mt-0.5 size-3 shrink-0" />}
+        {background && <BackgroundBadge />}
+        {exit !== undefined && exit !== 0 && (
+          <span className="shrink-0 font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
+            exit {exit}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div>
+          {error && (
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap border-b border-[color-mix(in_oklch,var(--surface-critical-strong)_30%,transparent)] bg-[var(--surface-critical-weak)] px-2.5 py-2 font-mono text-[10px] text-[color:var(--surface-critical-strong)]">
+              {error.type}: {error.message}
+            </pre>
+          )}
+          {output ? (
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap px-2.5 py-2 font-mono text-xs leading-relaxed text-[var(--text-base)]">
+              {output}
+            </pre>
+          ) : (
+            !error && (
+              <p className="px-2.5 py-2 text-xs text-[var(--text-weaker)]">
+                {inFlight ? (background ? "(running in the background…)" : "(running…)") : "(no output)"}
+              </p>
+            )
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

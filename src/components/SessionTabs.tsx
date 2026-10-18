@@ -184,7 +184,7 @@ export function SessionTabs(props: SessionTabsProps) {
       role="tablist"
       aria-orientation="horizontal"
       onKeyDown={onTabKeyDown}
-      className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto border-b border-[var(--border-base)] bg-[var(--background-base)] px-1 pt-1"
+      className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto border-b border-[var(--border-weak-base)] px-1 pt-0.5"
     >
       {tabs.map((tab) => (
         <ContextMenu key={tab.sessionID}>
@@ -233,23 +233,23 @@ export function SessionTabs(props: SessionTabsProps) {
                 dragFrom.current = null;
                 setDropIndex(null);
               }}
-              className={`group relative flex min-w-[7rem] max-w-[16rem] shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md px-2 py-1.5 text-xs transition-colors ${
+              className={`group relative flex min-w-[6.5rem] max-w-[14rem] shrink-0 cursor-pointer items-center gap-1.5 rounded-t px-2 py-1 text-[11px] transition-colors ${
                 isCurrent(tab.sessionID)
-                  ? "bg-[var(--surface-raised-base)] text-[var(--text-strong)]"
-                  : "text-[var(--text-weak)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-strong)]"
+                  ? "bg-[var(--surface-base-hover)] text-[var(--text-strong)]"
+                  : "text-[var(--text-weaker)] hover:bg-[var(--surface-base-hover)] hover:text-[var(--text-weak)]"
               } ${
                 tab.status === "error"
                   ? "text-[var(--surface-critical-strong)]"
                   : ""
               } ${dropIndex === tab.index ? "ring-1 ring-[var(--border-selected)]" : ""} ${
                 tab.indicators.attention
-                  ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_45%,transparent)]"
+                  ? "ring-1 ring-[color-mix(in_oklch,var(--surface-warning-strong)_40%,transparent)]"
                   : ""
               }`}
             >
               <span
                 data-oc-tab-number
-                className="w-4 shrink-0 text-center font-mono text-[10px] text-[var(--text-weaker)]"
+                className="w-4 shrink-0 text-center font-mono text-[9px] text-[var(--text-weaker)]"
               >
                 {tab.number <= 10 ? tab.number : ""}
               </span>
@@ -269,7 +269,7 @@ export function SessionTabs(props: SessionTabsProps) {
                 <X className="size-3" />
               </button>
               {isCurrent(tab.sessionID) && (
-                <span className="pointer-events-none absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-[var(--border-selected)]" />
+                <span className="pointer-events-none absolute inset-x-1.5 bottom-0 h-px rounded-full bg-[color-mix(in_oklch,var(--border-selected)_65%,transparent)]" />
               )}
             </div>
           </ContextMenuTrigger>

@@ -892,12 +892,12 @@ function AssistantView({ message, compact, showCopy, copyText, turnTokens }: { m
             );
           });
         })()}
-        {showCopy && copyText && (
-          <div className="flex justify-start pt-1">
-            <Target id="message.copyButton" text={copyText} variant="assistant" />
+        {((showCopy && copyText) || (turnTokens && turnTokens.length > 0)) && (
+          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            {turnTokens && turnTokens.length > 0 && <Target id="turn.tokens" steps={turnTokens} />}
+            {showCopy && copyText && <Target id="message.copyButton" text={copyText} variant="assistant" />}
           </div>
         )}
-        {turnTokens && turnTokens.length > 0 && <Target id="turn.tokens" steps={turnTokens} />}
       </div>
     </Row>
   );

@@ -98,7 +98,12 @@ export type MessageTypeFilter =
 interface MessageBase {
   id: string;
   metadata?: Record<string, unknown>;
-  time: { created: number; completed?: number };
+  /**
+   * `streamed` (when the step's stream ended) is reported by the engine
+   * (`Session.Message.Assistant.time`) and is what the TUI's `tok/s` is built
+   * from; `completed` lands later, once the step's token usage is known.
+   */
+  time: { created: number; streamed?: number; completed?: number };
 }
 
 export interface UserMessage extends MessageBase {

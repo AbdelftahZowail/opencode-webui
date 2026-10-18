@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Check, Monitor, Moon, RefreshCw, Sun } from "lucide-react";
 import { autoRegister } from "../extensions/registry";
 import { Button } from "../components/ui/button";
+import { Switch } from "../components/ui/switch";
+import { setTabsEnabled, useStore } from "../store";
 import { loadCustomThemes } from "../lib/themeFiles";
 import {
   activeScheme,
@@ -40,6 +42,7 @@ const MODES: { id: ThemeMode; label: string; icon: typeof Moon }[] = [
 
 export function AppearanceSection() {
   const [, setVersion] = useState(0);
+  const tabsEnabled = useStore((s) => s.tabs.enabled);
   const [mode, setMode] = useState<ThemeMode>(getThemeMode());
   const [currentId, setCurrentId] = useState(getTheme().id);
   const [themes, setThemes] = useState<Theme[]>(() => listAllThemes());
@@ -97,7 +100,7 @@ export function AppearanceSection() {
         <div className="flex min-w-0 items-baseline gap-2">
           <h3 className="shrink-0 text-[13px] font-medium text-[var(--text-strong)]">Appearance</h3>
           <span className="truncate text-[11px] text-[var(--text-weaker)]">
-            theme palette + dark/light/system
+            theme palette, mode + session switcher
           </span>
         </div>
       </div>
@@ -141,6 +144,27 @@ export function AppearanceSection() {
                 </button>
               );
             })}
+          </div>
+        </div>
+      </section>
+
+      <section className="space-y-2 rounded-md border border-[var(--border-weak-base)] bg-[var(--surface-raised-base)] p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[13px] text-[var(--text-strong)]">Session switcher</p>
+            <p className="text-[11px] text-[var(--text-weaker)]">
+              {tabsEnabled
+                ? "Tabs — the low-key rail above the conversation"
+                : "Pins mode — pinned sessions are the switcher"}
+            </p>
+          </div>
+          <div data-oc-appearance-session-tabs className="shrink-0">
+            <Switch
+              checked={tabsEnabled}
+              title={tabsEnabled ? "Use pins instead of tabs" : "Use session tabs"}
+              aria-label="Session tabs"
+              onCheckedChange={setTabsEnabled}
+            />
           </div>
         </div>
       </section>

@@ -82,6 +82,9 @@ import { FilePicker, type MentionPick } from "./FilePicker";
 // Side-effect import: registers the `directory.picker` target rendered via
 // <Target> below (autoRegister runs on module load).
 import "./DirectoryPicker";
+// Side-effect import: registers the `composer.usageBar` core default (defined
+// in its own file) rendered via <Target> below.
+import "./ComposerUsageBar";
 import { downloadTranscript, formatTranscript } from "./SessionMenu";
 import { Spinner } from "./ui";
 import { Button } from "@/components/ui/button";
@@ -108,8 +111,6 @@ function loadAgents(): Promise<AgentInfo[]> {
   agentsCache ??= api.agents().catch(() => []);
   return agentsCache;
 }
-
-const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
 /** TUI /copy — transcript markdown to the clipboard. */
 async function copyTranscript(sessionID: string) {
@@ -818,28 +819,11 @@ export function Composer({
     setMentionDismissed(false);
   }, [text]);
 
-  // Context readout, TUI-style: usage of the last assistant message against
-  // the current model's context limit, plus session cost.
-  const lastAssistant = useMemo(() => {
-    const list = messages ?? [];
-    for (let i = list.length - 1; i >= 0; i--) {
-      const m = list[i]!;
-      if (m.type === "assistant") return m;
-    }
-    return undefined;
-  }, [messages]);
-  const usage = lastAssistant?.type === "assistant" ? lastAssistant.tokens : undefined;
-  const tokensTotal = usage ? usage.input + usage.output + usage.reasoning + usage.cache.read + usage.cache.write : undefined;
-  const cost = ((lastAssistant?.type === "assistant" ? lastAssistant.cost : undefined) ?? detail?.cost) ?? 0;
-  const contextLimit = models.find(
-    (m) => m.enabled && m.modelID === currentModel?.id && m.providerID === currentModel?.providerID,
-  )?.limit?.context;
-  const pct = tokensTotal && contextLimit ? Math.round((tokensTotal / contextLimit) * 100) : undefined;
-  const contextParts = [
-    tokensTotal !== undefined ? `${fmtTokens(tokensTotal)} tok` : undefined,
-    pct !== undefined ? `${pct}% ctx` : undefined,
-    cost > 0 ? `$${cost.toFixed(4)}` : undefined,
-  ].filter(Boolean) as string[];
+  // Context occupancy + session usage moved to the `composer.usageBar` render
+  // below (`ComposerUsageBar`): one row with the ACTIVE model, session in /
+  // cached / out / total / cache-hit / cost, and the CURRENT context share (the
+  // last assistant message's total over the model's context window) — so the
+  // composer no longer repeats a second, drifting "N% ctx" readout.
 
   const currentAgent = detail?.agent;
   function cycleAgent(dir: 1 | -1) {
@@ -1662,51 +1646,55 @@ export function Composer({
                   )}
                 </div>
               </FilePicker>
-              <div className={`no-scrollbar mt-1 flex-nowrap items-center gap-1 overflow-x-auto border-t border-[color:var(--border-weak-base)] px-1 pt-1 [&>*]:shrink-0 ${inputFocused ? "hidden sm:flex" : "flex"}`}>
-                <button
-                  type="button"
-                  data-runs-panel-trigger
-                  onClick={() => (runsPanelOpen ? closeRunsPanel() : openRunsPanel())}
-                  title={runsPanelOpen ? "Close subagents & shells (↓)" : "Subagents & shells — opens the runs panel (↓)"}
-                  className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
-                    anyRunning
-                      ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
-                      : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                  }`}
-                >
-                  <ListTree className="size-3" />
-                  {runsLabel}
-                </button>
-                <button
-                  type="button"
-                  data-stash-panel-trigger
-                  onClick={() => (stashOpen ? closeStashPanel() : (refreshStash(), openStashPanel()))}
-                  title={stashOpen ? "Close prompt stash (Esc)" : "Prompt stash — saved prompts (Ctrl+S to stash this one)"}
-                  className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
-                    stashOpen
-                      ? "bg-[color:var(--surface-brand-weak)] text-[color:var(--surface-brand-strong)]"
-                      : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                  }`}
-                >
-                  <Archive className="size-3" />
-                  stash{stashCount > 0 ? ` ${stashCount}` : ""}
-                </button>
-                <button
-                  type="button"
-                  title="Shell mode (! command)"
-                  onClick={() => setShellMode((v) => !v)}
-                  className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors ${
-                    shellMode
-                      ? "bg-[color:var(--surface-brand-weak)] text-[color:var(--surface-brand-strong)]"
-                      : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
-                  }`}
-                >
-                  <Terminal className="size-3.5" />
-                </button>
-                <AgentPicker sessionID={sessionID} openUp align="left" />
-                <ModelPicker sessionID={sessionID} openUp align="left" />
-                <VariantPicker sessionID={sessionID} openUp align="left" />
-                <Target id="composer.contextReadout" parts={contextParts} sessionID={sessionID} />
+              <div className="no-scrollbar mt-1 flex flex-nowrap items-center gap-1 overflow-x-auto border-t border-[color:var(--border-weak-base)] px-1 pt-1 [&>*]:shrink-0">
+                {/* On phones the meta row collapses while a text entry owns
+                    focus (keyboard open); the composer usage bar below stays
+                    visible — it is the live session signal. */}
+                <div className={`flex-nowrap items-center gap-1 [&>*]:shrink-0 ${inputFocused ? "hidden sm:flex" : "flex"}`}>
+                  <button
+                    type="button"
+                    data-runs-panel-trigger
+                    onClick={() => (runsPanelOpen ? closeRunsPanel() : openRunsPanel())}
+                    title={runsPanelOpen ? "Close subagents & shells (↓)" : "Subagents & shells — opens the runs panel (↓)"}
+                    className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                      anyRunning
+                        ? "text-[color:var(--surface-brand-base)] hover:bg-[color:var(--surface-base-hover)]"
+                        : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                    }`}
+                  >
+                    <ListTree className="size-3" />
+                    {runsLabel}
+                  </button>
+                  <button
+                    type="button"
+                    data-stash-panel-trigger
+                    onClick={() => (stashOpen ? closeStashPanel() : (refreshStash(), openStashPanel()))}
+                    title={stashOpen ? "Close prompt stash (Esc)" : "Prompt stash — saved prompts (Ctrl+S to stash this one)"}
+                    className={`flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 font-mono text-[11px] transition-colors ${
+                      stashOpen
+                        ? "bg-[color:var(--surface-brand-weak)] text-[color:var(--surface-brand-strong)]"
+                        : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                    }`}
+                  >
+                    <Archive className="size-3" />
+                    stash{stashCount > 0 ? ` ${stashCount}` : ""}
+                  </button>
+                  <button
+                    type="button"
+                    title="Shell mode (! command)"
+                    onClick={() => setShellMode((v) => !v)}
+                    className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors ${
+                      shellMode
+                        ? "bg-[color:var(--surface-brand-weak)] text-[color:var(--surface-brand-strong)]"
+                        : "text-[color:var(--text-weaker)] hover:bg-[color:var(--surface-base-hover)] hover:text-[color:var(--text-weak)]"
+                    }`}
+                  >
+                    <Terminal className="size-3.5" />
+                  </button>
+                  <AgentPicker sessionID={sessionID} openUp align="left" />
+                  <ModelPicker sessionID={sessionID} openUp align="left" />
+                  <VariantPicker sessionID={sessionID} openUp align="left" />
+                </div>
               </div>
             </div>
           </PopoverAnchor>
@@ -1738,6 +1726,7 @@ export function Composer({
           {hint}
           {cwd && <p className="hidden truncate font-mono sm:block">{cwd}</p>}
         </div>
+        <Target id="composer.usageBar" messages={messages} model={currentModel} fallbackCost={detail?.cost} />
       </div>
       {dirPickerOpen && (
         <Target
@@ -1761,22 +1750,8 @@ export function Composer({
 // Self-registration (spec §5.3)
 // ---------------------------------------------------------------------------
 
-/** Token usage / context share / session cost readout — its own target. */
-function ContextReadout({ parts }: { parts: string[] }) {
-  if (parts.length === 0) return null;
-  return (
-    <span
-      className="ml-auto font-mono text-[11px] text-[color:var(--text-weaker)]"
-      title="Tokens used · share of model context window · session cost"
-    >
-      {parts.join(" · ")}
-    </span>
-  );
-}
-
 autoRegister({
   composer: (p) => <Composer {...(p as unknown as ComposerProps)} />,
-  "composer.contextReadout": (p) => <ContextReadout parts={p.parts as string[]} />,
   /**
    * Extension slot left of the Send button (`composer.sendActions`, null by
    * default). Wrap props: `{ sessionID: string, appendDraft: (text: string)

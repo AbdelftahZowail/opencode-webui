@@ -3,7 +3,6 @@ import {
   BarChart3,
   Bug,
   ChevronDown,
-  FolderOpen,
   FolderTree,
   Library,
   List,
@@ -26,7 +25,6 @@ import {
   loadMoreSessions,
   newSessionHref,
   openDebug,
-  openOpenPicker,
   openPair,
   openSessionList,
   prefetchSession,
@@ -448,9 +446,6 @@ export function Sidebar() {
             >
               <List />
             </Button>
-            <Button variant="ghost" size="icon" onClick={openOpenPicker} title="Open a session or project">
-              <FolderOpen />
-            </Button>
             <Button variant="ghost" size="icon" onClick={toggleSidebar} title="Collapse sidebar">
               <PanelLeftClose />
             </Button>
@@ -464,8 +459,9 @@ export function Sidebar() {
         <CollapsedSidebar groups={groups} current={current} activeIDs={activeIDs} onExpand={toggleSidebar} />
       ) : (
         <>
-          {/* R3 pins / quick slots — the top-of-body switcher (renders itself
-              as null while tabs are on and nothing is pinned). */}
+          {/* R3 pins / quick slots — the top-of-body switcher (renders nothing
+              when there are no pins; tabs-vs-pins is a Settings › Appearance
+              toggle and the in-rail switch). */}
           <Target
             id="sidebar.sessionPins"
             pins={pins}

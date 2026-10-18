@@ -633,7 +633,10 @@ function TranscriptScroller({
   }, [sessionID]);
 
   const atTail = win.end >= total;
-  const showJump = !atTail || !scrollable.end;
+  // `scrollable.end` is the scroller's own "there is content below the fold"
+  // signal (see its `data-scrollable="end"`). Show the control when that is
+  // true (scrolled up), or when the mounted window stops short of the tail.
+  const showJump = scrollable.end || !atTail;
   const jumpToLatest = () => {
     setWin(total > WINDOW_THRESHOLD ? tailWindow(total) : { start: 0, end: total });
     scrollToEnd({ behavior: "smooth" });
@@ -666,7 +669,13 @@ function TranscriptScroller({
           <button
             type="button"
             data-oc-jump-latest
-            onClick={jumpToLatest}
+            onClick={(e) => {
+              // Blur like the library's own scroll button: a focused control
+              // swallows keyboard scroll and re-fires on Enter/Space, which read
+              // as "I click once and then can't scroll up".
+              e.currentTarget.blur();
+              jumpToLatest();
+            }}
             className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 cursor-pointer rounded-full border border-[var(--border-base)] bg-[var(--background-base)] px-3 py-1 text-xs text-[var(--text-weak)] shadow-md transition-colors hover:text-[var(--text-strong)]"
           >
             Jump to latest ↓

@@ -149,14 +149,15 @@ export function subscribeShellOutput(id: string, listener: () => void): () => vo
   };
 }
 
-async function pollShellOutput(id: string): Promise<void> {
+async function pollShellOutput(id: string, location?: string): Promise<void> {
   const prev = shellStates.get(id);
   if (prev?.status === "error") return;
   try {
-    const res = await api.shellOutput(id, {
-      cursor: shellCursors.get(id),
-      limit: SHELL_OUTPUT_LIMIT,
-    });
+    const res = await api.shellOutput(
+      id,
+      { cursor: shellCursors.get(id), limit: SHELL_OUTPUT_LIMIT },
+      location ? { directory: location } : undefined,
+    );
     const data = res.data;
     const fromScratch = data.truncated || shellCursors.get(id) === undefined;
     const combined = (fromScratch ? "" : prev?.output ?? "") + data.output;
@@ -182,23 +183,34 @@ async function pollShellOutput(id: string): Promise<void> {
 }
 
 /**
- * Reference-counted polling for one background shell. The first caller starts
- * the shared scheduler poller; every caller gets a release fn, and the poller
- * stops when the last one releases (component unmount / shell no longer
- * running). The accumulated state is kept so a late render still shows the
- * last read.
+ * Reference-counted polling for one shell. The first caller starts the shared
+ * scheduler poller; every caller gets a release fn, and the poller stops when
+ * the last one releases (component unmount / shell no longer running). The
+ * accumulated state is kept so a late render still shows the last read.
+ *
+ * `location` is the shell STORE's directory (the session's working dir) — the
+ * engine resolves `GET /api/shell/{id}/output` per location and answers
+ * `ShellNotFoundError` outside it, so it must be the session's own directory,
+ * not the proxy's cwd.
  */
-export function acquireShellOutput(id: string): () => void {
+export function acquireShellOutput(id: string, location?: string): () => void {
   shellRefs.set(id, (shellRefs.get(id) ?? 0) + 1);
   if (!shellPollers.has(id)) {
-    if (!shellStates.has(id)) {
+    const prior = shellStates.get(id);
+    if (!prior) {
       shellStates.set(id, { output: "", cursor: 0, truncated: false, status: "loading" });
+    } else if (prior.status === "error") {
+      // A fresh acquire must clear a previous latch. A poll that 404'd before
+      // the session location resolved would otherwise stay "error" forever and
+      // lose live output for the rest of the call — the `location` dep re-runs
+      // the effect and acquires a new poller, which must be able to retry.
+      shellStates.set(id, { ...prior, status: "loading", error: undefined });
     }
     const stop = registerPoller({
       name: `shell-output:${id}`,
       minInterval: 1_500,
       intervals: { idle: 5_000 },
-      run: () => pollShellOutput(id),
+      run: () => pollShellOutput(id, location),
     });
     shellPollers.set(id, stop);
   }
@@ -247,6 +259,7 @@ export function extractShellRef(
   const background =
     meta.background === true ||
     meta.run_in_background === true ||
+    input.background === true ||
     input.run_in_background === true ||
     input.runInBackground === true;
   return { id, background };

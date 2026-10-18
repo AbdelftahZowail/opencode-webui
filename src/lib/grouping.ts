@@ -190,6 +190,68 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
+/**
+ * The engine's per-turn tokens-per-second — the figure behind the TUI's
+ * `session.tps` footer (` · 78.1 tok/s`). Taken verbatim from the shipped
+ * engine bundle (`function Fa`, with the turn span from `function ja`):
+ *
+ *     Σ (output + reasoning) over the turn's assistant steps
+ *     ───────────────────────────────────────────────────────
+ *     Σ (time.streamed − time.created) over those same steps, in seconds
+ *
+ * The TURN is the newest assistant run: find the last assistant message, then
+ * walk back to the boundary `ja` uses — the `idle` marker that closed the
+ * previous run (a run appends one when it ends), or, in a session with no
+ * `idle` markers, the nearest `user`/`synthetic` prompt. The list rarely ends
+ * on an assistant message itself (`idle` closes a finished run; a fresh `user`
+ * prompt opens the next), so the boundary walk is what makes the value appear.
+ *
+ * The engine reports a step's token count only once the step SETTLES
+ * (`time.completed`; mid-stream a step carries `streamed` but no `tokens`), so
+ * a still-generating step is skipped: the value is the whole-turn ratio over
+ * the steps reported so far, and it matches the TUI's figure exactly once every
+ * step of the turn has settled. The meter is therefore re-derived on every
+ * store refresh — it moves as steps settle, not once per streamed chunk.
+ * Returns undefined until one step has settled with tokens.
+ */
+export function turnTps(messages: MessageInfo[]): number | undefined {
+  // Newest assistant message — the run whose footer carries the TUI figure.
+  let tail = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.type === "assistant") {
+      tail = i;
+      break;
+    }
+  }
+  if (tail < 0) return undefined;
+
+  // The turn boundary, mirroring the engine's `ja`.
+  const legacy = !messages.some((m) => m.type === "idle");
+  let boundary = -1;
+  for (let i = tail; i >= 0; i--) {
+    const type = messages[i]!.type;
+    if (type === "idle") break;
+    if (type !== "user" && type !== "synthetic") continue;
+    boundary = i;
+    if (legacy) break;
+  }
+
+  let tokens = 0;
+  let spanMs = 0;
+  let settled = 0;
+  for (let i = boundary + 1; i <= tail; i++) {
+    const m = messages[i]!;
+    if (m.type !== "assistant") continue;
+    const streamed = m.time.streamed;
+    if (streamed === undefined || !m.tokens) continue;
+    spanMs += Math.max(0, streamed - m.time.created);
+    tokens += m.tokens.output + m.tokens.reasoning;
+    settled++;
+  }
+  if (settled === 0 || tokens <= 0 || spanMs <= 0) return undefined;
+  return tokens / (spanMs / 1000);
+}
+
 // ---------------------------------------------------------------------------
 // Copy variants (R9)
 // ---------------------------------------------------------------------------
