@@ -9,11 +9,10 @@ the repo beats this file.
 > skill looks for exactly this path. The dated **Entries** below refer to the
 > docs layout at the time of that release.
 
-- **Last released version:** `3.4.1` (tag `v3.4.1`) — tag pushed, GitHub Release
+- **Last released version:** `3.4.2` (tag `v3.4.2`) — tag pushed, GitHub Release
   Latest, and **published to npm from the owner's shell (`HOME=/home/zowail`,
-  where `npm whoami` → `zowail`)**. See Credentials — the *other* shell on this
-  box (`HOME=/home/ubuntu`, the one the cloud agent sessions run in) has no
-  token and reports `ENEEDAUTH`.
+  where `npm whoami` → `zowail`)** with `WEBUI_TELEMETRY_KEY` sourced from
+  `~/.config/opencode/webui/telemetry.env` (see Credentials + the 3.4.2 entry).
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -38,6 +37,13 @@ the repo beats this file.
   `ENEEDAUTH` — re-run `npm whoami` in a plain shell before concluding anything.
   Everything up to and including the tag push completes in either shell.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
+- **`WEBUI_TELEMETRY_KEY` (3.4.2+)**: the hub's `HUB_WRITE_KEY`, required by
+  `prepublishOnly`. Kept on the owner's box as
+  `~/.config/opencode/webui/telemetry.env` (0600, `WEBUI_TELEMETRY_KEY=…`):
+  `set -a; . ~/.config/opencode/webui/telemetry.env; set +a` before `npm publish`.
+  If it is missing, pull it from the hub container on the VPS (recipe under
+  **Hub operations**) — never print it, never commit it. A *generated* key is
+  useless: the hub rejects anything that is not its own `HUB_WRITE_KEY` (401).
 - **Counter-observation (3.4.1, agent shell):** `npm whoami` → `ENEEDAUTH` with
   `HOME=/home/ubuntu` (not isolated), `npm config get userconfig` →
   `/home/ubuntu/.npmrc`, and that file holds only `min-release-age` /
@@ -212,9 +218,77 @@ the GitHub Release is the source of truth.
   Only the genuine `quickly 2.4.0` docker install remains. The **test** hub
   (`quickly-hub-test`, `127.0.0.1:8599`) still holds its deliberately seeded
   fixture instances — that is a test DB, leave it unless asked.
+- **Live telemetry checks WRITE to the production hub.** Every accepted
+  `check:telemetry:live` run inserts a **new** `instance` row (the script uses a
+  throwaway `XDG_STATE_HOME`, so the id is random), and a probe run from the repo
+  **without** a temp state dir reuses the REAL install id and overwrites that
+  install's row facts. The 3.4.2 verification left **5 phantom rows** —
+  `f23c88f0d07646dfbea31a998aa122bc`, `47a88ea7995b447080db00ec5db1f24d`,
+  `1fbd8cde53ef4ac7a534974994b94b2f`, `69f9360c6edb415086cd3621df48515a`,
+  `a73d2cf1004d43a19caddbfbe80bac44` — all `app_version=3.4.2` with the script's
+  hardcoded fingerprint (`sessions_count=3`, `extensions_count=2`), left for the
+  owner to delete. Use a throwaway id and clean up after yourself.
+- **`opencode-webui update` can fail on a cold bun cache.** The 3.4.1 → 3.4.2
+  update first died with `update failed — could not resolve the latest version`:
+  the inner `Bun.spawnSync([bun, "x", "opencode-webui@latest", "internal:setup"],
+  { timeout: 60_000 })` was killed while resolving ~1194 fresh packages. Warm it
+  (`bun x opencode-webui@latest status`, or any `bun x` run) and re-run — the
+  retry finished in **2.3 s**. Fallback if it still trips: run
+  `bun x opencode-webui@latest internal:setup` yourself, then
+  `opencode-webui restart`.
 - **npm download stats lag ~1–2 days.** `api.npmjs.org` buckets trailed real
   publishes by ≥1 day at 3.4.1 (newest bucket 2026-10-16 for tags pushed
   2026-10-18), so a fresh tag cannot be counted there yet; re-check ~48h later.
+
+## Hub operations (the telemetry / notices / versions backend)
+
+The hub is **not** in this repo and **not** on this box: it runs on the VPS
+(`ssh mini-vps`, also the tailnet host `vps` / `100.89.10.21`), source
+`/home/ubuntu/quickly-hub`, compose project `quickly-hub`.
+
+| Piece | Where |
+| --- | --- |
+| App container | `quickly-hub-hub-1` → `127.0.0.1:8099` (FastAPI: `/v1/telemetry`, `/v1/versions`, `/v1/announcements`, `/health`, `/admin`) |
+| DB | `quickly-hub-db-1` (postgres; db `quickly_hub`, user `postgres`; tables `instance`, `instance_event`, `instance_daily`, `instance_error`, `announcement`) |
+| Test hub | `hub-test` → `127.0.0.1:8599` (separate DB — fixtures, leave it alone) |
+| Edge | `/etc/caddy/Caddyfile`, site block `# BEGIN QUICKLY-HUB` |
+| Product summary | `curl "http://localhost:8099/admin/api/summary?product=opencode-webui"` (from the VPS; publicly behind basic auth at `/admin`) |
+
+**Getting the ingest key (`HUB_WRITE_KEY`) without printing it:**
+
+```sh
+ssh mini-vps "docker inspect quickly-hub-hub-1 --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^HUB_WRITE_KEY='" > /tmp/k && rm -f /tmp/k   # rename the var, keep mode 0600, never echo
+```
+Locally it lives as `WEBUI_TELEMETRY_KEY=…` in
+`~/.config/opencode/webui/telemetry.env` (0600): `set -a; . <file>; set +a`
+before `npm publish`. The hub validates it (`X-Quickly-Key`) and answers
+`401 {"detail":"invalid write key"}` for anything else — so a *generated* key is
+useless; it must be the deployed one.
+
+**⚠ KNOWN GAP — `/v1/announcements` is not routed publicly.** The Caddy site
+block only has `handle` blocks for `/admin`, `/v1/versions*`, `/health*` and
+`/v1/telemetry*`, then falls through to `respond "Not found" 404`. The hub app
+itself serves the route (`curl http://localhost:8099/v1/announcements?product=opencode-webui`
+→ **200**), but `https://telemetry.shortformfunnels.com/v1/announcements?product=opencode-webui`
+→ **404**. Consequence: the in-app **notice card** has no announcements to show
+(the **versions** feed — Update notice / Settings › About → "What's new" — is
+unaffected and works). Fix is one block in that site:
+
+```
+	handle /v1/announcements* {
+		reverse_proxy 127.0.0.1:8099
+	}
+```
+then `caddy reload --config /etc/caddy/Caddyfile` (graceful). Owner's call.
+
+**Hub facts worth knowing:** the hub carries the per-product enums for us already
+(`WEBUI_ACTIVATION_EVENTS = {"setup_completed"}`, `WEBUI_FEATURE_NAMES =
+{"extensions","dom_extensions","proxy_extensions"}`), and `app_version` is only
+**format**-checked (`VERSION_RE`) — not validated against released versions. One
+`POST /v1/telemetry` was rejected `422` during the 3.4.2 verification and never
+reproduced (4 consecutive 202s after, hub container never restarted) — if you see
+it again, capture the response body: the repo's `check:telemetry:live` swallows it.
 
 ## Entries
 
@@ -246,8 +320,29 @@ the GitHub Release is the source of truth.
   `docs/operations.md`, `AGENTS.md` (packaging/CI), `README.md` (its "no
   telemetry" line was no longer true — and the README ships inside the tarball
   that now sends), and this file's publish step + the inert-telemetry gotcha.
-- **Publish:** requires `WEBUI_TELEMETRY_KEY` in the publishing shell (the hub's
-  `HUB_WRITE_KEY`); `prepublishOnly` aborts without it.
+- **Publish (done 2026-10-18):** `WEBUI_TELEMETRY_KEY` was missing from the box,
+  so it was pulled from the hub's own container on the VPS and parked in a local
+  0600 file (`~/.config/opencode/webui/telemetry.env`) — never through the
+  transcript; see **Hub operations** below for the recipe. `prepublishOnly` then
+  baked it (`[gen-telemetry-key] baked the ingest key (64 chars) ->
+  dist/telemetry-key.json`) and `npm publish` exited 0.
+  Evidence: registry lagged ~2 min (`latest` `3.4.1` → `3.4.2`); the packument
+  matched the local pack — `fileCount` **297** (was 296, +`dist/telemetry-key.json`),
+  **5,159,199 B**, shasum **`7f21ac486477d280c6c1e94763db874a317fc084`**. The
+  tarball downloaded at that size/sha1 and contains `dist/telemetry-key.json`
+  (64-char key, mode **0600 in the tarball**), `dist/` + `server/` byte-identical
+  to the repo; no `src/`. **`04`** aside: an *installed* copy lands 0644 — npm/bun
+  extraction does not preserve the mode — inside the 0700 state dir, which is
+  fine because the key is public-by-design inside the tarball anyway.
+- **Instance updated + telemetry PROVEN end-to-end:** `opencode-webui update`
+  → `v3.4.1 → v3.4.2`; `GET /api/webui/config` = 3.4.2; `/api/webui/telemetry`
+  flipped `configured:false, active:false` → **`configured:true, active:true`**;
+  `GET /telemetry-key.json` → **404** (was 200 on 3.4.1). A restart then produced
+  the +45 s first heartbeat: local `seq` 1 → 2 and the hub's `instance` row updated
+  with the install's **real** facts (`sessions_count 50`, `extensions_count 8`,
+  `payloads 2`). The repo's own `check:telemetry:live` accepted the released
+  payload 4 runs in a row (2xx) after one **unexplained, unreproducible 422** —
+  worth re-watching, but the payload the release actually sends is accepted.
 - **Verified:** typecheck 0, build 0, `check:telemetry` **63/0** (with AND without
   a published key file present), extension battery **35/10/17/15 = 77/0**,
   `check:setup` **61/0**, `check:notices` **47/0**, a real `npm pack` extracted to
