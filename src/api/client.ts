@@ -149,6 +149,22 @@ function vcsQuery(
   return params.toString();
 }
 
+/**
+ * The owning project id for a location query (the ambient project when the
+ * location is omitted). The engine keys every worktree route off the PROJECT,
+ * not the location, so the worktree calls resolve it here first. Never throws:
+ * an unresolvable location (a non-project directory, an unreachable engine)
+ * yields `undefined`, and the caller reports that no project could be resolved.
+ */
+async function projectIDFor(query: string): Promise<string | undefined> {
+  try {
+    const loc = await request<LocationInfo>(`/api/location?${query}`);
+    return loc.project?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Best human-readable error for a failed response (engine JSON or plain). */
 async function responseError(res: Response): Promise<string> {
   let message = `${res.status} ${res.statusText}`;
@@ -459,10 +475,11 @@ export interface PluginCheckResult {
 
 // ---- worktrees ----------------------------------------------------------
 //
-// Location-scoped (NOT project-scoped — the old `{projectID}` routes were
-// removed upstream). A worktree is a managed parallel checkout: `list`
-// discovers via the location's registered strategy, `create` runs the
-// project's setup script, `remove` uses the strategy recorded at create time.
+// Project-scoped: the engine keys every worktree route off the owning
+// `projectID`, which `src/api/client.ts`'s worktree calls resolve from the
+// location. A worktree is a managed parallel checkout: `list` returns the
+// project's managed checkouts, `create` runs the project's setup script,
+// `remove` uses the strategy recorded at create time.
 
 export interface WorktreeDirectory {
   directory: string;
@@ -474,8 +491,10 @@ export interface WorktreeInfo {
 }
 
 /**
- * `Worktree.CreateInput` — all fields optional; the engine fills from the
- * location's registered strategy and its directory defaults.
+ * `Worktree.CreateInput` — all fields optional, and the engine fills the rest
+ * from the location's registered strategy and its directory defaults. The
+ * schema's required `projectID` is NOT here: `worktreeCreate` fills it from the
+ * session location, so callers never pass it.
  */
 export interface WorktreeCreateInput {
   strategy?: string;
@@ -485,7 +504,11 @@ export interface WorktreeCreateInput {
   name?: string;
 }
 
-/** `Worktree.RemoveInput` — `force` is required by the schema. */
+/**
+ * `Worktree.RemoveInput` — `directory` and `force` are required by the schema.
+ * Its required `projectID` is filled by `worktreeRemove` from the session
+ * location, so callers never pass it.
+ */
 export interface WorktreeRemoveInput {
   directory: string;
   force: boolean;
@@ -1289,30 +1312,50 @@ const apiRaw = {
   ) =>
     patch<unknown>(`/api/project/${projectID}`, body),
 
-  // worktrees — location-scoped managed checkouts (the old project-scoped
-  // /api/worktree/{projectID} routes were removed upstream). NOTE the response
-  // shapes: `Worktree.List` is a BARE array and `Worktree.Info` a BARE object
-  // (unlike most routes, these are not wrapped in `{ data }`).
-  worktreeList: (location?: VcsLocation) =>
-    request<WorktreeDirectory[]>(`/api/worktree?${vcsQuery(location)}`),
-  worktreeCreate: (body: WorktreeCreateInput, location?: VcsLocation) =>
-    request<WorktreeInfo>(`/api/worktree?${vcsQuery(location)}`, {
+  // worktrees — managed parallel checkouts, keyed by the owning PROJECT. The
+  // engine takes `?projectID=` on the list and requires `projectID` in the
+  // create/remove bodies (`Worktree.CreateInput` / `Worktree.RemoveInput`); a
+  // location-scoped call is a `400 Missing key at ["projectID"]`. So each of
+  // these resolves the project from the session location first and sends it.
+  // There is deliberately NO "legacy location-scoped" retry: the engine keys
+  // all four routes off the project (the `{projectID}` path-segment routes it
+  // replaced are gone), so a retry could only re-send a mutation and would mask
+  // the real 400/422 with the fallback's own failure.
+  // NOTE the response shapes: `Worktree.List` is a BARE array and
+  // `Worktree.Info` a BARE object (unlike most routes, not wrapped in `{ data }`).
+  worktreeList: async (location?: VcsLocation) => {
+    const projectID = await projectIDFor(vcsQuery(location));
+    if (!projectID) throw new Error("No project for this location — cannot list worktrees");
+    return request<WorktreeDirectory[]>(
+      `/api/worktree?projectID=${encodeURIComponent(projectID)}`,
+    );
+  },
+  worktreeCreate: async (body: WorktreeCreateInput, location?: VcsLocation) => {
+    const projectID = await projectIDFor(vcsQuery(location));
+    if (!projectID) throw new Error("No project for this location — cannot create a worktree");
+    return request<WorktreeInfo>("/api/worktree", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  worktreeRemove: (body: WorktreeRemoveInput, location?: VcsLocation) =>
-    request<unknown>(`/api/worktree?${vcsQuery(location)}`, {
+      body: JSON.stringify({ ...body, projectID }),
+    });
+  },
+  worktreeRemove: async (body: WorktreeRemoveInput, location?: VcsLocation) => {
+    const projectID = await projectIDFor(vcsQuery(location));
+    if (!projectID) throw new Error("No project for this location — cannot remove a worktree");
+    return request<unknown>("/api/worktree", {
       method: "DELETE",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }),
+      body: JSON.stringify({ ...body, projectID }),
+    });
+  },
   /**
    * Rediscover worktrees and reconcile the shared project inventory (204).
    * The live route requires the owning project's id in the body
    * (`{ projectID }`) — resolve it from the location (the ambient project when
    * no directory is given). Older engines took no body at all, so fall back on
-   * a 400/422.
+   * a 400/422. Unlike the three above, a failed location read is surfaced
+   * rather than silently re-tried location-scoped: a refresh with no project is
+   * a real error.
    */
   worktreeRefresh: async (location?: VcsLocation) => {
     const query = vcsQuery(location);

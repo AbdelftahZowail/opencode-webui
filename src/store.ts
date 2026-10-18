@@ -3635,7 +3635,8 @@ function patchDiff(sessionID: string, patch: Partial<SessionDiffState>) {
   setState({ diffs: { ...state.diffs, [sessionID]: { ...prev, ...patch } } });
 }
 
-/** The directory a session runs in — the location the vcs/worktree routes take. */
+/** The directory a session runs in — what the location-scoped routes take (and
+ * where the worktree calls resolve the owning project from). */
 export function sessionDirectory(sessionID: string | null | undefined): string | null {
   if (!sessionID) return null;
   return (

@@ -53,8 +53,8 @@ export function WorkspacePicker({ sessionID }: { sessionID: string }) {
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
-    // Worktrees are location-scoped — always list them for THIS session's
-    // directory, never the engine's ambient location.
+    // Worktrees are project-scoped, but the project is resolved from THIS
+    // session's directory — never the engine's ambient location.
     void loadWorktrees(dir ?? null);
   }
 

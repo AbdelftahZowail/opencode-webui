@@ -23,9 +23,9 @@ import { Input } from "./ui/input";
  * Worktree panel (P3). Presentational: it receives the worktree slice and
  * emits store actions — it never calls `api.*` (the store owns side effects).
  *
- * Lists the managed worktrees for one location, creates new ones (the engine
- * runs the project's setup script, so this can take minutes) and removes them
- * behind an explicit two-step confirm (`force` skips the safety checks).
+ * Lists the managed worktrees of this session's project, creates new ones (the
+ * engine runs the project's setup script, so this can take minutes) and removes
+ * them behind an explicit two-step confirm (`force` skips the safety checks).
  */
 export interface WorktreePanelProps {
   /** The directory these worktrees belong to (shown in the UI). */
