@@ -10,8 +10,8 @@ the repo beats this file.
 > docs layout at the time of that release.
 
 - **Last released version:** `3.4.1` (tag `v3.4.1`) — tag pushed, GitHub Release
-  Latest; **npm publish runs from this host** (see Credentials + the 3.4.1
-  entry).
+  Latest; `npm publish` **pending the owner's token** (no token is reachable in
+  the agent shell — see Credentials + the 3.4.1 entry).
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -32,6 +32,15 @@ the repo beats this file.
   (which holds the token); everything up to and including the tag push still
   completes here.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
+- **Counter-observation (3.4.1, agent shell):** `npm whoami` → `ENEEDAUTH` even
+  with `HOME=/home/ubuntu` (not isolated), `npm config get userconfig` →
+  `/home/ubuntu/.npmrc`, and that file holds only `min-release-age` /
+  `allow-scripts` — no `_authToken`, no `NPM_TOKEN`, nothing under
+  `~/.config/npm`. So the token is **not ambient on this host**: the 3.4.0
+  publish must have carried one inline (or run in a shell that had it). Before a
+  release that must publish here, confirm `npm whoami` prints `zowail` **in the
+  exact shell that will publish** — an isolated `HOME`/`XDG_*` is one cause, but
+  a plain shell with no `_authToken` is another.
 - No other secrets. `WEBUI_PASSWORD`/engine credentials are runtime-only.
 
 ## Release steps (exact)
@@ -222,7 +231,19 @@ the GitHub Release is the source of truth.
   read-only engine probes: list `?projectID=` 200 / location 400;
   create/remove/refresh accept the `projectID` payload (a bogus id answers
   `ProjectNotFoundError`, never `Missing key`; nothing created or removed).
-- **Publish:** see the follow-up "record the 3.4.1 tag/release evidence" commit.
+- **Publish:** `git push origin master --tags` — first rejected (the laptop's
+  `55c8e53` had landed), so the three local commits were **rebased** onto it and
+  the single conflict in *this* file resolved to keep both the laptop's 3.4.0 npm
+  evidence and the new 3.4.1 entry (no force anywhere). Then `55c8e53..9ec0fa7`,
+  tag `v3.4.1` = `9ec0fa7`; the GitHub tag API is 200; all six `v3.4.1` pinned
+  raw links are 200; CI `Release` succeeded (**two** runs fired — the tag was
+  pushed, deleted and re-pushed during the rebase; both went green and the
+  second's assets are the attached ones) → the GitHub Release is **Latest** with
+  the 5 binaries + `SHA256SUMS.txt`, its auto body replaced by a user-facing
+  "What's New". **`npm publish` did NOT run here:** in the agent shell `npm whoami`
+  still answers `ENEEDAUTH` with `HOME=/home/ubuntu` (**not** isolated) and no
+  `_authToken`/`NPM_TOKEN` anywhere — so 3.4.1 is left for the owner to publish
+  (plant a token in `~/.npmrc` and it can run here too).
 
 ### 3.4.0 — 2026-10-18
 - **Type:** minor (features + fixes). One documented-subset change for wrappers:
