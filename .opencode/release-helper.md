@@ -38,15 +38,13 @@ the repo beats this file.
   `ENEEDAUTH` — re-run `npm whoami` in a plain shell before concluding anything.
   Everything up to and including the tag push completes in either shell.
 - git push over HTTPS must have push access to `origin` (`master` + tags).
-- **Counter-observation (3.4.1, agent shell):** `npm whoami` → `ENEEDAUTH` even
-  with `HOME=/home/ubuntu` (not isolated), `npm config get userconfig` →
+- **Counter-observation (3.4.1, agent shell):** `npm whoami` → `ENEEDAUTH` with
+  `HOME=/home/ubuntu` (not isolated), `npm config get userconfig` →
   `/home/ubuntu/.npmrc`, and that file holds only `min-release-age` /
   `allow-scripts` — no `_authToken`, no `NPM_TOKEN`, nothing under
-  `~/.config/npm`. So the token is **not ambient on this host**: the 3.4.0
-  publish must have carried one inline (or run in a shell that had it). Before a
-  release that must publish here, confirm `npm whoami` prints `zowail` **in the
-  exact shell that will publish** — an isolated `HOME`/`XDG_*` is one cause, but
-  a plain shell with no `_authToken` is another.
+  `~/.config/npm`. `/home/zowail` does **not exist on this box**, so the owner's
+  token is not reachable from the agent shell at all — publishing must happen in
+  the owner's shell, or with a token planted in the agent `~/.npmrc`.
 - No other secrets. `WEBUI_PASSWORD`/engine credentials are runtime-only.
 
 ## Release steps (exact)
@@ -183,6 +181,29 @@ the GitHub Release is the source of truth.
   reintroduce the bug, watch the check go red, restore it.
 - Scratch lives in `/tmp/opencode/`. Do not touch
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
+- **Telemetry ships INERT — a published install sends nothing until a key is
+  baked.** `server/telemetry.ts` has `DEFAULT_TELEMETRY_KEY = ""`, the hub's
+  `/v1/telemetry` requires its `HUB_WRITE_KEY` via `X-Quickly-Key`, and
+  `telemetryActive()` needs `url && key`. So `Settings › About › Usage data`
+  reads `configured:false` and no heartbeat is ever sent from an npm/binary
+  install (the 3.4.0/3.4.1 tarballs included) unless the runner sets
+  `WEBUI_TELEMETRY_KEY` (or a key is baked in). Consequence: **the hub will show
+  zero installs for a release even with real users** — do not read "0
+  opencode-webui instances" as "nobody installed it". The offline checks pass a
+  key explicitly; `scripts/uitest/telemetry-live.ts` does too, which is how the
+  two mock rows below reached the production hub.
+- **Hub hygiene:** the production hub's `instance` table is the product's real
+  telemetry. Two mock instances created by live telemetry testing during the
+  3.4.0 build (`product=quickly` + `app_version=3.4.0` — impossible for Quickly,
+  which is 2.x; one had the all-`b` id `bbbb…`) were identified and **deleted on
+  2026-10-18** (rows dumped to the scratch dir first; `instance_event` /
+  `instance_daily` / `instance_error` checked and had no children for them).
+  Only the genuine `quickly 2.4.0` docker install remains. The **test** hub
+  (`quickly-hub-test`, `127.0.0.1:8599`) still holds its deliberately seeded
+  fixture instances — that is a test DB, leave it unless asked.
+- **npm download stats lag ~1–2 days.** `api.npmjs.org` buckets trailed real
+  publishes by ≥1 day at 3.4.1 (newest bucket 2026-10-16 for tags pushed
+  2026-10-18), so a fresh tag cannot be counted there yet; re-check ~48h later.
 
 ## Entries
 
