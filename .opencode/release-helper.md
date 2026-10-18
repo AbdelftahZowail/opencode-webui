@@ -9,7 +9,9 @@ the repo beats this file.
 > skill looks for exactly this path. The dated **Entries** below refer to the
 > docs layout at the time of that release.
 
-- **Last released version:** `3.3.0` (tag `v3.3.0`)
+- **Last released version:** `3.4.0` (tag `v3.4.0`) — the tag is pushed;
+  **npm publish runs from the owner's laptop**, not this host (see the 3.4.0
+  entry + Credentials).
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -162,6 +164,75 @@ the GitHub Release is the source of truth.
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
 
 ## Entries
+
+### 3.4.0 — 2026-10-18
+- **Type:** minor (features + fixes). One documented-subset change for wrappers:
+  the target `composer.contextReadout` was removed (the composer readout became
+  the `composer.usageBar` session usage bar) — now recorded in the authoring
+  guide's new "Contract changes (migration notes)" table. No other target /
+  collection / service id, `data-oc-*` anchor, registry kind, or hook was
+  renamed or removed.
+- **Shipped:** the R0–R14 TUI-parity program (tabs + pins, timeline, attention,
+  stats, diff completeness, composer, transcript fidelity, tool cards, overlays,
+  settings/themes, forms, extension-API code-block renderers) plus the markdown
+  pipeline (R1/R2: shiki, mermaid, katex) — landed on master in `477f247` and
+  earlier; then the R3–R14 follow-ups (composer usage bar, per-turn `tok/s` and
+  its panel, tool-card R10 completeness, live shell output + an error-latch
+  reset), **product notices** (hub announcements + release notes, per-feed
+  last-good, row/date caps, `GET /api/webui/notices`), **anonymous-usage
+  telemetry** (release-gated, opt-out, `WEBUI_TELEMETRY=false` hard kill, fixed
+  allowlist, `GET/PUT /api/webui/telemetry`), the **testkit** harness (real
+  Chromium + real tmux TUI; `bun run testkit:example`), and generated skills for
+  both ids (`gen:skill` → `skills/{webui,testkit}/SKILL.md`, installed on boot by
+  `skillSync`). Settings gained the About tab (seven tabs now).
+- **Adversarial verification (5 fresh-context verifiers + 1 re-verifier):**
+  secrets/privacy/scope/packaging → **1 BLOCKING**: `scripts/testkit/harness.ts`
+  hard-coded `/home/ubuntu/.hermes/cache/scratch/opencode`, a machine path
+  shipping in the npm tarball; fixed to `join(homedir(), …)` (behaviour
+  identical). Docs coherence → **1 BLOCKING**: AGENTS.md claimed the tarball
+  holds four entries "only" while `files` now also carries `scripts/testkit`;
+  fixed. Client parity → **1 BLOCKING**: removing `composer.contextReadout` had
+  no migration note (a silent contract break by the repo's own rule); fixed with
+  the migration-notes table. All three re-verified RESOLVED with a second
+  fresh-context pass. Non-blocking fixes taken: notices per-feed last-good on a
+  partial failure (a single feed blip used to blank the other for the whole 6h
+  TTL *and* report `unavailable:false`), `MAX_ROWS`/`asDate` caps,
+  `Number.isFinite(row.id)`, the shell-output error latch cleared on a fresh
+  acquire (a poll that 404s before the session location resolves used to lose
+  live output for the rest of the call), and doc-accuracy corrections
+  (AGENTS / README / release-helper / coverage / telemetry / agent-testing).
+  Residual (non-blocking, shipped): a partial read stamps `fetchedAt` with
+  `now` though one feed is stale (no consumer reads it); `skillSync` overwrites
+  a *user* skill that reuses the `webui`/`testkit` id (bounded to those two
+  ids); `ComposerUsageBar` recomputes its aggregates per render (the old inline
+  readout was memoized); `--surface-brand-weak/-strong` are undefined tokens
+  (pre-existing).
+- **Gate evidence:** typecheck ✅, build ✅, extension battery
+  **35/10/17/15 = 77/0**, `check:setup` **51/0**, `check:notices` **46/0**
+  (both-ways proven: **45/1** with the partial-cache fix reverted),
+  `check:telemetry` **52/0**, `npm pack --dry-run` **295 files / 5.2 MB**
+  (dist + server + skills + `scripts/testkit` + `webui-extensions/README.md`;
+  **no `src/`**).
+- **Publish:** `git push origin master --tags` → `477f247..94730a3`, tag
+  `v3.4.0` = `94730a3`; the GitHub tag API is 200; all five `v3.4.0` pinned raw
+  links are 200; CI `Release` run `39086046174` succeeded → the GitHub Release
+  was created with `--generate-notes` and its auto body was then replaced with a
+  user-facing "What's New" (`gh release edit v3.4.0 --notes-file …`).
+  **`npm publish` is NOT run from this host** — `npm whoami` → `ENEEDAUTH` and
+  there is no token in `~/.npmrc`/env — so it runs from the owner's laptop; the
+  registry therefore still reports `dist-tags.latest = 3.3.0`.
+- **⚠ Outstanding — hub-side, not this repo:** `GET
+  https://telemetry.shortformfunnels.com/v1/versions?product=opencode-webui`
+  still answers **`repo: AbdelftahZowail/Quickly`** (a `&repo=` param is
+  ignored; `/v1/announcements` answers "Not found"), i.e. the hub's
+  `HUB_GITHUB_REPOS` has no `opencode-webui` mapping and falls back to the
+  default repo. Until that mapping exists (and the announcements route is
+  served), the in-app Update notice / Settings › About will show **Quickly's**
+  release notes to opencode-webui users. The proxy side is correct — it sends
+  `product=opencode-webui`, caches, and is fail-open. Consider (follow-up, not
+  in 3.4.0) having `server/notices.ts` discard a feed whose top-level `repo` is
+  not this repo, so a misconfigured hub yields *nothing* rather than another
+  product's notes.
 
 ### 3.3.0 — 2026-10-07
 - **Type:** minor (features + fixes; no extension-contract break — no
