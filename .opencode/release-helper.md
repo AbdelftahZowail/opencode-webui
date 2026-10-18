@@ -9,9 +9,9 @@ the repo beats this file.
 > skill looks for exactly this path. The dated **Entries** below refer to the
 > docs layout at the time of that release.
 
-- **Last released version:** `3.4.0` (tag `v3.4.0`) — tag pushed, GitHub Release
-  Latest, **published to npm from this host** (see the 3.4.0 entry +
-  Credentials).
+- **Last released version:** `3.4.1` (tag `v3.4.1`) — tag pushed, GitHub Release
+  Latest; **npm publish runs from this host** (see Credentials + the 3.4.1
+  entry).
 - **Version source of truth:** `package.json` `"version"` (the server reads it
   at boot for `/api/webui/status|config`; `scripts/gen-skill.ts` pins the skill
   to it). Bump that ONE line.
@@ -46,7 +46,9 @@ From the repo root, on `master`, with a clean release scope:
    - the four batteries **sequentially and alone** (see gotchas):
      `bun run scripts/uitest/ext-battery-browser.ts`,
      `…-dom.ts`, `…-proxy.ts`, `…-acceptance.ts` → expect **76/0**
-   - `bun run check:setup` → expect **51/0**
+   - `bun run check:setup` → expect **61/0**
+   - `bun run check:notices` → expect **47/0** and `bun run check:telemetry`
+     → expect **52/0** (both offline; the `:live` variants read the real hub)
    - `npm pack --dry-run` for the packed file list
 3. **Commits** split by workstream (see the `git log` style: conventional
    subject + a body that enumerates the change and the gates). Keep
@@ -168,6 +170,59 @@ the GitHub Release is the source of truth.
   `~/.config/opencode/webui-extensions/` or the skills/commands dirs.
 
 ## Entries
+
+### 3.4.1 — 2026-10-18
+- **Type:** patch (a fix + one small shipped hint + a doc sweep; no
+  extension-contract change — no target / collection / service id, `data-oc-*`
+  anchor, registry kind, hook, or bridge key moved).
+- **Shipped:** (1) **issue #1** — the Worktrees panel 400'd on every call. The
+  engine keys `GET/POST/DELETE /api/worktree` off the owning **project**
+  (`GET /api/worktree?location[directory]=…` → `400 Missing key at
+  ["projectID"]`, `?projectID=<id>` → 200; `Worktree.CreateInput` /
+  `RemoveInput` require `projectID` in the body). `cbe89af` fixed only
+  `worktreeRefresh`. Now `worktreeList` / `Create` / `Remove` resolve the project
+  from `/api/location` (`projectIDFor`) and send it, with **no** location-scoped
+  retry — a retry could only re-send a mutation and mask the real 400/422 with
+  the fallback's own failure (the mirror of `forkSession`'s "only fall back when
+  both shapes give the same message" rule). `coverage.md`'s worktree row **and**
+  its "Removed (2)" bullet now record the project-scoped truth (the "location-
+  scoped / removed upstream" claim WAS the bug). (2) The **`~~~` inline-preview
+  hint ships with the webui**: core renders the tilde fences (`fence.ts` +
+  `PreviewBlock.tsx`), but nothing told the model the syntax existed.
+  `server/previewEnginePlugin.ts` is a hint-only managed engine plugin
+  (`opencode-webui-preview/`: one `{ type: "text" }` part via
+  `ctx.session.hook("context")`, no tools); `setup.ts` installs/uninstalls it
+  beside the lifecycle + shelf plugins (`WEBUI_NO_PLUGIN=1` skips all three) and
+  `pluginPresent` now checks all three dirs. Docs swept: the v1 engine seam
+  (`experimental.chat.system.transform`) is gone from
+  `engine-payload-convention.md` / `extension-system-spec.md` /
+  `webui-extensions/README.md` in favour of v2 `{ id, setup }` +
+  `ctx.session.hook("context")`, and every "two managed plugins" became three.
+- **Adversarial verification (2 fresh-context verifiers + 1 re-verifier):** the
+  first pass found **2 BLOCKING** — (i) the worktree fallback masked real errors
+  and re-sent mutations (fixed: no retry; proven by a stub-fetch probe that a
+  genuine 400 propagates with exactly ONE request, and that an unresolvable
+  location sends no worktree request at all); (ii) `coverage.md`'s "Removed (2)"
+  bullet still called the replacement route location-scoped (fixed). Non-blocking
+  fixes taken: stale "location-scoped" comments (`client.ts` header +
+  `projectIDFor` docstring, `WorkspacePicker`, `WorktreePanel`, `store.ts`),
+  `pluginPresent` widened, `shelfEnginePlugin`'s "skips both" → all three, the
+  last "two plugins" doc spots (README, `docs/README.md`, the generated skill's
+  prose), and a doc overclaim that the preview hint teaches the `live-*` aliases.
+  Residual (non-blocking, shipped): `opencode-webui status` still *names* only
+  the lifecycle dir in its `plugin:` line (the boolean is now correct, the path
+  is not); a user who keeps the personal `rich-render` extension folder gets a
+  near-duplicate hint (the engine still loads its payload).
+- **Gate evidence:** typecheck ✅, build ✅, extension battery
+  **35/10/17/15 = 77/0**, `check:setup` **61/0** (was 51/0: +10 for the new
+  plugin), `check:notices` **47/0**, `check:telemetry` **52/0**,
+  `npm pack --dry-run` **296 files** (was 295; +`server/previewEnginePlugin.ts`,
+  still **no `src/`**), plus a 12-assertion stubbed-fetch probe over the four
+  worktree methods and an 11-assertion probe of the plugin payload. Live
+  read-only engine probes: list `?projectID=` 200 / location 400;
+  create/remove/refresh accept the `projectID` payload (a bogus id answers
+  `ProjectNotFoundError`, never `Missing key`; nothing created or removed).
+- **Publish:** see the follow-up "record the 3.4.1 tag/release evidence" commit.
 
 ### 3.4.0 — 2026-10-18
 - **Type:** minor (features + fixes). One documented-subset change for wrappers:
