@@ -222,12 +222,18 @@ the GitHub Release is the source of truth.
   `check:telemetry:live` run inserts a **new** `instance` row (the script uses a
   throwaway `XDG_STATE_HOME`, so the id is random), and a probe run from the repo
   **without** a temp state dir reuses the REAL install id and overwrites that
-  install's row facts. The 3.4.2 verification left **5 phantom rows** —
-  `f23c88f0d07646dfbea31a998aa122bc`, `47a88ea7995b447080db00ec5db1f24d`,
+  install's row facts. The 3.4.2 verification left **5 phantom rows**
+  (`f23c88f0d07646dfbea31a998aa122bc`, `47a88ea7995b447080db00ec5db1f24d`,
   `1fbd8cde53ef4ac7a534974994b94b2f`, `69f9360c6edb415086cd3621df48515a`,
-  `a73d2cf1004d43a19caddbfbe80bac44` — all `app_version=3.4.2` with the script's
-  hardcoded fingerprint (`sessions_count=3`, `extensions_count=2`), left for the
-  owner to delete. Use a throwaway id and clean up after yourself.
+  `a73d2cf1004d43a19caddbfbe80bac44` — all `app_version=3.4.2`, fingerprint
+  `sessions_count=3` / `extensions_count=2`). **Deleted 2026-10-19** after dumping
+  them to `/tmp/opencode/hub-probe-rows-20261019-185034.json`: `DELETE 16`
+  (`instance_event`) + `DELETE 5` (`instance`), 0 rows in `instance_daily` /
+  `instance_error`, no orphans; the dashboard then read **1 per product**.
+  **Gotcha that cost a pass:** the child tables
+  (`instance_event`/`instance_daily`/`instance_error`) key on `instance_id`
+  **the uuid varchar**, *not* `instance.id` — so a child count joined against the
+  integer pk silently returns 0 and looks orphan-free. Count/delete by uuid.
 - **`opencode-webui update` can fail on a cold bun cache.** The 3.4.1 → 3.4.2
   update first died with `update failed — could not resolve the latest version`:
   the inner `Bun.spawnSync([bun, "x", "opencode-webui@latest", "internal:setup"],
